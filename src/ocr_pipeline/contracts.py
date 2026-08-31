@@ -23,6 +23,7 @@ class TextRegion:
     bounding_box: BoundingBox
     reading_order: int
     provider: str
+    text_provenance: dict[str, Any] | None = None
 
 
 @dataclass

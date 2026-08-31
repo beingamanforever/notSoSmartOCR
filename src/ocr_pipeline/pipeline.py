@@ -7,9 +7,16 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
-from .contracts import DocumentResult, EvidenceText, Failure, PageResult
+from .contracts import (
+    BoundingBox,
+    DocumentResult,
+    EvidenceText,
+    Failure,
+    PageResult,
+    TextRegion,
+)
 from .providers import LocalReader, ReaderError
 
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
@@ -120,6 +127,17 @@ def _read_page(
         )
         failures.append(failure)
         page_failure_ids.append(failure.id)
+        regions = [
+            TextRegion(
+                id=f"p{page_number}-empty-page-1",
+                kind="page_text",
+                text="",
+                confidence=None,
+                bounding_box=BoundingBox(0, 0, width, height),
+                reading_order=1,
+                provider=reader.name,
+            )
+        ]
 
     evidence_ids = [region.id for region in regions]
     return PageResult(
@@ -145,7 +163,9 @@ def _prepare_pages(
     pdftoppm_executable: str,
 ) -> list[Path]:
     if source_kind == "image":
-        return [source]
+        if source.suffix.lower() in {".tif", ".tiff"}:
+            return _prepare_tiff_pages(source, temporary_dir)
+        return [_normalize_exif_orientation(source, temporary_dir)]
     if pdf_dpi <= 0:
         raise PipelineError("render", "invalid_dpi", "PDF DPI must be positive")
 
@@ -186,6 +206,51 @@ def _prepare_pages(
 
     numbered_pages.sort(key=lambda item: item[0])
     return [page_path for _, page_path in numbered_pages]
+
+
+def _prepare_tiff_pages(source: Path, temporary_dir: Path) -> list[Path]:
+    pages: list[Path] = []
+    try:
+        with Image.open(source) as image:
+            for index in range(image.n_frames):
+                image.seek(index)
+                frame = ImageOps.exif_transpose(image.copy())
+                if frame.mode not in {
+                    "1",
+                    "L",
+                    "LA",
+                    "P",
+                    "RGB",
+                    "RGBA",
+                    "I",
+                    "I;16",
+                }:
+                    frame = frame.convert("RGB")
+                output = temporary_dir / f"page-{index + 1}.png"
+                frame.save(output, format="PNG")
+                pages.append(output)
+    except (EOFError, OSError, UnidentifiedImageError, ValueError) as error:
+        raise PipelineError("image", "invalid_image", str(error)) from error
+    if not pages:
+        raise PipelineError("image", "no_pages", "TIFF contained no frames")
+    return pages
+
+
+def _normalize_exif_orientation(source: Path, temporary_dir: Path) -> Path:
+    try:
+        with Image.open(source) as image:
+            orientation = image.getexif().get(274, 1)
+            if orientation not in range(2, 9):
+                return source
+
+            normalized = ImageOps.exif_transpose(image)
+            if normalized.mode not in {"1", "L", "LA", "P", "RGB", "RGBA", "I", "I;16"}:
+                normalized = normalized.convert("RGB")
+            output = temporary_dir / "page-1.png"
+            normalized.save(output, format="PNG")
+            return output
+    except (OSError, UnidentifiedImageError):
+        return source
 
 
 def _source_kind(source: Path) -> str:
