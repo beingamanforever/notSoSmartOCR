@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal, Protocol
 
 
 @dataclass
@@ -12,6 +13,14 @@ class BoundingBox:
     top: int
     right: int
     bottom: int
+
+
+@dataclass
+class TextAlternative:
+    text: str
+    confidence: float | None
+    provider: str
+    text_provenance: dict[str, Any] | None = None
 
 
 @dataclass
@@ -24,6 +33,20 @@ class TextRegion:
     reading_order: int
     provider: str
     text_provenance: dict[str, Any] | None = None
+    resolution: Literal["resolved", "unreadable", "conflicting"] = "resolved"
+    alternatives: list[TextAlternative] = field(default_factory=list)
+    structure: dict[str, Any] | None = None
+
+
+class RegionStage(Protocol):
+    name: str
+
+    def apply(
+        self,
+        image_path: Path,
+        page_number: int,
+        regions: list[TextRegion],
+    ) -> list[TextRegion]: ...
 
 
 @dataclass
@@ -60,7 +83,7 @@ class DocumentResult:
     status: str
     pages: list[PageResult] = field(default_factory=list)
     failures: list[Failure] = field(default_factory=list)
-    schema_version: int = 1
+    schema_version: int = 2
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

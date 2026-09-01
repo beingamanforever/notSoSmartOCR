@@ -5,11 +5,17 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
 from ocr_pipeline.contracts import BoundingBox, TextRegion
 from ocr_pipeline.openrouter import OpenRouterError, OpenRouterResult
-from ocr_pipeline.providers import GLMOCRDirectReader, GLMOCRReader
+from ocr_pipeline.providers import (
+    GLMOCRDirectReader,
+    GLMOCRReader,
+    GraniteDoclingReader,
+    NemotronOCRV2Reader,
+)
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
 from experiments import cascade_benchmark  # noqa: E402
@@ -48,8 +54,18 @@ def test_cascade_cli_compares_local_and_repaired_without_gold_routing(
     calls: list[tuple[str, str | None, int]] = []
     primary_calls = 0
 
-    def fake_repair(image_path, prompt, schema, *, model, provider_slug, max_tokens):
+    def fake_repair(
+        image_path,
+        prompt,
+        schema,
+        *,
+        model,
+        provider_slug,
+        max_tokens,
+        public_benchmark,
+    ):
         nonlocal primary_calls
+        assert public_benchmark is True
         assert "RECOVERED" not in prompt
         assert "normal" not in prompt
         assert "poor" not in prompt
@@ -92,6 +108,8 @@ def test_cascade_cli_compares_local_and_repaired_without_gold_routing(
             "pinned-provider",
             "--verifier-provider",
             "verifier-provider",
+            "--clinocr-role",
+            "eval",
             "--limit-per-subset",
             "1",
             "--max-tokens",
@@ -113,26 +131,28 @@ def test_cascade_cli_compares_local_and_repaired_without_gold_routing(
     assert captured_args.use_doc_unwarping is False
     assert calls == [
         ("meta/muse-glimmer-30b", "pinned-provider", 512),
-        ("qwen/qwen3.8-flash", "verifier-provider", 512),
+        ("google/gemma-4-31b-it", "verifier-provider", 512),
         ("meta/muse-glimmer-30b", "pinned-provider", 512),
     ]
 
     result = json.loads(output.read_text(encoding="utf-8"))
     assert result["repair_model"] == "meta/muse-glimmer-30b"
-    assert result["verifier_model"] == "qwen/qwen3.8-flash"
+    assert result["verifier_model"] == "google/gemma-4-31b-it"
     assert result["run_config"] == {
         "reader": "fake-local",
         "reader_options": {},
         "repair_model": "meta/muse-glimmer-30b",
         "provider_slug": "pinned-provider",
-        "verifier_model": "qwen/qwen3.8-flash",
+        "verifier_model": "google/gemma-4-31b-it",
         "verifier_provider_slug": "verifier-provider",
         "selected_subset": None,
+        "clinocr_role": "eval",
         "limit_per_subset": 1,
         "max_tokens": 512,
         "repair_protocol_version": "different-model-literal-agreement-v2",
     }
     assert result["repair_protocol_version"] == ("different-model-literal-agreement-v2")
+    assert result["clinocr_role"] == "eval"
     assert result["summary"]["local"]["cases"] == 2
     assert result["summary"]["repaired"]["cases"] == 2
     assert result["summary"]["local"]["wer"]["case_mean"] == 0.5
@@ -157,7 +177,7 @@ def test_cascade_cli_compares_local_and_repaired_without_gold_routing(
         "meta/muse-glimmer-30b"
     )
     assert success["repair"]["records"][0]["verifier"]["model"] == (
-        "qwen/qwen3.8-flash"
+        "google/gemma-4-31b-it"
     )
     assert success["wall_latency_ms"] >= success["local_wall_latency_ms"]
 
@@ -217,7 +237,10 @@ def test_subset_selection_never_reaches_repair_policy(tmp_path: Path) -> None:
         dataset,
         FakeReader(),
         "qwen/qwen3.8-flash",
+        provider_slug="primary-provider",
+        verifier_provider_slug="verifier-provider",
         subset="poor",
+        clinocr_role="eval",
         repair_call=repair,
         verifier_call=verifier,
     )
@@ -230,7 +253,53 @@ def test_subset_selection_never_reaches_repair_policy(tmp_path: Path) -> None:
     assert "RECOVERED" not in primary_prompts[0]
 
 
-def test_cascade_benchmark_selects_glm_readers(tmp_path: Path, monkeypatch) -> None:
+def test_cascade_defaults_clinocr_development_to_exemplars(tmp_path: Path) -> None:
+    dataset = _clinocr_dataset(tmp_path)
+
+    def response(model: str):
+        def call(image_path: Path, prompt: str, schema):
+            region_id = schema["properties"]["id"]["enum"][0]
+            return OpenRouterResult(
+                content={"id": region_id, "text": "RECOVERED"},
+                model=model,
+                provider="Pinned Provider",
+                usage={},
+                cost=None,
+                latency_ms=1.0,
+                attempts=1,
+            )
+
+        return call
+
+    result = cascade_benchmark.run_benchmark(
+        "clinocr",
+        dataset,
+        FakeReader(),
+        "meta/muse-glimmer-30b",
+        provider_slug="primary-provider",
+        verifier_provider_slug="verifier-provider",
+        repair_call=response("meta/muse-glimmer-30b"),
+        verifier_call=response("google/gemma-4-31b-it"),
+    )
+
+    assert result["clinocr_role"] == "exemplar"
+    assert result["run_config"]["clinocr_role"] == "exemplar"
+    assert [case["id"] for case in result["cases"]] == [
+        "normal/template_1_sample_1_normal"
+    ]
+
+
+def test_cascade_requires_pinned_providers(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Provider slug is required"):
+        cascade_benchmark.run_benchmark(
+            "clinocr",
+            tmp_path,
+            FakeReader(),
+            "meta/muse-glimmer-30b",
+        )
+
+
+def test_cascade_benchmark_selects_model_readers(tmp_path: Path, monkeypatch) -> None:
     captured_readers = []
 
     def fake_run_benchmark(dataset, root, reader, model, **options):
@@ -238,7 +307,15 @@ def test_cascade_benchmark_selects_glm_readers(tmp_path: Path, monkeypatch) -> N
         return {"reader": reader.name}
 
     monkeypatch.setattr(cascade_benchmark, "run_benchmark", fake_run_benchmark)
-    common = ["clinocr", str(tmp_path), str(tmp_path / "result.json")]
+    common = [
+        "clinocr",
+        str(tmp_path),
+        str(tmp_path / "result.json"),
+        "--provider",
+        "primary-provider",
+        "--verifier-provider",
+        "verifier-provider",
+    ]
 
     assert (
         cascade_benchmark.main(
@@ -262,14 +339,39 @@ def test_cascade_benchmark_selects_glm_readers(tmp_path: Path, monkeypatch) -> N
         )
         == 0
     )
+    assert (
+        cascade_benchmark.main(
+            [*common, "--reader", "granite-docling", "--max-new-tokens", "512"]
+        )
+        == 0
+    )
+    assert (
+        cascade_benchmark.main(
+            [
+                *common,
+                "--reader",
+                "nemotron-ocr-v2",
+                "--nemotron-language",
+                "en",
+                "--nemotron-merge-level",
+                "sentence",
+            ]
+        )
+        == 0
+    )
 
-    sdk_reader, direct_reader = captured_readers
+    sdk_reader, direct_reader, granite_reader, nemotron_reader = captured_readers
     assert isinstance(sdk_reader, GLMOCRReader)
     assert sdk_reader.ocr_api_host == "localhost"
     assert sdk_reader.ocr_api_port == 9000
     assert sdk_reader.layout_device == "cuda:0"
     assert isinstance(direct_reader, GLMOCRDirectReader)
     assert direct_reader.max_new_tokens == 256
+    assert isinstance(granite_reader, GraniteDoclingReader)
+    assert granite_reader.max_new_tokens == 512
+    assert isinstance(nemotron_reader, NemotronOCRV2Reader)
+    assert nemotron_reader.language == "en"
+    assert nemotron_reader.merge_level == "sentence"
 
 
 def test_same_model_verifier_is_rejected_even_with_different_providers(
@@ -291,6 +393,32 @@ def test_same_model_verifier_is_rejected_even_with_different_providers(
         assert str(error) == "Verifier must use a different model"
     else:
         raise AssertionError("same-model agreement must not be called independent")
+
+
+def test_same_developer_or_provider_is_not_called_independent(tmp_path: Path) -> None:
+    dataset = _clinocr_dataset(tmp_path)
+
+    with pytest.raises(ValueError, match="different developer"):
+        cascade_benchmark.run_benchmark(
+            "clinocr",
+            dataset,
+            FakeReader(),
+            "qwen/qwen3.8-flash",
+            provider_slug="primary-provider",
+            verifier_model="qwen/qwen3.7-flash",
+            verifier_provider_slug="other-provider",
+        )
+
+    with pytest.raises(ValueError, match="different provider endpoint"):
+        cascade_benchmark.run_benchmark(
+            "clinocr",
+            dataset,
+            FakeReader(),
+            "meta/muse-glimmer-30b",
+            provider_slug="shared-provider",
+            verifier_model="google/gemma-4-31b-it",
+            verifier_provider_slug="shared-provider",
+        )
 
 
 def _clinocr_dataset(tmp_path: Path) -> Path:

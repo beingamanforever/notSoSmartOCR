@@ -3,3 +3,10 @@ experiments/results/
 **/__pycache__/
 .pytest_cache/
 .ruff_cache/
+.DS_Store
+/.codex/
+/AGENTS.md
+/CLINICAL_OCR_RESEARCH_2_0.md
+/DS_QUESTION_BANK_REVIEW.md
+/HEALTH_SCORE_PAPER_REVIEW.md
+/internal-clinical-ocr-benchmark/

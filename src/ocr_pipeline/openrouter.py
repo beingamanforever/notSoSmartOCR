@@ -15,8 +15,33 @@ from urllib.request import Request, urlopen
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 QWEN_FLASH_MODEL = "qwen/qwen3.8-flash"
+QWEN_37_FLASH_MODEL = "qwen/qwen3.7-flash"
+QWEN_25_VL_72B_MODEL = "qwen/qwen2.5-vl-72b-instruct"
+GLM_53_FLASH_MODEL = "z-ai/glm-5.3-flash"
 MUSE_GLIMMER_MODEL = "meta/muse-glimmer-30b"
-IMAGE_REPAIR_MODELS = frozenset({QWEN_FLASH_MODEL, MUSE_GLIMMER_MODEL})
+GEMMA_MODEL = "google/gemma-4-31b-it"
+GEMINI_37_FLASH_MODEL = "google/gemini-3.7-flash"
+GEMINI_37_FLASH_BATCH_MODEL = "google/gemini-3.7-flash:batch"
+GPT_LUNA_MODEL = "openai/gpt-5.6-luna"
+GPT_SOL_MODEL = "openai/gpt-5.6-sol"
+CLAUDE_OPUS_MODEL = "anthropic/claude-opus-5"
+DEEPSEEK_VISION_MODEL = "deepseek/deepseek-v4-flash-vision-exp"
+IMAGE_REPAIR_MODELS = frozenset({MUSE_GLIMMER_MODEL, GEMMA_MODEL})
+PUBLIC_BENCHMARK_IMAGE_MODELS = frozenset(
+    {
+        *IMAGE_REPAIR_MODELS,
+        QWEN_FLASH_MODEL,
+        QWEN_37_FLASH_MODEL,
+        QWEN_25_VL_72B_MODEL,
+        GLM_53_FLASH_MODEL,
+        DEEPSEEK_VISION_MODEL,
+        GEMINI_37_FLASH_MODEL,
+        GPT_LUNA_MODEL,
+        GPT_SOL_MODEL,
+        CLAUDE_OPUS_MODEL,
+    }
+)
+PUBLIC_BATCH_IMAGE_MODELS = frozenset({GEMINI_37_FLASH_BATCH_MODEL})
 MAX_RETRY_DELAY_SECONDS = 10.0
 DEFAULT_MAX_TOKENS = 2048
 MAX_TOKENS = 16384
@@ -62,17 +87,21 @@ def repair_image(
     prompt: str,
     response_schema: Mapping[str, Any],
     *,
-    model: str = QWEN_FLASH_MODEL,
+    model: str = MUSE_GLIMMER_MODEL,
     schema_name: str = "image_repair",
     max_tokens: int = DEFAULT_MAX_TOKENS,
     provider_slug: str | None = None,
     timeout_seconds: float = 120,
     max_attempts: int = 3,
+    public_benchmark: bool = False,
     transport: Transport | None = None,
     sleeper: Sleeper = time.sleep,
 ) -> OpenRouterResult:
     """Repair OCR from a local image using an approved multimodal model."""
-    if model not in IMAGE_REPAIR_MODELS:
+    approved_models = (
+        PUBLIC_BENCHMARK_IMAGE_MODELS if public_benchmark else IMAGE_REPAIR_MODELS
+    )
+    if model not in approved_models:
         raise OpenRouterError(f"Model {model!r} is not approved for image repair")
 
     image = Path(image_path)
@@ -107,6 +136,7 @@ def repair_image(
         provider_slug,
         timeout_seconds,
         max_attempts,
+        model != DEEPSEEK_VISION_MODEL,
         transport or _default_transport,
         sleeper,
     )
@@ -121,6 +151,7 @@ def _call_openrouter(
     provider_slug: str | None,
     timeout_seconds: float,
     max_attempts: int,
+    strict_schema: bool,
     transport: Transport,
     sleeper: Sleeper,
 ) -> OpenRouterResult:
@@ -156,14 +187,18 @@ def _call_openrouter(
         "temperature": 0,
         "max_tokens": max_tokens,
         "stream": False,
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {
-                "name": schema_name,
-                "strict": True,
-                "schema": dict(response_schema),
-            },
-        },
+        "response_format": (
+            {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_name,
+                    "strict": True,
+                    "schema": dict(response_schema),
+                },
+            }
+            if strict_schema
+            else {"type": "json_object"}
+        ),
         "provider": provider,
     }
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -271,6 +306,14 @@ def _parse_result(
 
     finish_reason = choice.get("finish_reason")
     native_finish_reason = choice.get("native_finish_reason")
+    response_model = response.get("model")
+    if response_model != requested_model:
+        raise OpenRouterError(
+            f"OpenRouter returned model {response_model!r}, expected {requested_model!r}",
+            code="unexpected_model",
+            attempts=attempts,
+            latency_ms=_elapsed_ms(started),
+        )
     if finish_reason != "stop":
         code = "generation_truncated" if finish_reason == "length" else "finish_reason"
         raise OpenRouterError(
@@ -319,7 +362,7 @@ def _parse_result(
 
     return OpenRouterResult(
         content=content,
-        model=str(response.get("model") or requested_model),
+        model=requested_model,
         provider=_selected_provider(response),
         usage=usage,
         cost=float(cost_value) if cost_value is not None else None,

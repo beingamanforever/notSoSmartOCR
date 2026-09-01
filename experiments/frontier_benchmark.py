@@ -10,8 +10,8 @@ from typing import Sequence
 
 from ocr_pipeline.openrouter import (
     DEFAULT_MAX_TOKENS,
-    IMAGE_REPAIR_MODELS,
     MAX_TOKENS,
+    PUBLIC_BENCHMARK_IMAGE_MODELS,
     OpenRouterError,
     repair_image,
 )
@@ -61,10 +61,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("output", type=Path, help="JSON results path")
     parser.add_argument(
         "--model",
-        choices=sorted(IMAGE_REPAIR_MODELS),
-        default="qwen/qwen3.8-flash",
+        choices=sorted(PUBLIC_BENCHMARK_IMAGE_MODELS),
+        default="openai/gpt-5.6-luna",
     )
-    parser.add_argument("--provider", help="Exact OpenRouter provider slug")
+    parser.add_argument(
+        "--provider",
+        required=True,
+        help="Exact OpenRouter provider slug",
+    )
+    parser.add_argument(
+        "--clinocr-role",
+        choices=("exemplar", "eval"),
+        default="exemplar",
+        help="Use exemplars for development; select eval only after freezing",
+    )
     parser.add_argument(
         "--subset",
         action="append",
@@ -89,6 +99,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.root,
             args.model,
             provider_slug=args.provider,
+            clinocr_role=args.clinocr_role,
             selected_subsets=set(args.subset) if args.subset else None,
             limit_per_subset=args.limit_per_subset,
             max_tokens=args.max_tokens,
@@ -109,22 +120,23 @@ def run_benchmark(
     model: str,
     *,
     provider_slug: str | None = None,
+    clinocr_role: str = "exemplar",
     selected_subsets: set[str] | None = None,
     limit_per_subset: int | None = None,
     max_tokens: int = DEFAULT_MAX_TOKENS,
 ) -> dict[str, object]:
-    if model not in IMAGE_REPAIR_MODELS:
+    if model not in PUBLIC_BENCHMARK_IMAGE_MODELS:
         raise ValueError(f"Unsupported frontier model: {model}")
-    if provider_slug is not None and (
-        not provider_slug or provider_slug != provider_slug.strip()
-    ):
+    if provider_slug is None:
+        raise ValueError("Provider slug is required for controlled benchmarks")
+    if not provider_slug or provider_slug != provider_slug.strip():
         raise ValueError("Provider slug must be a non-empty trimmed string")
     if limit_per_subset is not None and limit_per_subset < 1:
         raise ValueError("Limit per subset must be positive")
     if isinstance(max_tokens, bool) or not 1 <= max_tokens <= MAX_TOKENS:
         raise ValueError(f"Max tokens must be between 1 and {MAX_TOKENS}")
 
-    cases = discover_cases(dataset, root)
+    cases = discover_cases(dataset, root, clinocr_role=clinocr_role)
     if selected_subsets:
         available_subsets = {case.subset for case in cases}
         unknown_subsets = selected_subsets - available_subsets
@@ -136,9 +148,11 @@ def run_benchmark(
     if not cases:
         raise ValueError(f"No evaluation cases found in {root}")
 
+    started = time.perf_counter()
     records = [
         _evaluate_case(case, root, model, provider_slug, max_tokens) for case in cases
     ]
+    wall_latency_ms = (time.perf_counter() - started) * 1000
     subsets = {
         subset: _summarize([record for record in records if record["subset"] == subset])
         for subset in sorted({case.subset for case in cases})
@@ -151,6 +165,7 @@ def run_benchmark(
             "reader": "openrouter-direct",
             "requested_model": model,
             "provider_slug": provider_slug,
+            "clinocr_role": clinocr_role if dataset == "clinocr" else None,
             "selected_subsets": (
                 sorted(selected_subsets) if selected_subsets else None
             ),
@@ -160,11 +175,12 @@ def run_benchmark(
         },
         "requested_model": model,
         "provider_slug": provider_slug,
+        "clinocr_role": clinocr_role if dataset == "clinocr" else None,
         "selected_subsets": sorted(selected_subsets) if selected_subsets else None,
         "prompt_version": PROMPT_VERSION,
         "max_tokens": max_tokens,
         "normalization": NORMALIZATION,
-        "summary": _summarize(records),
+        "summary": _summarize(records, wall_latency_ms=wall_latency_ms),
         "subsets": subsets,
         "cases": records,
     }
@@ -186,20 +202,12 @@ def _evaluate_case(
             model=model,
             max_tokens=max_tokens,
             provider_slug=provider_slug,
+            public_benchmark=True,
         )
         structured_prediction = str(result.content["text"])
         prediction = _transcription_text(structured_prediction)
         failures = []
         status = "success"
-        if not prediction.strip():
-            failures = [
-                {
-                    "stage": "provider",
-                    "code": "empty_prediction",
-                    "message": "The provider returned no visible text",
-                }
-            ]
-            status = "failed"
         actual_model = result.model
         provider = result.provider
         usage = result.usage

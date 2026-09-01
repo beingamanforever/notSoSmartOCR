@@ -1,0 +1,1002 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clinical OCR Workbench</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --background: #090b0e;
+      --panel: #11151a;
+      --panel-raised: #171c22;
+      --line: #2a3038;
+      --line-strong: #3a424d;
+      --text: #f3f5f7;
+      --muted: #969faa;
+      --accent: #ff7a3d;
+      --accent-soft: #ff7a3d22;
+      --danger: #ff6675;
+      --success: #65d6a6;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 15% 0%, #301910 0, transparent 30rem),
+        var(--background);
+      color: var(--text);
+    }
+
+    button, input { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, a:focus-visible, input:focus-visible, canvas:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    .shell { max-width: 1500px; margin: 0 auto; padding: 28px; }
+    header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 24px;
+    }
+    .eyebrow {
+      color: var(--accent);
+      font-size: .72rem;
+      font-weight: 750;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+    h1 { margin: 7px 0 3px; font-size: clamp(1.7rem, 3vw, 2.7rem); letter-spacing: -.045em; }
+    .subtitle { margin: 0; color: var(--muted); }
+    .privacy { color: var(--muted); font-size: .82rem; text-align: right; }
+
+    .toolbar, .card {
+      border: 1px solid var(--line);
+      background: color-mix(in srgb, var(--panel) 95%, transparent);
+      box-shadow: 0 18px 50px #0007;
+    }
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      border-radius: 14px;
+      margin-bottom: 18px;
+    }
+    .file-field {
+      display: flex;
+      min-width: 0;
+      align-items: center;
+      flex: 1;
+      gap: 12px;
+      padding: 10px 13px;
+      border: 1px dashed var(--line-strong);
+      border-radius: 10px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .file-field:hover { border-color: var(--accent); background: var(--accent-soft); }
+    .file-field input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+    .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .button {
+      min-height: 42px;
+      padding: 0 16px;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: var(--panel-raised);
+      color: var(--text);
+      cursor: pointer;
+      font-weight: 680;
+    }
+    .button:hover:not(:disabled) { border-color: #697482; transform: translateY(-1px); }
+    .button.primary { border-color: var(--accent); background: var(--accent); color: #1c0c05; }
+    .button:disabled { cursor: not-allowed; opacity: .42; }
+
+    .status-line {
+      display: none;
+      padding: 11px 14px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      margin-bottom: 18px;
+      color: var(--muted);
+    }
+    .status-line.visible { display: block; }
+    .status-line.error { color: #ffd4d8; border-color: #71303a; background: #42182166; }
+
+    .metadata { display: none; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
+    .metadata.visible { display: flex; }
+    .timing-card {
+      margin: -6px 0 18px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+    }
+    .timing-card summary {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 13px;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: .78rem;
+      font-weight: 700;
+    }
+    .timing-card summary::marker { color: var(--accent); }
+    .timing-total { color: var(--text); font-variant-numeric: tabular-nums; }
+    .timing-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 1px;
+      border-top: 1px solid var(--line);
+      background: var(--line);
+    }
+    .timing-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 13px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: .75rem;
+    }
+    .timing-item strong { color: var(--text); font-variant-numeric: tabular-nums; }
+    .chip {
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel);
+      color: var(--muted);
+      font-size: .78rem;
+    }
+    .chip strong { color: var(--text); font-weight: 650; }
+
+    .risk-card {
+      display: grid;
+      grid-template-columns: minmax(210px, .8fr) minmax(0, 1.2fr);
+      gap: 18px;
+      padding: 16px;
+      margin-bottom: 18px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--panel) 95%, transparent);
+      box-shadow: 0 18px 50px #0007;
+    }
+    .risk-summary { min-width: 0; }
+    .risk-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-bottom: 6px; }
+    .risk-heading h2 { margin: 0; font-size: .95rem; }
+    .risk-badge {
+      padding: 4px 8px;
+      border: 1px solid #71303a;
+      border-radius: 999px;
+      background: #42182166;
+      color: #ffd4d8;
+      font-size: .72rem;
+      font-weight: 700;
+    }
+    .risk-badge.clear { border-color: #285b49; background: #163b3066; color: var(--success); }
+    .risk-copy { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.45; }
+    .risk-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+    .risk-metric { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-raised); }
+    .risk-value { display: block; margin-top: 3px; font-size: 1rem; font-weight: 720; }
+    .risk-detail { display: block; margin-top: 2px; color: var(--muted); font-size: .68rem; }
+    .risk-reasons { display: flex; grid-column: 1 / -1; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .risk-reason { padding: 4px 7px; border-radius: 6px; background: #ffffff0a; color: var(--muted); font-size: .72rem; }
+
+    .workspace { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(360px, .88fr); gap: 18px; }
+    .card { min-width: 0; border-radius: 16px; overflow: hidden; }
+    .card-head {
+      min-height: 57px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--line);
+    }
+    .card-title { font-weight: 720; letter-spacing: -.01em; }
+    .page-controls { display: flex; align-items: center; gap: 8px; }
+    .icon-button {
+      width: 34px;
+      height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-raised);
+      color: var(--text);
+      cursor: pointer;
+    }
+    .icon-button:disabled { opacity: .35; cursor: not-allowed; }
+    .page-count { min-width: 74px; color: var(--muted); text-align: center; font-size: .84rem; }
+
+    .categories { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+    .category-label { flex: 0 0 auto; color: var(--muted); font-size: .72rem; font-weight: 650; }
+    .category-list { display: flex; min-width: 0; gap: 6px; overflow-x: auto; padding: 2px; }
+    .category-button {
+      display: inline-flex;
+      flex: 0 0 auto;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel-raised);
+      color: var(--text);
+      cursor: pointer;
+      font-size: .74rem;
+    }
+    .category-button[aria-pressed="false"] { opacity: .48; text-decoration: line-through; }
+    .category-swatch { width: 8px; height: 8px; border-radius: 50%; background: var(--category-color); }
+
+    .preview-wrap {
+      min-height: 520px;
+      max-height: 70vh;
+      overflow: auto;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background-color: #080a0d;
+      background-image: linear-gradient(#ffffff08 1px, transparent 1px),
+        linear-gradient(90deg, #ffffff08 1px, transparent 1px);
+      background-size: 24px 24px;
+    }
+    canvas {
+      display: none;
+      width: auto;
+      height: auto;
+      max-width: 100%;
+      max-height: 64vh;
+      border-radius: 3px;
+      background: white;
+      box-shadow: 0 16px 48px #000b;
+      cursor: crosshair;
+    }
+    canvas.visible { display: block; }
+    .empty-state { max-width: 340px; color: var(--muted); text-align: center; line-height: 1.6; }
+    .empty-state strong { display: block; color: var(--text); font-size: 1.02rem; }
+
+    .inspector { padding: 14px 16px 16px; border-top: 1px solid var(--line); }
+    .inspector-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .datum { min-width: 0; }
+    .label { display: block; color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
+    .value { display: block; margin-top: 3px; overflow-wrap: anywhere; font-size: .86rem; }
+    .region-text { grid-column: 1 / -1; padding-top: 8px; border-top: 1px solid var(--line); }
+    .region-list { display: flex; gap: 6px; overflow: auto; margin-top: 12px; padding-bottom: 2px; }
+    .region-button {
+      flex: 0 0 auto;
+      max-width: 170px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel-raised);
+      color: var(--muted);
+      padding: 6px 9px;
+      cursor: pointer;
+      font-size: .77rem;
+    }
+    .region-button.active { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
+
+    .tabs { display: flex; gap: 5px; overflow-x: auto; padding: 10px 12px 0; border-bottom: 1px solid var(--line); }
+    .tab {
+      padding: 10px 12px;
+      border: 0;
+      border-bottom: 2px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-weight: 650;
+    }
+    .tab[aria-selected="true"] { color: var(--text); border-color: var(--accent); }
+    .tab-panel { display: none; min-height: 560px; max-height: 70vh; overflow: auto; padding: 18px; }
+    .tab-panel.active { display: block; }
+    .rendered-page { margin-bottom: 24px; }
+    .rendered-page h2 { margin: 0 0 9px; font-size: .78rem; letter-spacing: .11em; text-transform: uppercase; color: var(--accent); }
+    .rendered-page p { margin: 0; line-height: 1.75; white-space: pre-wrap; }
+    pre { margin: 0; color: #cbd4dd; font: .78rem/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+    .failure {
+      margin-bottom: 10px;
+      padding: 13px;
+      border: 1px solid #5f2c35;
+      border-radius: 10px;
+      background: #35151b66;
+    }
+    .failure-code { color: var(--danger); font: .78rem ui-monospace, monospace; }
+    .failure-message { margin-top: 6px; line-height: 1.5; }
+    .success-note { color: var(--success); }
+    .downloads { display: flex; flex-wrap: wrap; gap: 8px; }
+    .download {
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text);
+      cursor: pointer;
+      text-decoration: none;
+      font-size: .78rem;
+      font-weight: 650;
+    }
+    .download:disabled { cursor: not-allowed; opacity: .4; }
+    .download[aria-disabled="true"] { opacity: .4; pointer-events: none; }
+
+    @media (max-width: 900px) {
+      .shell { padding: 18px; }
+      header { align-items: flex-start; flex-direction: column; }
+      .privacy { text-align: left; }
+      .risk-card { grid-template-columns: 1fr; }
+      .workspace { grid-template-columns: 1fr; }
+      .preview-wrap { min-height: 420px; }
+      .tab-panel { min-height: 420px; }
+    }
+    @media (max-width: 580px) {
+      .toolbar { align-items: stretch; flex-wrap: wrap; }
+      .file-field { flex-basis: 100%; }
+      .button { flex: 1; }
+      .card-head { align-items: flex-start; flex-direction: column; }
+      .risk-metrics { grid-template-columns: 1fr 1fr; }
+      .categories { align-items: flex-start; flex-direction: column; }
+      .inspector-grid { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div>
+        <div class="eyebrow">Local evidence viewer</div>
+        <h1>Clinical OCR Workbench</h1>
+        <p class="subtitle">Inspect every page, region, and failure without leaving this machine.</p>
+      </div>
+      <div class="privacy">Local processing<br>25 MB maximum</div>
+    </header>
+
+    <form class="toolbar" id="upload-form">
+      <label class="file-field" for="source-file">
+        <input id="source-file" name="file" type="file" accept=".bmp,.jpeg,.jpg,.png,.tif,.tiff,.webp,.pdf">
+        <span aria-hidden="true">＋</span>
+        <span class="file-name" id="file-name">Choose one image, PDF, or TIFF</span>
+      </label>
+      <button class="button primary" id="parse-button" type="submit" disabled>Parse</button>
+      <button class="button" id="clear-button" type="button" disabled>Clear</button>
+    </form>
+
+    <div class="status-line" id="status-line" role="status" aria-live="polite"></div>
+    <div class="metadata" id="metadata" aria-label="Processing metadata"></div>
+    <details class="timing-card" id="timing-card" hidden>
+      <summary><span>Performance breakdown</span><span class="timing-total" id="timing-total"></span></summary>
+      <div class="timing-list" id="timing-list"></div>
+    </details>
+
+    <section class="risk-card" id="risk-card" aria-labelledby="risk-title" hidden>
+      <div class="risk-summary">
+        <div class="risk-heading">
+          <h2 id="risk-title">Evidence risk</h2>
+          <span class="risk-badge" id="risk-badge"></span>
+        </div>
+        <p class="risk-copy" id="risk-copy"></p>
+      </div>
+      <div class="risk-metrics" aria-label="Current page evidence diagnostics">
+        <div class="risk-metric"><span class="label">Mean provider confidence</span><span class="risk-value" id="risk-confidence">-</span><span class="risk-detail" id="risk-confidence-detail"></span></div>
+        <div class="risk-metric"><span class="label">Primary regions</span><span class="risk-value" id="risk-primary">-</span></div>
+        <div class="risk-metric"><span class="label">Unresolved / conflicting</span><span class="risk-value" id="risk-unresolved">-</span></div>
+        <div class="risk-metric"><span class="label">Alternative disagreements</span><span class="risk-value" id="risk-disagreements">-</span></div>
+        <div class="risk-metric"><span class="label">Execution failures</span><span class="risk-value" id="risk-failures">-</span></div>
+        <div class="risk-reasons" id="risk-reasons" aria-label="Review reasons"></div>
+      </div>
+    </section>
+
+    <section class="workspace" aria-label="OCR result workspace">
+      <article class="card">
+        <div class="card-head">
+          <span class="card-title">Page preview</span>
+          <div class="page-controls">
+            <button class="icon-button" id="previous-page" type="button" aria-label="Previous page" disabled>←</button>
+            <span class="page-count" id="page-count">No pages</span>
+            <button class="icon-button" id="next-page" type="button" aria-label="Next page" disabled>→</button>
+          </div>
+        </div>
+        <div class="categories" id="region-categories" hidden>
+          <span class="category-label">Overlay categories</span>
+          <div class="category-list" id="category-list" role="group" aria-label="Filter overlay categories"></div>
+        </div>
+        <div class="preview-wrap">
+          <div class="empty-state" id="preview-empty">
+            <strong>Geometry appears here</strong>
+            Select a document and parse it to inspect pixel-space bounding boxes.
+          </div>
+          <canvas id="page-canvas" tabindex="0" aria-label="OCR page with region overlays"></canvas>
+        </div>
+        <div class="inspector" id="inspector">
+          <div class="inspector-grid">
+            <div class="datum"><span class="label">Kind</span><span class="value" id="region-kind">None selected</span></div>
+            <div class="datum"><span class="label">Confidence</span><span class="value" id="region-confidence">-</span></div>
+            <div class="datum"><span class="label">Provider</span><span class="value" id="region-provider">-</span></div>
+            <div class="datum"><span class="label">Reading order</span><span class="value" id="region-order">-</span></div>
+            <div class="datum"><span class="label">Bounding box</span><span class="value" id="region-box">-</span></div>
+            <div class="datum"><span class="label">Resolution</span><span class="value" id="region-resolution">-</span></div>
+            <div class="datum region-text"><span class="label">Provenance</span><span class="value" id="region-provenance">-</span></div>
+            <div class="datum region-text"><span class="label">Alternatives</span><span class="value" id="region-alternatives">-</span></div>
+            <div class="datum region-text"><span class="label">Structure</span><span class="value" id="region-structure">-</span></div>
+            <div class="datum region-text"><span class="label">Text</span><span class="value" id="region-text">Click an overlay to inspect its evidence.</span></div>
+          </div>
+          <div class="region-list" id="region-list" aria-label="Regions on this page"></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <span class="card-title">Document output</span>
+          <div class="downloads">
+            <button class="download" id="copy-json" type="button" disabled>Copy JSON</button>
+            <a class="download" id="download-json" aria-disabled="true">JSON</a>
+            <a class="download" id="download-markdown" aria-disabled="true">Markdown</a>
+          </div>
+        </div>
+        <div class="tabs" role="tablist" aria-label="Output views">
+          <button class="tab" role="tab" aria-selected="true" aria-controls="panel-text" id="tab-text">Rendered text</button>
+          <button class="tab" role="tab" aria-selected="false" aria-controls="panel-json" id="tab-json">Structured JSON</button>
+          <button class="tab" role="tab" aria-selected="false" aria-controls="panel-failures" id="tab-failures">Failures</button>
+        </div>
+        <div class="tab-panel active" role="tabpanel" id="panel-text" aria-labelledby="tab-text">
+          <div class="empty-state"><strong>No result yet</strong>Parsed text will remain linked to its source regions.</div>
+        </div>
+        <div class="tab-panel" role="tabpanel" id="panel-json" aria-labelledby="tab-json"><pre>{}</pre></div>
+        <div class="tab-panel" role="tabpanel" id="panel-failures" aria-labelledby="tab-failures">
+          <div class="empty-state"><strong>No result yet</strong>Ingest, render, and OCR failures will be shown explicitly.</div>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      response: null,
+      pageIndex: 0,
+      selectedOverlay: -1,
+      image: null,
+      imageRequest: 0,
+      hiddenKinds: new Set()
+    };
+    const byId = (id) => document.getElementById(id);
+    const cleanupWarning = " The previous temporary session could not be removed and will be cleared when the server stops.";
+    const fileInput = byId("source-file");
+    const form = byId("upload-form");
+    const canvas = byId("page-canvas");
+    const context = canvas.getContext("2d");
+
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files[0];
+      byId("file-name").textContent = file ? file.name : "Choose one image, PDF, or TIFF";
+      byId("parse-button").disabled = !file;
+    });
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const file = fileInput.files[0];
+      if (!file) return;
+      const previousSessionId = state.response?.session_id;
+      resetResult();
+      setBusy(true, "Parsing document locally...");
+      const body = new FormData();
+      body.append("file", file);
+      let cleanupFailed = false;
+      try {
+        if (previousSessionId) {
+          try {
+            await deleteSession(previousSessionId);
+          } catch {
+            cleanupFailed = true;
+          }
+        }
+        const response = await fetch("/api/process", { method: "POST", body });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || "The document could not be parsed");
+        state.response = payload;
+        state.pageIndex = 0;
+        state.selectedOverlay = -1;
+        resetHiddenKinds();
+        renderResult();
+        const coverage = payload.coverage_assessment;
+        const cleanupNote = cleanupFailed ? cleanupWarning : "";
+        setStatus(
+          payload.result.status === "success"
+            ? `OCR execution succeeded. ${coverage.message}${cleanupNote}`
+            : `Parsing finished with status: ${payload.result.status}. ${coverage.message}${cleanupNote}`,
+          false
+        );
+        byId("clear-button").disabled = false;
+      } catch (error) {
+        resetResult();
+        setStatus(`${error.message}${cleanupFailed ? cleanupWarning : ""}`, true);
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    byId("clear-button").addEventListener("click", async () => {
+      const sessionId = state.response?.session_id;
+      fileInput.value = "";
+      byId("file-name").textContent = "Choose one image, PDF, or TIFF";
+      byId("parse-button").disabled = true;
+      resetResult();
+      try {
+        if (sessionId) await deleteSession(sessionId);
+        setStatus("Session cleared from local temporary storage.", false);
+      } catch {
+        setStatus(
+          "The local view was cleared, but the temporary server session could not be removed. It will be cleared when the server stops.",
+          true
+        );
+      }
+    });
+
+    byId("copy-json").addEventListener("click", handleCopyJson);
+
+    async function handleCopyJson() {
+      if (!state.response) return;
+      try {
+        await navigator.clipboard.writeText(JSON.stringify(state.response.result, null, 2));
+        setStatus("Structured JSON copied to the clipboard.", false);
+      } catch {
+        setStatus("JSON could not be copied. Open Structured JSON to copy it manually.", true);
+      }
+    }
+
+    async function deleteSession(sessionId) {
+      const response = await fetch(`/api/sessions/${sessionId}`, { method: "DELETE" });
+      if (!response.ok && response.status !== 404) {
+        throw new Error("Temporary session deletion failed");
+      }
+    }
+
+    function setBusy(busy, message = "") {
+      byId("parse-button").disabled = busy || !fileInput.files[0];
+      byId("clear-button").disabled = busy || !state.response;
+      byId("copy-json").disabled = busy || !state.response;
+      if (busy) setStatus(message, false);
+    }
+
+    function setStatus(message, isError) {
+      const status = byId("status-line");
+      status.textContent = message;
+      status.className = `status-line visible${isError ? " error" : ""}`;
+    }
+
+    function renderResult() {
+      const payload = state.response;
+      const result = payload.result;
+      renderMetadata(payload);
+      renderTiming(payload.timing);
+      renderUncertainty();
+      renderText(result.pages);
+      byId("panel-json").querySelector("pre").textContent = JSON.stringify(result, null, 2);
+      renderFailures(result.failures, payload.preview_failure);
+      byId("download-json").href = `/api/sessions/${payload.session_id}/result.json`;
+      byId("download-markdown").href = `/api/sessions/${payload.session_id}/result.md`;
+      byId("download-json").setAttribute("aria-disabled", "false");
+      byId("download-markdown").setAttribute("aria-disabled", "false");
+      byId("copy-json").disabled = false;
+      renderPage();
+    }
+
+    function renderUncertainty() {
+      const summary = state.response?.uncertainty;
+      const resultPage = state.response?.result.pages[state.pageIndex];
+      const page = summary?.pages?.find((item) => item.page_number === resultPage?.page_number);
+      const card = byId("risk-card");
+      if (!summary || !page) {
+        card.hidden = true;
+        return;
+      }
+
+      card.hidden = false;
+      const badge = byId("risk-badge");
+      badge.textContent = page.review_required ? `Page ${page.page_number}: review required` : `Page ${page.page_number}: no flags`;
+      badge.classList.toggle("clear", !page.review_required);
+      byId("risk-copy").textContent = summary.interpretation;
+      byId("risk-confidence").textContent = page.mean_primary_confidence == null
+        ? "Not available"
+        : `${(page.mean_primary_confidence * 100).toFixed(1)}%`;
+      byId("risk-confidence-detail").textContent = page.mean_primary_confidence == null
+        ? "No scored primary evidence"
+        : `${page.confidence_regions} of ${page.primary_regions} regions scored`;
+      byId("risk-primary").textContent = page.primary_regions;
+      byId("risk-unresolved").textContent = `${page.unresolved_evidence} / ${page.conflicting_evidence}`;
+      byId("risk-disagreements").textContent = page.disagreeing_alternatives;
+      byId("risk-failures").textContent = page.failure_count;
+      const reasons = page.risk_reasons.length ? page.risk_reasons : ["No additional review reasons"];
+      byId("risk-reasons").replaceChildren(...reasons.map((reason) => {
+        const item = document.createElement("span");
+        item.className = "risk-reason";
+        item.textContent = reason.replaceAll("_", " ");
+        return item;
+      }));
+    }
+
+    function renderMetadata(payload) {
+      const result = payload.result;
+      const items = [
+        ["Status", result.status],
+        ["Backend", payload.backend],
+        ["Stages", payload.pipeline_stages.join(" + ") || "none"],
+        ["Version", payload.backend_version],
+        ["Elapsed", `${payload.elapsed_seconds.toFixed(3)} s`],
+        ["Geometry", payload.geometry],
+        ["Coverage", payload.coverage_assessment.status.replaceAll("_", " ")],
+        ["Schema", `v${result.schema_version}`]
+      ];
+      const metadata = byId("metadata");
+      metadata.replaceChildren(...items.map(([label, value]) => {
+        const chip = document.createElement("span");
+        chip.className = "chip";
+        const strong = document.createElement("strong");
+        strong.textContent = `${label}: `;
+        chip.append(strong, document.createTextNode(value));
+        return chip;
+      }));
+      metadata.classList.add("visible");
+    }
+
+    function renderTiming(timing) {
+      const card = byId("timing-card");
+      if (!timing) {
+        card.hidden = true;
+        return;
+      }
+      const values = [
+        ["Receive + multipart", timing.receive_seconds],
+        ["Store file", timing.save_seconds],
+        ["Queue", timing.queue_seconds],
+        ["Pipeline", timing.pipeline_seconds],
+        ["Preview", timing.preview_seconds],
+        ...Object.entries(timing.pipeline_steps || {}).map(([name, seconds]) => [
+          name.replace(/^stage\./, "").replaceAll("_", " "),
+          seconds
+        ])
+      ];
+      byId("timing-total").textContent = `${timing.total_seconds.toFixed(3)} s total`;
+      byId("timing-list").replaceChildren(...values.map(([label, seconds]) => {
+        const item = document.createElement("div");
+        item.className = "timing-item";
+        const value = document.createElement("strong");
+        value.textContent = `${Number(seconds).toFixed(3)} s`;
+        item.append(document.createTextNode(label), value);
+        return item;
+      }));
+      card.hidden = false;
+    }
+
+    function renderText(pages) {
+      const panel = byId("panel-text");
+      panel.replaceChildren(...pages.map((page) => {
+        const section = document.createElement("section");
+        section.className = "rendered-page";
+        const heading = document.createElement("h2");
+        heading.textContent = `Page ${page.page_number}`;
+        const text = document.createElement("p");
+        text.textContent = page.text.value || "No text detected.";
+        section.append(heading, text);
+        return section;
+      }));
+      if (!pages.length) {
+        const empty = document.createElement("p");
+        empty.textContent = "No pages were produced.";
+        panel.replaceChildren(empty);
+      }
+    }
+
+    function renderFailures(failures, previewFailure) {
+      const panel = byId("panel-failures");
+      const allFailures = [...failures];
+      if (previewFailure) allFailures.push(previewFailure);
+      if (!allFailures.length) {
+        const note = document.createElement("p");
+        note.className = "success-note";
+        note.textContent = `No execution failures were reported. ${state.response.coverage_assessment.message}`;
+        panel.replaceChildren(note);
+        return;
+      }
+      panel.replaceChildren(...allFailures.map((failure) => {
+        const item = document.createElement("div");
+        item.className = "failure";
+        const code = document.createElement("div");
+        code.className = "failure-code";
+        code.textContent = `${failure.stage}/${failure.code}${failure.page_number ? ` · page ${failure.page_number}` : ""}`;
+        const message = document.createElement("div");
+        message.className = "failure-message";
+        message.textContent = failure.message;
+        item.append(code, message);
+        return item;
+      }));
+    }
+
+    byId("previous-page").addEventListener("click", () => changePage(-1));
+    byId("next-page").addEventListener("click", () => changePage(1));
+    function changePage(offset) {
+      state.pageIndex += offset;
+      state.selectedOverlay = -1;
+      resetHiddenKinds();
+      renderPage();
+    }
+
+    function resetHiddenKinds() {
+      state.hiddenKinds.clear();
+      state.hiddenKinds.add("table_candidate");
+    }
+
+    function renderPage() {
+      const imageRequest = ++state.imageRequest;
+      const payload = state.response;
+      const pages = payload ? payload.result.pages : [];
+      const imageUrls = payload ? payload.page_images : [];
+      const total = Math.max(pages.length, imageUrls.length);
+      const hasPage = state.pageIndex >= 0 && state.pageIndex < total;
+      renderUncertainty();
+      byId("page-count").textContent = hasPage ? `${state.pageIndex + 1} / ${total}` : "No pages";
+      byId("previous-page").disabled = !hasPage || state.pageIndex === 0;
+      byId("next-page").disabled = !hasPage || state.pageIndex >= total - 1;
+      state.selectedOverlay = -1;
+      updateInspector(null);
+      renderRegionList([]);
+      renderCategories();
+      if (!hasPage || !imageUrls[state.pageIndex]) {
+        canvas.classList.remove("visible");
+        byId("preview-empty").hidden = false;
+        byId("preview-empty").textContent = payload?.preview_failure?.message || "No preview is available for this page.";
+        return;
+      }
+
+      state.image = null;
+      canvas.classList.remove("visible");
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      byId("preview-empty").hidden = false;
+      byId("preview-empty").textContent = "Loading page preview...";
+      const image = new Image();
+      image.onload = () => {
+        if (imageRequest !== state.imageRequest) return;
+        state.image = image;
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        canvas.classList.add("visible");
+        byId("preview-empty").hidden = true;
+        drawPage();
+        renderRegionList(currentOverlays());
+      };
+      image.onerror = () => {
+        if (imageRequest !== state.imageRequest) return;
+        canvas.classList.remove("visible");
+        byId("preview-empty").hidden = false;
+        byId("preview-empty").textContent = "The page preview could not be loaded.";
+      };
+      image.src = imageUrls[state.pageIndex];
+    }
+
+    function currentRegions() {
+      return state.response?.result.pages[state.pageIndex]?.regions || [];
+    }
+
+    function currentOverlays() {
+      return pageOverlays().filter((region) => !state.hiddenKinds.has(region.kind));
+    }
+
+    function pageOverlays() {
+      const overlays = [];
+      currentRegions().forEach((region) => {
+        const role = region.structure?.role;
+        if (role !== "table_source") overlays.push(region);
+        if (region.structure?.role !== "table") return;
+        (region.structure.cells || []).forEach((cell, cellIndex) => {
+          const box = normalizedBox(cell.bbox || cell.bounding_box);
+          if (!box) return;
+          const row = (cell.row_nums || [])[0];
+          const column = (cell.column_nums || [])[0];
+          overlays.push({
+            id: cell.id || `${region.id}-cell-${cellIndex + 1}`,
+            kind: "table_cell",
+            text: cell.text || "",
+            confidence: cell.confidence,
+            bounding_box: box,
+            reading_order: Number.isInteger(row) && Number.isInteger(column)
+              ? `row ${row + 1}, column ${column + 1}`
+              : "-",
+            provider: cell.source || region.provider,
+            text_provenance: {
+              table_id: region.id,
+              evidence_ids: cell.evidence_ids || [],
+              column_header: Boolean(cell.column_header),
+              projected_row_header: Boolean(cell.projected_row_header)
+            },
+            resolution: cell.resolution || "resolved",
+            alternatives: cell.alternatives || []
+          });
+        });
+      });
+      return overlays;
+    }
+
+    function renderCategories() {
+      const categories = new Map();
+      pageOverlays().forEach((region) => categories.set(region.kind, (categories.get(region.kind) || 0) + 1));
+      const container = byId("region-categories");
+      container.hidden = categories.size === 0;
+      byId("category-list").replaceChildren(...Array.from(categories, ([kind, count]) => {
+        const button = document.createElement("button");
+        const visible = !state.hiddenKinds.has(kind);
+        const label = kind.replaceAll("_", " ");
+        button.type = "button";
+        button.className = "category-button";
+        button.setAttribute("aria-pressed", String(visible));
+        button.setAttribute("aria-label", `${visible ? "Hide" : "Show"} ${label} overlays, ${count}`);
+        button.style.setProperty("--category-color", regionColor(kind));
+        const swatch = document.createElement("span");
+        swatch.className = "category-swatch";
+        swatch.setAttribute("aria-hidden", "true");
+        button.append(swatch, document.createTextNode(`${label} ${count}`));
+        button.addEventListener("click", () => handleCategory(kind));
+        return button;
+      }));
+    }
+
+    function handleCategory(kind) {
+      if (state.hiddenKinds.has(kind)) state.hiddenKinds.delete(kind);
+      else state.hiddenKinds.add(kind);
+      state.selectedOverlay = -1;
+      updateInspector(null);
+      renderCategories();
+      renderRegionList(currentOverlays());
+      drawPage();
+    }
+
+    function normalizedBox(box) {
+      if (Array.isArray(box) && box.length === 4) {
+        return { left: box[0], top: box[1], right: box[2], bottom: box[3] };
+      }
+      if (
+        box &&
+        ["left", "top", "right", "bottom"].every((key) => Number.isFinite(box[key]))
+      ) {
+        return box;
+      }
+      return null;
+    }
+
+    function drawPage() {
+      if (!state.image) return;
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(state.image, 0, 0);
+      context.lineWidth = Math.max(2, canvas.width / 800);
+      currentOverlays().forEach((region, index) => {
+        const box = region.bounding_box;
+        const color = index === state.selectedOverlay ? "#ff7a3d" : regionColor(region.kind);
+        context.strokeStyle = color;
+        context.fillStyle = `${color}1f`;
+        context.fillRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
+        context.strokeRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
+        const label = index === state.selectedOverlay
+          ? `${index + 1} ${region.kind.replaceAll("_", " ")}`
+          : String(index + 1);
+        const fontSize = Math.max(12, Math.round(canvas.width / 110));
+        context.font = `600 ${fontSize}px system-ui`;
+        const labelWidth = context.measureText(label).width + 10;
+        const labelTop = Math.max(0, box.top - fontSize - 6);
+        context.fillStyle = color;
+        context.fillRect(box.left, labelTop, labelWidth, fontSize + 6);
+        context.fillStyle = "#081016";
+        context.fillText(label, box.left + 5, labelTop + fontSize + 1);
+      });
+    }
+
+    function regionColor(kind) {
+      if (kind === "table_cell") return "#65d6a6";
+      if (kind.includes("table")) return "#ef6cab";
+      if (kind.includes("title") || kind.includes("header")) return "#ffb454";
+      if (kind.includes("formula")) return "#d9de61";
+      if (kind.includes("figure") || kind.includes("image")) return "#b394ff";
+      if (kind.includes("checkbox") || kind.includes("control")) return "#65d6a6";
+      return "#37c7ff";
+    }
+
+    canvas.addEventListener("click", (event) => {
+      const bounds = canvas.getBoundingClientRect();
+      const x = (event.clientX - bounds.left) * canvas.width / bounds.width;
+      const y = (event.clientY - bounds.top) * canvas.height / bounds.height;
+      const regions = currentOverlays();
+      const index = regions
+        .map((region, regionIndex) => ({ region, regionIndex }))
+        .filter(({ region }) => {
+          const box = region.bounding_box;
+          return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+        })
+        .sort(
+          (left, right) =>
+            boxArea(left.region.bounding_box) - boxArea(right.region.bounding_box)
+        )[0]?.regionIndex ?? -1;
+      selectRegion(index);
+    });
+
+    function boxArea(box) {
+      return Math.max(0, box.right - box.left) * Math.max(0, box.bottom - box.top);
+    }
+
+    function renderRegionList(regions) {
+      const list = byId("region-list");
+      list.replaceChildren(...regions.map((region, index) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = `region-button${index === state.selectedOverlay ? " active" : ""}`;
+        button.textContent = `${index + 1} ${region.kind}: ${region.text || "No text"}`;
+        button.title = `Region ${index + 1}: ${region.kind}`;
+        button.addEventListener("click", () => selectRegion(index));
+        return button;
+      }));
+    }
+
+    function selectRegion(index) {
+      const regions = currentOverlays();
+      state.selectedOverlay = index >= 0 ? index : -1;
+      updateInspector(state.selectedOverlay >= 0 ? regions[state.selectedOverlay] : null);
+      renderRegionList(regions);
+      drawPage();
+    }
+
+    function updateInspector(region) {
+      byId("region-kind").textContent = region?.kind || "None selected";
+      byId("region-confidence").textContent = region?.confidence == null ? "-" : `${(region.confidence * 100).toFixed(1)}%`;
+      byId("region-provider").textContent = region?.provider || "-";
+      byId("region-order").textContent = region?.reading_order ?? "-";
+      const box = region?.bounding_box;
+      byId("region-box").textContent = box ? `${box.left}, ${box.top}, ${box.right}, ${box.bottom} px` : "-";
+      byId("region-resolution").textContent = region?.resolution || "-";
+      byId("region-provenance").textContent = region?.text_provenance ? JSON.stringify(region.text_provenance) : "-";
+      byId("region-alternatives").textContent = region?.alternatives?.length ? JSON.stringify(region.alternatives) : "-";
+      byId("region-structure").textContent = region?.structure ? JSON.stringify(region.structure) : "-";
+      byId("region-text").textContent = region?.text || "Click an overlay to inspect its evidence.";
+    }
+
+    document.querySelectorAll(".tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((item) => item.setAttribute("aria-selected", String(item === tab)));
+        document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.id === tab.getAttribute("aria-controls")));
+      });
+    });
+
+    function resetResult() {
+      state.response = null;
+      state.pageIndex = 0;
+      state.selectedOverlay = -1;
+      state.image = null;
+      state.imageRequest += 1;
+      state.hiddenKinds.clear();
+      byId("metadata").classList.remove("visible");
+      byId("timing-card").hidden = true;
+      byId("risk-card").hidden = true;
+      byId("region-categories").hidden = true;
+      canvas.classList.remove("visible");
+      byId("preview-empty").hidden = false;
+      byId("preview-empty").textContent = "Select a document and parse it to inspect pixel-space bounding boxes.";
+      byId("page-count").textContent = "No pages";
+      byId("previous-page").disabled = true;
+      byId("next-page").disabled = true;
+      byId("clear-button").disabled = true;
+      updateInspector(null);
+      renderRegionList([]);
+      byId("download-json").removeAttribute("href");
+      byId("download-markdown").removeAttribute("href");
+      byId("download-json").setAttribute("aria-disabled", "true");
+      byId("download-markdown").setAttribute("aria-disabled", "true");
+      byId("copy-json").disabled = true;
+      byId("panel-text").textContent = "No result yet.";
+      byId("panel-json").querySelector("pre").textContent = "{}";
+      byId("panel-failures").textContent = "No result yet.";
+    }
+  </script>
+</body>
+</html>

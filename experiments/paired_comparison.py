@@ -11,13 +11,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
 
+from ocr_pipeline.verification import edit_distance
+
 if __package__:
-    from .public_benchmark import NORMALIZATION, _score
+    from .public_benchmark import NORMALIZATION, _normalize
 else:
-    from public_benchmark import NORMALIZATION, _score
+    from public_benchmark import NORMALIZATION, _normalize
 
 METRICS = ("cer", "wer")
 VARIANTS = ("top-level", "local", "repaired")
+ARM_PREFIX = "arm:"
 DEFAULT_RESAMPLES = 10_000
 DEFAULT_SEED = 0
 
@@ -44,15 +47,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("output", type=Path, help="Paired comparison JSON")
     parser.add_argument(
         "--baseline-variant",
-        choices=VARIANTS,
         default="top-level",
-        help="Case metrics to use from the baseline file",
+        help="Case metrics to use, including arm:<name> for a nested benchmark arm",
     )
     parser.add_argument(
         "--candidate-variant",
-        choices=VARIANTS,
         default="top-level",
-        help="Case metrics to use from the candidate file",
+        help="Case metrics to use, including arm:<name> for a nested benchmark arm",
+    )
+    parser.add_argument(
+        "--baseline-run",
+        help="Nested benchmark run to compare, for example auto",
+    )
+    parser.add_argument(
+        "--candidate-run",
+        help="Nested benchmark run to compare, for example auto",
     )
     parser.add_argument(
         "--resamples",
@@ -69,6 +78,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.candidate,
             baseline_variant=args.baseline_variant,
             candidate_variant=args.candidate_variant,
+            baseline_run=args.baseline_run,
+            candidate_run=args.candidate_run,
             resamples=args.resamples,
             seed=args.seed,
         )
@@ -88,11 +99,15 @@ def compare_files(
     *,
     baseline_variant: str = "top-level",
     candidate_variant: str = "top-level",
+    baseline_run: str | None = None,
+    candidate_run: str | None = None,
     resamples: int = DEFAULT_RESAMPLES,
     seed: int = DEFAULT_SEED,
 ) -> dict[str, object]:
     baseline_payload = json.loads(baseline_path.read_text(encoding="utf-8"))
     candidate_payload = json.loads(candidate_path.read_text(encoding="utf-8"))
+    baseline_payload = _select_run(baseline_payload, baseline_run, "baseline")
+    candidate_payload = _select_run(candidate_payload, candidate_run, "candidate")
     report = compare_payloads(
         baseline_payload,
         candidate_payload,
@@ -105,13 +120,26 @@ def compare_files(
         "baseline": {
             "file": str(baseline_path),
             "variant": baseline_variant,
+            "run": baseline_run,
         },
         "candidate": {
             "file": str(candidate_path),
             "variant": candidate_variant,
+            "run": candidate_run,
         },
         **report,
     }
+
+
+def _select_run(payload: object, run: str | None, label: str) -> object:
+    if run is None:
+        return payload
+    if not isinstance(payload, dict) or not isinstance(payload.get("runs"), dict):
+        raise ValueError(f"{label} JSON has no runs object")
+    selected = payload["runs"].get(run)
+    if not isinstance(selected, dict):
+        raise ValueError(f"{label} JSON has no run {run!r}")
+    return selected
 
 
 def compare_payloads(
@@ -210,8 +238,6 @@ def _metadata(payload: object, label: str) -> tuple[str, str]:
 def _case_scores(
     payload: object, variant: str, label: str, dataset: str
 ) -> dict[str, CaseScore]:
-    if variant not in VARIANTS:
-        raise ValueError(f"Unsupported {label} variant: {variant}")
     if not isinstance(payload, dict) or not isinstance(payload.get("cases"), list):
         raise ValueError(f"{label} JSON must contain a cases array")
 
@@ -228,7 +254,7 @@ def _case_scores(
         if not isinstance(reference, str):
             raise ValueError(f"{label} case {case_id!r} has no valid reference")
 
-        metric_container = case if variant == "top-level" else case.get(variant)
+        metric_container = _variant_container(case, variant, label, case_id)
         if not isinstance(metric_container, dict):
             raise ValueError(f"{label} case {case_id!r} has no {variant} variant")
         prediction = metric_container.get("prediction")
@@ -237,7 +263,7 @@ def _case_scores(
         raw_metrics = metric_container.get("metrics")
         if not isinstance(raw_metrics, dict):
             raise ValueError(f"{label} case {case_id!r} has no metrics")
-        recomputed = _score(prediction, reference)
+        recomputed = _recompute_metrics(prediction, reference)
         metrics = {
             metric: _metric_score(
                 raw_metrics.get(metric), recomputed[metric], label, case_id, metric
@@ -253,6 +279,36 @@ def _case_scores(
     if not scores:
         raise ValueError(f"{label} JSON contains no cases")
     return scores
+
+
+def _recompute_metrics(prediction: str, reference: str) -> dict[str, dict[str, int]]:
+    normalized_prediction = _normalize(prediction)
+    normalized_reference = _normalize(reference)
+    return {
+        "cer": {
+            "edits": edit_distance(normalized_prediction, normalized_reference),
+            "reference_units": len(normalized_reference),
+        },
+        "wer": {
+            "edits": edit_distance(
+                normalized_prediction.split(), normalized_reference.split()
+            ),
+            "reference_units": len(normalized_reference.split()),
+        },
+    }
+
+
+def _variant_container(
+    case: Mapping[str, object], variant: str, label: str, case_id: str
+) -> object:
+    if variant == "top-level":
+        return case
+    if variant in VARIANTS:
+        return case.get(variant)
+    if variant.startswith(ARM_PREFIX) and len(variant) > len(ARM_PREFIX):
+        arms = case.get("arms")
+        return arms.get(variant[len(ARM_PREFIX) :]) if isinstance(arms, dict) else None
+    raise ValueError(f"Unsupported {label} variant: {variant}")
 
 
 def _metric_score(

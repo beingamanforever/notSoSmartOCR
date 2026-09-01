@@ -8,9 +8,17 @@ from urllib.request import Request
 import pytest
 
 from ocr_pipeline.openrouter import (
+    CLAUDE_OPUS_MODEL,
+    DEEPSEEK_VISION_MODEL,
+    GEMMA_MODEL,
+    GEMINI_37_FLASH_BATCH_MODEL,
+    GEMINI_37_FLASH_MODEL,
+    GLM_53_FLASH_MODEL,
     MAX_TOKENS,
     MAX_RETRY_DELAY_SECONDS,
     MUSE_GLIMMER_MODEL,
+    QWEN_37_FLASH_MODEL,
+    QWEN_25_VL_72B_MODEL,
     QWEN_FLASH_MODEL,
     OpenRouterError,
     repair_image,
@@ -93,6 +101,117 @@ def test_image_model_roles_are_enforced(
     with pytest.raises(OpenRouterError, match="not approved for image repair"):
         repair_image(image, "Read", TEXT_SCHEMA, model="qwen/qwen3-32b")
 
+    with pytest.raises(OpenRouterError, match="not approved for image repair"):
+        repair_image(image, "Read", TEXT_SCHEMA, model=QWEN_FLASH_MODEL)
+
+    with pytest.raises(OpenRouterError, match="not approved for image repair"):
+        repair_image(
+            image,
+            "Read",
+            TEXT_SCHEMA,
+            model="qwen/qwen3-32b",
+            public_benchmark=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        QWEN_37_FLASH_MODEL,
+        QWEN_25_VL_72B_MODEL,
+        GLM_53_FLASH_MODEL,
+        GEMINI_37_FLASH_MODEL,
+        CLAUDE_OPUS_MODEL,
+    ],
+)
+def test_current_frontier_models_are_public_benchmark_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    image = tmp_path / "crop.png"
+    image.write_bytes(b"image")
+
+    with pytest.raises(OpenRouterError, match="not approved for image repair"):
+        repair_image(image, "Read", TEXT_SCHEMA, model=model)
+
+    result = repair_image(
+        image,
+        "Read",
+        TEXT_SCHEMA,
+        model=model,
+        public_benchmark=True,
+        transport=lambda request, timeout: (
+            200,
+            {},
+            _success_response('{"text":"public"}', model=model),
+        ),
+    )
+    assert result.content == {"text": "public"}
+
+
+def test_batch_model_is_not_sent_to_synchronous_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    image = tmp_path / "crop.png"
+    image.write_bytes(b"image")
+
+    with pytest.raises(OpenRouterError, match="not approved for image repair"):
+        repair_image(
+            image,
+            "Read",
+            TEXT_SCHEMA,
+            model=GEMINI_37_FLASH_BATCH_MODEL,
+            public_benchmark=True,
+        )
+
+
+def test_public_benchmark_models_require_explicit_public_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    image = tmp_path / "crop.png"
+    image.write_bytes(b"image")
+    captured = {}
+
+    def transport(request: Request, timeout: float):
+        captured["payload"] = json.loads(request.data)
+        return (
+            200,
+            {},
+            _success_response(
+                '{"text":"ok"}',
+                model=DEEPSEEK_VISION_MODEL,
+            ),
+        )
+
+    result = repair_image(
+        image,
+        "Read",
+        TEXT_SCHEMA,
+        model=DEEPSEEK_VISION_MODEL,
+        public_benchmark=True,
+        transport=transport,
+    )
+
+    assert result.content == {"text": "ok"}
+    assert captured["payload"]["response_format"] == {"type": "json_object"}
+
+    gemma = repair_image(
+        image,
+        "Read",
+        TEXT_SCHEMA,
+        model=GEMMA_MODEL,
+        transport=lambda request, timeout: (
+            200,
+            {},
+            _success_response('{"text":"eligible"}', model=GEMMA_MODEL),
+        ),
+    )
+    assert gemma.content == {"text": "eligible"}
+
 
 def test_key_is_read_at_call_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -116,6 +235,29 @@ def test_key_is_read_at_call_time(
         ),
     )
     assert result.content == {"text": "ok"}
+
+
+def test_unexpected_response_model_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    image = tmp_path / "crop.png"
+    image.write_bytes(b"image")
+
+    with pytest.raises(OpenRouterError) as raised:
+        repair_image(
+            image,
+            "Read",
+            TEXT_SCHEMA,
+            model=MUSE_GLIMMER_MODEL,
+            transport=lambda request, timeout: (
+                200,
+                {},
+                _success_response('{"text":"wrong model"}', model=QWEN_FLASH_MODEL),
+            ),
+        )
+
+    assert raised.value.code == "unexpected_model"
 
 
 @pytest.mark.parametrize(
@@ -307,7 +449,7 @@ def test_invalid_structured_content_fails_explicitly(
 
 def _success_response(
     content: str,
-    model: str = QWEN_FLASH_MODEL,
+    model: str = MUSE_GLIMMER_MODEL,
     *,
     finish_reason: str = "stop",
 ) -> bytes:

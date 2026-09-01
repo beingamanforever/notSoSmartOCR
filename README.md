@@ -1,119 +1,85 @@
 # notSoSmartOCR
 
-A research-first OCR pipeline for accurate, scalable, evidence-linked document parsing. It preserves page order, literal text, geometry, reading order, provider provenance, and explicit failures instead of returning an untraceable text blob.
+An evidence-preserving OCR research pipeline for clinical and structured documents. It keeps literal text, pixel geometry, reading order, alternatives, provider provenance, and explicit failures in one swappable schema instead of flattening a page into an untraceable text blob.
 
-The implemented system supports:
+![Pipeline architecture](artifacts/ocr-pipeline-architecture.svg)
 
-- ordered PDF, multi-frame TIFF, and image ingestion with lossless EXIF orientation normalization;
-- Tesseract, PaddleOCR-VL-1.6, complete GLM-OCR SDK, and direct GLM-OCR model-only readers;
-- deterministic validation for missing text, geometry, reading order, malformed tables, and repeated hallucination loops;
-- selective OpenRouter crop repair using Qwen3.8-Flash or Muse Glimmer 30B;
-- independent second-model visual agreement before any hosted text replaces local evidence;
-- direct, stitched, public transcription, OmniDocBench export, and paired statistical benchmark harnesses.
+## What is implemented
 
-The current innovation hypothesis is the Evidence-Patch Cascade: use a strong compact local parser, detect observable risks, ask one visual model for a crop-level candidate, require a different visual model to independently agree, then merge only the agreed text while protecting local geometry and recording both hosted text sources. Disagreement abstains. This is implemented, but it is not yet a proven frontier-model win.
+- Ordered PDF, TIFF, and image ingestion with EXIF normalization.
+- Swappable local readers for Tesseract, NVIDIA Nemotron OCR v2, and IBM Granite Docling.
+- Mindee docTR orientation proposals with OSD disagreement and two-view coverage recovery.
+- Ordered region stages with schema v2 alternatives and `resolved`, `conflicting`, or `unreadable` outcomes.
+- Microsoft Table Transformer detection and structure geometry with local OCR challengers.
+- Review-only geometric control extraction and deterministic evidence-risk signals.
+- Evidence-safe tiny-text and crop repair: new text is retained as an alternative unless independent evidence supports promotion.
+- A local workbench with linked overlays, dynamic category filters, copyable
+  structured JSON, stage timing, inspectable rejected structure proposals, and
+  evidence-risk diagnostics that are explicitly not a calibrated probability.
+- Failure-inclusive public evaluators for transcription, layout, tables, forms, controls, reading order, and multi-page structure.
 
-## Pipeline
+Chinese-origin models and backbones are excluded from the deployable path. Paddle, GLM, Qwen, and DeepSeek remain explicit public-data comparators only.
 
-```text
-PDF or image
-  -> ordered, EXIF-normalized pages
-  -> swappable local structured reader
-  -> evidence-linked regions
-  -> deterministic risk detection
-  -> selective visual candidate
-  -> independent visual verification
-  -> protected patch or abstention
-  -> JSON, Markdown, or benchmark adapter
-```
+## Run it
 
-## Run local OCR
-
-The Tesseract path needs Pillow, Tesseract, and Poppler `pdftoppm`. Paddle and GLM use their official isolated runtime dependencies.
+The lean path needs Python, Pillow, Tesseract, and Poppler `pdftoppm`.
 
 ```bash
-PYTHONPATH=src python -m ocr_pipeline.cli document.pdf \
+PYTHONPATH=src python -m ocr_pipeline.cli page.png \
   --reader tesseract --output result.json
 
 PYTHONPATH=src python -m ocr_pipeline.cli page.png \
-  --reader paddleocr-vl --device gpu:0 --output result.json
+  --reader nemotron-ocr-v2 --nemotron-language multi \
+  --nemotron-merge-level paragraph --output result.json
 
-PYTHONPATH=src python -m ocr_pipeline.cli page.png \
-  --reader glm-ocr-direct --max-new-tokens 8192 --output result.json
+PYTHONPATH=src uvicorn 'ocr_pipeline.demo:create_app' --factory \
+  --host 127.0.0.1 --port 8080
 ```
 
-`glm-ocr` uses the official complete SDK and recognition server. `glm-ocr-direct` is a model-only ablation without layout analysis.
+Nemotron and table specialists use their official isolated GPU runtimes. The
+default demo factory uses the local routed Tesseract reader. The verified GPU
+workbench is assembled by `experiments/serve_gpu_demo.py` with Nemotron OCR v2,
+tiny-text evidence reruns, docTR orientation, Table Transformer, controls, and
+evidence-risk routing. The UI exposes that configured stack as read-only
+metadata instead of offering a model picker that can silently change results.
 
-## Public experiments
+## Measured evidence
 
-Dataset sources, acquired revisions, terms, counts, and evaluation roles are recorded in [data/README.md](data/README.md). Downloaded data and run outputs remain outside Git.
+All benchmark failures remain in the denominator. Component rows are single fixed-panel runs unless an interval is stated.
 
-```bash
-# Failure-inclusive local transcription
-PYTHONPATH=src python experiments/public_benchmark.py \
-  clinocr data/public/clinocr-bench-v1.0/ClinOCR-Bench \
-  experiments/results/paddle-clinocr.json \
-  --reader paddleocr-vl --device gpu:0 --workers 1
+| Capability | Fixed panel | Result |
+| --- | --- | --- |
+| Transcription floor | ClinOCR eval, 328 pages | Tesseract: 91.2% coverage, 0.488293 CER, 0.611352 WER |
+| Eligible local candidate | Same 328 pages | Nemotron selective: 86.0% coverage, 0.331423 CER, 0.417869 WER |
+| Guarded orientation | ClinOCR rotated eval, 56 pages | 56/56 covered and minimum-CER view selected; case-mean CER 0.100211, WER 0.121439 |
+| Table detection | PubTables-1M test, 60 tables | TATR: 1.000000 recall and 0.991736 F1 at IoU 0.50 and 0.75 |
+| Table structure | PubTables-1M test, 60 tables | TATR: 0.990225 GriTS Top, 0.991262 Con, 0.984719 Loc, 0.977380 cell exact |
+| Targeted table fusion | 2 reviewed financial tables, 187 cells | Nemotron 182/187; tri-source fusion 187/187 exact |
+| Clear controls | 52 reviewed controls | State macro-F1 1.0000, label association F1 0.9903; dense grids remain review-only |
+| Handwriting rejection | 46 reviewed clinical fields | Strict exact: PyLaia 0/46, TrOCR 1/46; both rejected |
+| Private hard track | 41 generated clinical-style pages plus 3 supplied failures | 44/44 operational success, 0/44 manually complete, 44/44 review-routed |
+| False-table guard | 2 supplied application screenshots | Both page-sized false tables rejected; OCR preserved and proposals retained for review |
+| Tiny-text hard-track ablation | Frozen 41 clinical pages | 3,780 crop alternatives, 235 unsupported tile-only candidates, 0 promoted; primary text preserved |
 
-# Direct hosted full-page baseline
-PYTHONPATH=src python experiments/frontier_benchmark.py \
-  clinocr data/public/clinocr-bench-v1.0/ClinOCR-Bench \
-  experiments/results/qwen-direct.json \
-  --model qwen/qwen3.8-flash --provider PROVIDER_SLUG
+On the paired 328-page ClinOCR panel, Nemotron reduced CER by 0.156870 with a 16-template-cluster 95% interval of [-0.185387, -0.113176]. This proves improvement over the Tesseract CPU floor, not over a frontier model. The guarded orientation result uses a gold-free selector, but its 56/56 minimum-CER count is a post-selection diagnostic and aggregate guarded latency is unavailable. The 187-cell table result is a targeted two-table failure panel with no repeated-run uncertainty, not a general benchmark. Operational `success` is schema completion, not correctness; the private hard track remains unsuitable for unattended use.
 
-# Selective Muse repair with independent Qwen verification
-PYTHONPATH=src python experiments/cascade_benchmark.py \
-  clinocr data/public/clinocr-bench-v1.0/ClinOCR-Bench \
-  experiments/results/muse-cascade.json \
-  --reader paddleocr-vl --device gpu:0 \
-  --model meta/muse-glimmer-30b --provider PRIMARY_PROVIDER \
-  --verifier-model qwen/qwen3.8-flash \
-  --verifier-provider VERIFIER_PROVIDER
+![Hard-case route outcomes](artifacts/hard-case-routing.svg)
 
-# Export predictions for the official version-matched OmniDocBench evaluator
-PYTHONPATH=src python experiments/omnidocbench_export.py \
-  data/public/omnidocbench-v1.6/OmniDocBench.json \
-  data/public/omnidocbench-v1.6 \
-  experiments/results/omnidocbench-paddle \
-  --dataset-revision v1.6 --reader paddleocr-vl --device gpu:0
+![Table cell comparison](artifacts/table-cell-comparison.svg)
 
-# Paired, failure-inclusive confidence intervals and corrected tests
-PYTHONPATH=src python experiments/paired_comparison.py \
-  experiments/results/baseline.json experiments/results/candidate.json \
-  experiments/results/paired.json --resamples 10000 --seed 0
-```
-
-Hosted experiments require a fresh `OPENROUTER_API_KEY` in the environment. Pin providers for comparisons. The key pasted into chat was not used and should be rotated.
-
-## Measurements so far
-
-| Run | Cases | Coverage | Micro CER | Micro WER | p50 | p95 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Tesseract, ClinOCR v1.0 eval | 328 | 91.2% | 0.451 | 0.568 | 0.94 s | 1.66 s |
-| Tesseract, FUNSD original test | 50 | 100% | 0.565 | 0.790 | 0.58 s | 0.95 s |
-| PaddleOCR-VL-1.6, balanced six-page development trace | 6 | 100% | 0.199 | 0.231 | 11.20 s | 79.19 s |
-| GLM-OCR direct model-only, same six development pages | 6 | 100% | 0.109 | 0.118 | 9.36 s | 18.34 s |
-| PaddleOCR-VL-1.6 base, ClinOCR rotated subset | 56 | 100% | 0.314 | 0.378 | 12.82 s | 41.29 s |
-| PaddleOCR-VL-1.6 plus unwarping, ClinOCR rotated subset | 56 | 100% | 0.061 | 0.081 | 13.19 s | 20.47 s |
-| GLM-OCR direct model-only, ClinOCR rotated subset | 56 | 100% | 0.079 | 0.084 | 10.79 s | 15.63 s |
-
-The six-page rows cover only two independent ClinOCR templates and are development signals, not ranking evidence. On the matched 56-page rotated subset, unwarping reduced micro CER by 0.2530 with a template-cluster 95 percent interval of [-0.3060, -0.2001], and micro WER by 0.2970 with an interval of [-0.3690, -0.2211]. Direct GLM also beat Paddle base, but versus Paddle plus unwarping its CER delta was +0.0183 with interval [-0.0028, 0.0357] and WER delta was +0.0027 with interval [-0.0220, 0.0224]. The difference is inconclusive and does not establish the locked non-inferiority margin. GLM is a text-only whole-page ablation here, not a structured-parser replacement. A point sample used 4.9 GB for GLM versus 22.2 GB for Paddle unwarping, but neither is a measured peak. Hosted direct and stitched arms remain unmeasured.
-
-The saved Paddle GPU artifacts predate the `run_config` serializer. Their exact commands and option differences are recorded in the research report, but the files are not independently self-describing and should be regenerated before external publication. New public, cascade, frontier, and OmniDocBench artifacts serialize behavior-affecting options.
-
-## Verify the project
+## Verify and reproduce
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
   python -m pytest -p no:cacheprovider tests -q
-ruff check src/ocr_pipeline experiments tests
-ruff format --check src/ocr_pipeline experiments tests
+ruff check src experiments tests
+ruff format --check src experiments tests
+
+MPLCONFIGDIR=/private/tmp/notso-ocr-mpl \
+  python artifacts/table-cell-comparison.py
+tectonic --outdir artifacts artifacts/ocr-pipeline-architecture.tex
 ```
 
-The tests cross real CLI and experiment boundaries, render a multi-page PDF and multi-frame TIFF, invoke Tesseract TSV, verify evidence and geometry, inject exact Paddle, GLM, and OpenRouter contracts, retain failures in denominators, recompute paired metrics from raw text, and prove that truncated, same-model, arbitrary, or disagreeing hosted patches cannot replace local evidence.
+Dataset revisions, licenses, and acquisition notes are in [data/README.md](data/README.md). The concise measured report, figure captions, limitations, and exact evidence paths are in [artifacts/ocr-evidence-report.md](artifacts/ocr-evidence-report.md). The expanded 44-page visual audit is summarized in [experiments/PRIVATE_HARD_CASE_EVALUATION.md](experiments/PRIVATE_HARD_CASE_EVALUATION.md). The broader research and fine-tuning plan is in [OCR_PIPELINE_RESEARCH_AND_PLAN.md](OCR_PIPELINE_RESEARCH_AND_PLAN.md).
 
-## Research report
-
-The paper and repository review, architecture rationale, measured evidence, benchmark matrix, statistical decision rules, lossless inference plan, fine-tuning gate, and labeling schema are in [OCR_PIPELINE_RESEARCH_AND_PLAN.md](OCR_PIPELINE_RESEARCH_AND_PLAN.md).
-
-Private clinical images are never sent to an external provider without separate PHI, region, retention, training-use, and contract approval. API keys are read only from the environment and never stored in the repository.
+Hosted paired baselines remain blocked until a fresh inherited `OPENROUTER_API_KEY` and exact provider pins are available. No private clinical page is sent to Jina or a hosted model. No frontier-superiority claim is made.

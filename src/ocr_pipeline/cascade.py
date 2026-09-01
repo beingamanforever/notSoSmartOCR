@@ -10,6 +10,8 @@ from dataclasses import asdict
 from typing import Any
 
 from .contracts import DocumentResult, TextRegion
+from .rendering import render_evidence
+from .verification import literal_text_risks
 
 NON_TEXT_VISUAL_KINDS = {
     "image",
@@ -49,6 +51,7 @@ def identify_risky_regions(document: DocumentResult) -> dict[str, list[str]]:
                 reasons.append(table_risk)
             if _has_repeated_text(region):
                 reasons.append("repeated_text")
+            reasons.extend(literal_text_risks(region.text))
             if reasons:
                 risks[region.id] = reasons
     return risks
@@ -136,8 +139,7 @@ def apply_region_patches(
                 region.text = replacements[region.id]
                 changed = True
         if changed:
-            page.text.value = " ".join(region.text for region in page.regions)
-            page.text.evidence_ids = [region.id for region in page.regions]
+            page.text = render_evidence(page.regions)
     return result
 
 

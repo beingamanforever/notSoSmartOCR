@@ -7,13 +7,15 @@ import io
 import math
 import subprocess
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Protocol
 
 from PIL import Image
 
 from .contracts import BoundingBox, TextRegion
+
+NEMOTRON_BOX_TOLERANCE = 0.02
 
 
 class LocalReader(Protocol):
@@ -36,22 +38,35 @@ class TesseractReader:
         language: str = "eng",
         executable: str = "tesseract",
         timeout_seconds: int = 120,
+        page_segmentation_mode: int | None = None,
+        thresholding_method: int | None = None,
     ) -> None:
+        if page_segmentation_mode is not None and not 0 <= page_segmentation_mode <= 13:
+            raise ValueError("Tesseract page segmentation mode must be from 0 to 13")
+        if thresholding_method is not None and thresholding_method not in {0, 1, 2}:
+            raise ValueError("Tesseract thresholding method must be 0, 1, or 2")
         self.language = language
         self.executable = executable
         self.timeout_seconds = timeout_seconds
+        self.page_segmentation_mode = page_segmentation_mode
+        self.thresholding_method = thresholding_method
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        command = [
+            self.executable,
+            str(image_path),
+            "stdout",
+            "-l",
+            self.language,
+        ]
+        if self.page_segmentation_mode is not None:
+            command.extend(["--psm", str(self.page_segmentation_mode)])
+        if self.thresholding_method is not None:
+            command.extend(["-c", f"thresholding_method={self.thresholding_method}"])
+        command.append("tsv")
         try:
             completed = subprocess.run(
-                [
-                    self.executable,
-                    str(image_path),
-                    "stdout",
-                    "-l",
-                    self.language,
-                    "tsv",
-                ],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_seconds,
@@ -69,7 +84,20 @@ class TesseractReader:
             message = completed.stderr.strip() or "Tesseract returned no error message"
             raise ReaderError("reader_failed", message)
 
-        return _parse_tesseract_tsv(completed.stdout, page_number, self.name)
+        regions = _parse_tesseract_tsv(completed.stdout, page_number, self.name)
+        configured = {
+            key: value
+            for key, value in (
+                ("page_segmentation_mode", self.page_segmentation_mode),
+                ("thresholding_method", self.thresholding_method),
+            )
+            if value is not None
+        }
+        if configured:
+            for region in regions:
+                assert region.text_provenance is not None
+                region.text_provenance["tesseract_config"] = configured
+        return regions
 
 
 class PaddleOCRVLReader:
@@ -307,6 +335,369 @@ class GLMOCRDirectReader:
         return self._processor, self._model
 
 
+class GraniteDoclingReader:
+    """Compact IBM page parser that serializes DocTags as text or Markdown."""
+
+    name = "granite-docling"
+
+    def __init__(
+        self,
+        *,
+        model_name: str = "ibm-granite/granite-docling-258M",
+        max_new_tokens: int = 8192,
+        output_format: str = "text",
+        processor: object | None = None,
+        model: object | None = None,
+        converter: Callable[[str, Image.Image], str] | None = None,
+    ) -> None:
+        if output_format not in {"text", "markdown"}:
+            raise ValueError("Granite output format must be text or markdown")
+        self.model_name = model_name
+        self.max_new_tokens = max_new_tokens
+        self.output_format = output_format
+        self._processor = processor
+        self._model = model
+        self._converter = converter
+        self._lock = threading.Lock()
+
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        with Image.open(image_path) as source_image:
+            image = source_image.convert("RGB")
+            width, height = image.size
+
+        with self._lock:
+            converter = (
+                self._converter
+                if self._converter is not None
+                else self._initialize_converter()
+            )
+            processor, model = self._initialize_components()
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image"},
+                        {"type": "text", "text": "Convert this page to docling."},
+                    ],
+                }
+            ]
+            try:
+                prompt = processor.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                )
+                inputs = processor(
+                    text=prompt,
+                    images=[image],
+                    return_tensors="pt",
+                ).to(model.device)
+                generated_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    do_sample=False,
+                )
+            except Exception as error:
+                raise ReaderError("granite_predict_failed", str(error)) from error
+
+            try:
+                prompt_length = inputs["input_ids"].shape[1]
+                doctags = processor.decode(
+                    generated_ids[0][prompt_length:],
+                    skip_special_tokens=False,
+                ).lstrip()
+                text = converter(doctags, image)
+            except Exception as error:
+                raise ReaderError("granite_output_failed", str(error)) from error
+
+        if not text.strip():
+            raise ReaderError(
+                "granite_output_failed", "Granite Docling returned no document text"
+            )
+        return [
+            TextRegion(
+                id=f"p{page_number}-page-1",
+                kind=f"page_{self.output_format}",
+                text=text.strip(),
+                confidence=None,
+                bounding_box=BoundingBox(0, 0, width, height),
+                reading_order=1,
+                provider=self.name,
+            )
+        ]
+
+    def _initialize_converter(self) -> Callable[[str, Image.Image], str]:
+        self._converter = _load_doctags_converter(self.output_format)
+        return self._converter
+
+    def _initialize_components(self) -> tuple[object, object]:
+        if self._processor is not None and self._model is not None:
+            return self._processor, self._model
+
+        try:
+            from transformers import AutoModelForMultimodalLM, AutoProcessor
+        except (ImportError, OSError) as error:
+            raise ReaderError("granite_import_failed", str(error)) from error
+
+        try:
+            if self._processor is None:
+                self._processor = AutoProcessor.from_pretrained(self.model_name)
+            if self._model is None:
+                self._model = AutoModelForMultimodalLM.from_pretrained(
+                    self.model_name,
+                    torch_dtype="auto",
+                    device_map="auto",
+                )
+        except Exception as error:
+            raise ReaderError("granite_init_failed", str(error)) from error
+        return self._processor, self._model
+
+
+def _load_doctags_converter(
+    output_format: str = "text",
+) -> Callable[[str, Image.Image], str]:
+    if output_format not in {"text", "markdown"}:
+        raise ValueError("Granite output format must be text or markdown")
+    try:
+        from docling_core.types.doc import DoclingDocument
+        from docling_core.types.doc.document import DocTagsDocument
+    except (ImportError, OSError) as error:
+        raise ReaderError("granite_import_failed", str(error)) from error
+
+    def convert(doctags: str, image: Image.Image) -> str:
+        tagged_document = DocTagsDocument.from_doctags_and_image_pairs(
+            [doctags],
+            [image],
+        )
+        document = DoclingDocument(name="Document")
+        document.load_from_doctags(tagged_document)
+        if output_format == "markdown":
+            return document.export_to_markdown()
+        return document.export_to_text()
+
+    return convert
+
+
+class NemotronOCRV2Reader:
+    """NVIDIA detector, recognizer, and reading-order pipeline."""
+
+    name = "nemotron-ocr-v2"
+
+    def __init__(
+        self,
+        *,
+        language: str = "multi",
+        merge_level: str = "paragraph",
+        batch_size: int = 1,
+        pipeline: object | None = None,
+    ) -> None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        self.language = language
+        self.merge_level = merge_level
+        self.batch_size = batch_size
+        self._pipeline = pipeline
+        self._lock = threading.Lock()
+
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        return self.read_with_merge_level(
+            image_path,
+            page_number,
+            self.merge_level,
+        )
+
+    def read_with_merge_level(
+        self,
+        image_path: Path,
+        page_number: int,
+        merge_level: str,
+    ) -> list[TextRegion]:
+        with Image.open(image_path) as image:
+            image_size = image.size
+
+        with self._lock:
+            pipeline = (
+                self._pipeline
+                if self._pipeline is not None
+                else self._initialize_pipeline()
+            )
+            try:
+                predictions = pipeline(
+                    str(image_path),
+                    merge_level=merge_level,
+                )
+            except Exception as error:
+                raise ReaderError("nemotron_predict_failed", str(error)) from error
+
+        try:
+            return _parse_nemotron_predictions(
+                predictions,
+                page_number,
+                self.name,
+                image_size,
+            )
+        except (KeyError, TypeError, ValueError) as error:
+            raise ReaderError(
+                "invalid_reader_output",
+                f"Invalid Nemotron OCR v2 output: {error}",
+            ) from error
+
+    def read_batch(
+        self,
+        image_paths: list[Path],
+        page_numbers: list[int],
+    ) -> list[list[TextRegion] | ReaderError]:
+        if len(image_paths) != len(page_numbers):
+            raise ValueError("image_paths and page_numbers must have equal lengths")
+
+        image_sizes = []
+        for image_path in image_paths:
+            with Image.open(image_path) as image:
+                image_sizes.append(image.size)
+
+        results: list[list[TextRegion] | ReaderError] = []
+        with self._lock:
+            try:
+                pipeline = (
+                    self._pipeline
+                    if self._pipeline is not None
+                    else self._initialize_pipeline()
+                )
+            except ReaderError as error:
+                return [ReaderError(error.code, str(error)) for _ in image_paths]
+
+            for start in range(0, len(image_paths), self.batch_size):
+                paths = image_paths[start : start + self.batch_size]
+                numbers = page_numbers[start : start + self.batch_size]
+                sizes = image_sizes[start : start + self.batch_size]
+                try:
+                    batch_predictions = pipeline(
+                        [str(path) for path in paths],
+                        merge_level=self.merge_level,
+                    )
+                except Exception as error:
+                    results.extend(
+                        ReaderError("nemotron_predict_failed", str(error))
+                        for _ in paths
+                    )
+                    continue
+
+                if not isinstance(batch_predictions, list) or len(
+                    batch_predictions
+                ) != len(paths):
+                    message = (
+                        "Invalid Nemotron OCR v2 batch output: expected "
+                        f"{len(paths)} page results"
+                    )
+                    results.extend(
+                        ReaderError("invalid_reader_output", message) for _ in paths
+                    )
+                    continue
+
+                for predictions, page_number, image_size in zip(
+                    batch_predictions,
+                    numbers,
+                    sizes,
+                    strict=True,
+                ):
+                    try:
+                        regions = _parse_nemotron_predictions(
+                            predictions,
+                            page_number,
+                            self.name,
+                            image_size,
+                        )
+                    except (KeyError, TypeError, ValueError) as error:
+                        results.append(
+                            ReaderError(
+                                "invalid_reader_output",
+                                f"Invalid Nemotron OCR v2 output: {error}",
+                            )
+                        )
+                    else:
+                        results.append(regions)
+        return results
+
+    def _initialize_pipeline(self) -> object:
+        try:
+            from nemotron_ocr.inference.pipeline_v2 import NemotronOCRV2
+        except (ImportError, OSError) as error:
+            raise ReaderError("nemotron_import_failed", str(error)) from error
+
+        try:
+            self._pipeline = NemotronOCRV2(lang=self.language)
+        except Exception as error:
+            raise ReaderError("nemotron_init_failed", str(error)) from error
+        return self._pipeline
+
+
+def _parse_nemotron_predictions(
+    predictions: object,
+    page_number: int,
+    provider: str,
+    image_size: tuple[int, int],
+) -> list[TextRegion]:
+    if isinstance(predictions, (str, bytes)) or not isinstance(predictions, Iterable):
+        raise TypeError("predictions must be an iterable")
+
+    regions = []
+    for prediction in predictions:
+        text = _required_value(prediction, "text")
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        stripped_text = text.strip()
+        if not stripped_text:
+            continue
+
+        confidence = _confidence(_required_value(prediction, "confidence"))
+        left, top, right, bottom = _nemotron_box(
+            prediction,
+            *image_size,
+        )
+        regions.append(
+            TextRegion(
+                id=f"p{page_number}-block-{len(regions) + 1}",
+                kind="text",
+                text=stripped_text,
+                confidence=confidence,
+                bounding_box=BoundingBox(left, top, right, bottom),
+                reading_order=len(regions) + 1,
+                provider=provider,
+            )
+        )
+    return regions
+
+
+def _nemotron_box(
+    prediction: object,
+    width: int,
+    height: int,
+) -> tuple[int, int, int, int]:
+    left, lower, right, upper = _coordinate_values(
+        [
+            _required_value(prediction, "left"),
+            _required_value(prediction, "lower"),
+            _required_value(prediction, "right"),
+            _required_value(prediction, "upper"),
+        ]
+    )
+    if (
+        min(left, lower, right, upper) < -NEMOTRON_BOX_TOLERANCE
+        or max(left, lower, right, upper) > 1 + NEMOTRON_BOX_TOLERANCE
+    ):
+        raise ValueError("Nemotron bounding box must be normalized from 0 to 1")
+    left, lower, right, upper = (
+        min(1.0, max(0.0, coordinate)) for coordinate in (left, lower, right, upper)
+    )
+    return _box_coordinates(
+        [
+            math.floor(left * width),
+            math.floor(lower * height),
+            math.ceil(right * width),
+            math.ceil(upper * height),
+        ]
+    )
+
+
 def _parse_tesseract_tsv(
     output: str, page_number: int, provider: str
 ) -> list[TextRegion]:
@@ -327,6 +718,13 @@ def _parse_tesseract_tsv(
             confidence = (
                 None if confidence_value < 0 else round(confidence_value / 100, 4)
             )
+            provenance = {
+                "method": "tesseract_tsv",
+                "block_num": int(row["block_num"]),
+                "paragraph_num": int(row["par_num"]),
+                "line_num": int(row["line_num"]),
+                "word_num": int(row["word_num"]),
+            }
             order = len(regions) + 1
             regions.append(
                 TextRegion(
@@ -342,6 +740,7 @@ def _parse_tesseract_tsv(
                     ),
                     reading_order=order,
                     provider=provider,
+                    text_provenance=provenance,
                 )
             )
     except (KeyError, TypeError, ValueError) as error:
@@ -490,6 +889,6 @@ def _coordinate_values(value: object) -> list[float]:
 
 def _confidence(value: object) -> float:
     confidence = float(value)
-    if not math.isfinite(confidence):
-        raise ValueError("confidence must be finite")
+    if not math.isfinite(confidence) or not 0 <= confidence <= 1:
+        raise ValueError("confidence must be between 0 and 1")
     return confidence

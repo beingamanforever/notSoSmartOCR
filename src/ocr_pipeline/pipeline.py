@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import re
 import subprocess
 import tempfile
+import time
+from collections.abc import Sequence
+from contextlib import nullcontext
 from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -12,12 +16,13 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from .contracts import (
     BoundingBox,
     DocumentResult,
-    EvidenceText,
     Failure,
     PageResult,
+    RegionStage,
     TextRegion,
 )
 from .providers import LocalReader, ReaderError
+from .rendering import render_evidence
 
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
@@ -28,7 +33,11 @@ def process_document(
     *,
     pdf_dpi: int = 300,
     pdftoppm_executable: str = "pdftoppm",
+    stages: Sequence[RegionStage] = (),
+    timings: dict[str, float] | None = None,
 ) -> DocumentResult:
+    if timings is not None:
+        timings.clear()
     source_path = Path(source)
     source_kind = _source_kind(source_path)
     result = DocumentResult(
@@ -54,16 +63,74 @@ def process_document(
 
     try:
         with tempfile.TemporaryDirectory(prefix="ocr-pipeline-") as temporary_dir:
-            pages = _prepare_pages(
-                source_path,
-                source_kind,
-                Path(temporary_dir),
-                pdf_dpi,
-                pdftoppm_executable,
-            )
+            prepare_started = time.perf_counter()
+            try:
+                pages = _prepare_pages(
+                    source_path,
+                    source_kind,
+                    Path(temporary_dir),
+                    pdf_dpi,
+                    pdftoppm_executable,
+                )
+            finally:
+                _add_timing(timings, "prepare", prepare_started)
+            batch_results: list[list[TextRegion] | ReaderError] | None = None
+            read_batch = getattr(reader, "read_batch", None)
+            if (
+                len(pages) > 1
+                and callable(read_batch)
+                and getattr(reader, "batch_size", 1) > 1
+            ):
+                reader_started = time.perf_counter()
+                try:
+                    batch_results = read_batch(
+                        pages,
+                        list(range(1, len(pages) + 1)),
+                    )
+                except ReaderError as error:
+                    batch_results = [ReaderError(error.code, str(error)) for _ in pages]
+                finally:
+                    _add_timing(timings, "reader", reader_started)
+                if not isinstance(batch_results, list) or len(batch_results) != len(
+                    pages
+                ):
+                    batch_results = [
+                        ReaderError(
+                            "invalid_batch_output",
+                            "Batch reader returned the wrong number of page results",
+                        )
+                        for _ in pages
+                    ]
+                else:
+                    batch_results = [
+                        item
+                        if isinstance(item, ReaderError)
+                        or (
+                            isinstance(item, list)
+                            and all(isinstance(region, TextRegion) for region in item)
+                        )
+                        else ReaderError(
+                            "invalid_batch_output",
+                            "Batch reader returned an invalid page result",
+                        )
+                        for item in batch_results
+                    ]
             for page_number, page_path in enumerate(pages, start=1):
+                reader_result = (
+                    batch_results[page_number - 1]
+                    if batch_results is not None
+                    else None
+                )
                 result.pages.append(
-                    _read_page(page_path, page_number, reader, result.failures)
+                    _read_page(
+                        page_path,
+                        page_number,
+                        reader,
+                        result.failures,
+                        reader_result,
+                        stages,
+                        timings,
+                    )
                 )
     except PipelineError as error:
         result.failures.append(_failure(error.stage, error.code, str(error)))
@@ -84,6 +151,9 @@ def _read_page(
     page_number: int,
     reader: LocalReader,
     failures: list[Failure],
+    reader_result: list[TextRegion] | ReaderError | None = None,
+    stages: Sequence[RegionStage] = (),
+    timings: dict[str, float] | None = None,
 ) -> PageResult:
     page_failure_ids: list[str] = []
     try:
@@ -104,12 +174,21 @@ def _read_page(
             height=0,
             reader=reader.name,
             route="review",
-            text=EvidenceText(value="", evidence_ids=[]),
+            text=render_evidence([]),
             failure_ids=[failure.id],
         )
 
+    reader_started = None
     try:
-        regions = reader.read(image_path, page_number)
+        if isinstance(reader_result, ReaderError):
+            raise reader_result
+        if reader_result is None:
+            reader_started = time.perf_counter()
+        regions = (
+            reader.read(image_path, page_number)
+            if reader_result is None
+            else reader_result
+        )
     except ReaderError as error:
         failure = _failure(
             "ocr", error.code, str(error), page_number, len(failures) + 1
@@ -117,6 +196,10 @@ def _read_page(
         failures.append(failure)
         page_failure_ids.append(failure.id)
         regions = []
+    finally:
+        if reader_started is not None:
+            _add_timing(timings, "reader", reader_started)
+
     if not regions and not page_failure_ids:
         failure = _failure(
             "ocr",
@@ -139,19 +222,130 @@ def _read_page(
             )
         ]
 
-    evidence_ids = [region.id for region in regions]
+    stage_view = getattr(reader, "stage_view", None)
+    stage_view_started = time.perf_counter()
+    stage_view_recorded = False
+    try:
+        stage_context = (
+            stage_view(image_path, page_number)
+            if callable(stage_view)
+            else nullcontext(image_path)
+        )
+        with stage_context as stage_image_path:
+            _add_timing(timings, "stage_view", stage_view_started)
+            stage_view_recorded = True
+            regions = _apply_stages(
+                stage_image_path,
+                page_number,
+                regions,
+                stages,
+                failures,
+                page_failure_ids,
+                timings,
+            )
+    except ReaderError as error:
+        if not stage_view_recorded:
+            _add_timing(timings, "stage_view", stage_view_started)
+        failure = _failure(
+            "orientation",
+            error.code,
+            str(error),
+            page_number,
+            len(failures) + 1,
+        )
+        failures.append(failure)
+        page_failure_ids.append(failure.id)
+
+    restore_regions = getattr(reader, "restore_regions", None)
+    if callable(restore_regions):
+        try:
+            restore_started = time.perf_counter()
+            regions = restore_regions(regions, page_number)
+            _add_timing(timings, "restore", restore_started)
+        except ReaderError as error:
+            _add_timing(timings, "restore", restore_started)
+            failure = _failure(
+                "orientation",
+                error.code,
+                str(error),
+                page_number,
+                len(failures) + 1,
+            )
+            failures.append(failure)
+            page_failure_ids.append(failure.id)
+            regions = []
+    page_needs_review = getattr(reader, "page_needs_review", None)
+    reader_review = bool(callable(page_needs_review) and page_needs_review(page_number))
+    needs_review = (
+        bool(page_failure_ids)
+        or reader_review
+        or any(_region_needs_review(region) for region in regions)
+    )
     return PageResult(
         page_number=page_number,
         width=width,
         height=height,
         reader=reader.name,
-        route="review" if page_failure_ids else "accept_local",
-        text=EvidenceText(
-            value=" ".join(region.text for region in regions),
-            evidence_ids=evidence_ids,
-        ),
+        route="review" if needs_review else "accept_local",
+        text=render_evidence(regions),
         regions=regions,
         failure_ids=page_failure_ids,
+    )
+
+
+def _apply_stages(
+    image_path: Path,
+    page_number: int,
+    regions: list[TextRegion],
+    stages: Sequence[RegionStage],
+    failures: list[Failure],
+    page_failure_ids: list[str],
+    timings: dict[str, float] | None = None,
+) -> list[TextRegion]:
+    for stage in stages:
+        stage_started = time.perf_counter()
+        try:
+            candidate = stage.apply(image_path, page_number, copy.deepcopy(regions))
+        except ReaderError as error:
+            failure = _failure(
+                stage.name,
+                error.code,
+                str(error),
+                page_number,
+                len(failures) + 1,
+            )
+            failures.append(failure)
+            page_failure_ids.append(failure.id)
+            continue
+        finally:
+            _add_timing(timings, f"stage.{stage.name}", stage_started)
+        regions = candidate
+    return regions
+
+
+def _add_timing(
+    timings: dict[str, float] | None,
+    name: str,
+    started: float,
+) -> None:
+    if timings is None:
+        return
+    timings[name] = timings.get(name, 0.0) + time.perf_counter() - started
+
+
+def _region_needs_review(region: TextRegion) -> bool:
+    if region.resolution != "resolved":
+        return True
+    cells = (region.structure or {}).get("cells", [])
+    if isinstance(cells, list) and any(
+        isinstance(cell, dict) and cell.get("resolution") != "resolved"
+        for cell in cells
+    ):
+        return True
+    text = " ".join(region.text.casefold().split())
+    return any(
+        " ".join(alternative.text.casefold().split()) != text
+        for alternative in region.alternatives
     )
 
 

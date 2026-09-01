@@ -7,16 +7,21 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from PIL import Image, ImageDraw, ImageFont
 
 from ocr_pipeline import (
     GLMOCRDirectReader,
     GLMOCRReader,
+    GraniteDoclingReader,
+    NemotronOCRV2Reader,
     PaddleOCRVLReader,
     TesseractReader,
 )
 from ocr_pipeline import cli as ocr_cli
+from ocr_pipeline import providers as ocr_providers
 from ocr_pipeline.contracts import BoundingBox, DocumentResult, EvidenceText, TextRegion
 from ocr_pipeline.pipeline import process_document
 
@@ -141,6 +146,56 @@ def test_multi_page_tiff_ingests_every_frame_in_order(tmp_path: Path) -> None:
     assert "SECOND" in result.pages[1].text.value.upper()
 
 
+def test_tesseract_explicit_thresholding_is_provenanced(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "faint.png"
+    Image.new("RGB", (80, 40), "white").save(source)
+    calls = []
+
+    def fake_run(command, **options):
+        calls.append((command, options))
+        return SimpleNamespace(
+            returncode=0,
+            stderr="",
+            stdout=(
+                "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\t"
+                "left\ttop\twidth\theight\tconf\ttext\n"
+                "5\t1\t1\t1\t1\t1\t4\t5\t20\t10\t98\tFAINT\n"
+            ),
+        )
+
+    monkeypatch.setattr(ocr_providers.subprocess, "run", fake_run)
+    reader = TesseractReader(page_segmentation_mode=3, thresholding_method=1)
+
+    result = process_document(source, reader)
+
+    assert calls[0][0][-5:] == ["--psm", "3", "-c", "thresholding_method=1", "tsv"]
+    assert result.pages[0].regions[0].text_provenance == {
+        "method": "tesseract_tsv",
+        "block_num": 1,
+        "paragraph_num": 1,
+        "line_num": 1,
+        "word_num": 1,
+        "tesseract_config": {
+            "page_segmentation_mode": 3,
+            "thresholding_method": 1,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"page_segmentation_mode": 14}, "page segmentation"),
+        ({"thresholding_method": 3}, "thresholding"),
+    ],
+)
+def test_tesseract_rejects_invalid_configuration(options, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        TesseractReader(**options)
+
+
 def test_empty_reader_result_creates_full_page_repair_target(tmp_path: Path) -> None:
     source = tmp_path / "blank.png"
     Image.new("RGB", (80, 60), "white").save(source)
@@ -207,6 +262,7 @@ def test_cli_selects_model_readers_and_passes_reader_options(
                 str(source),
                 "--reader",
                 "paddleocr-vl",
+                "--public-comparator",
                 "--backend",
                 "native",
                 "--device",
@@ -224,7 +280,42 @@ def test_cli_selects_model_readers_and_passes_reader_options(
             [
                 str(source),
                 "--reader",
+                "nemotron-ocr-v2",
+                "--nemotron-language",
+                "en",
+                "--nemotron-merge-level",
+                "sentence",
+                "--batch-size",
+                "3",
+                "--output",
+                str(tmp_path / "nemotron.json"),
+            ]
+        )
+        == 0
+    )
+    assert (
+        ocr_cli.main(
+            [
+                str(source),
+                "--reader",
+                "granite-docling",
+                "--max-new-tokens",
+                "1024",
+                "--granite-output-format",
+                "markdown",
+                "--output",
+                str(tmp_path / "granite.json"),
+            ]
+        )
+        == 0
+    )
+    assert (
+        ocr_cli.main(
+            [
+                str(source),
+                "--reader",
                 "glm-ocr",
+                "--public-comparator",
                 "--ocr-api-host",
                 "127.0.0.1",
                 "--ocr-api-port",
@@ -245,6 +336,7 @@ def test_cli_selects_model_readers_and_passes_reader_options(
                 str(source),
                 "--reader",
                 "glm-ocr-direct",
+                "--public-comparator",
                 "--max-new-tokens",
                 "512",
                 "--output",
@@ -260,15 +352,115 @@ def test_cli_selects_model_readers_and_passes_reader_options(
     assert paddle_reader.device == "gpu:0"
     assert paddle_reader.use_doc_orientation_classify is True
     assert paddle_reader.use_doc_unwarping is False
-    sdk_reader, dpi = captured_readers[1]
+    nemotron_reader, _ = captured_readers[1]
+    assert isinstance(nemotron_reader, NemotronOCRV2Reader)
+    assert nemotron_reader.language == "en"
+    assert nemotron_reader.merge_level == "sentence"
+    assert nemotron_reader.batch_size == 3
+    granite_reader, _ = captured_readers[2]
+    assert isinstance(granite_reader, GraniteDoclingReader)
+    assert granite_reader.max_new_tokens == 1024
+    assert granite_reader.output_format == "markdown"
+    sdk_reader, dpi = captured_readers[3]
     assert isinstance(sdk_reader, GLMOCRReader)
     assert sdk_reader.ocr_api_host == "127.0.0.1"
     assert sdk_reader.ocr_api_port == 8080
     assert sdk_reader.layout_device == "cuda:1"
     assert dpi == 200
-    direct_reader, _ = captured_readers[2]
+    direct_reader, _ = captured_readers[4]
     assert isinstance(direct_reader, GLMOCRDirectReader)
     assert direct_reader.max_new_tokens == 512
+
+
+def test_cli_requires_explicit_public_comparator_mode(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as raised:
+        ocr_cli.main(
+            [
+                str(tmp_path / "page.png"),
+                "--reader",
+                "paddleocr-vl",
+            ]
+        )
+
+    assert raised.value.code == 2
+
+
+@pytest.mark.parametrize("source_kind", ["pdf", "tiff"])
+def test_nemotron_native_batch_preserves_multi_page_source_order(
+    tmp_path: Path,
+    source_kind: str,
+) -> None:
+    source = tmp_path / f"ordered.{source_kind}"
+    pages = [
+        Image.new("RGB", (60, 40), color) for color in ((30, 30, 30), (220, 220, 220))
+    ]
+    pages[0].save(
+        source,
+        format=source_kind.upper(),
+        save_all=True,
+        append_images=pages[1:],
+        resolution=150,
+    )
+
+    class OrderedBatchPipeline:
+        def __call__(
+            self, image_paths: list[str], *, merge_level: str
+        ) -> list[list[dict[str, object]]]:
+            results = []
+            for image_path in image_paths:
+                with Image.open(image_path) as image:
+                    page_label = (
+                        "dark" if image.convert("L").getpixel((0, 0)) < 128 else "light"
+                    )
+                results.append(
+                    [
+                        {
+                            "text": page_label,
+                            "confidence": 0.9,
+                            "left": 0.0,
+                            "lower": 0.0,
+                            "right": 1.0,
+                            "upper": 1.0,
+                        }
+                    ]
+                )
+            return results
+
+    result = process_document(
+        source,
+        NemotronOCRV2Reader(batch_size=2, pipeline=OrderedBatchPipeline()),
+    )
+
+    assert result.status == "success"
+    assert [page.page_number for page in result.pages] == [1, 2]
+    assert [page.text.value for page in result.pages] == ["dark", "light"]
+
+
+def test_invalid_batch_contract_fails_each_page_without_single_page_retry(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "two-pages.tiff"
+    page = Image.new("RGB", (20, 10), "white")
+    page.save(source, format="TIFF", save_all=True, append_images=[page])
+
+    class InvalidBatchReader:
+        name = "invalid-batch"
+        batch_size = 2
+
+        def read(self, image_path: Path, page_number: int):
+            raise AssertionError("invalid native batches must not retry per page")
+
+        def read_batch(self, image_paths: list[Path], page_numbers: list[int]):
+            return [[]]
+
+    result = process_document(source, InvalidBatchReader())
+
+    assert result.status == "failed"
+    assert len(result.pages) == 2
+    assert [failure.code for failure in result.failures] == [
+        "invalid_batch_output",
+        "invalid_batch_output",
+    ]
 
 
 def _write_pdf(path: Path) -> None:

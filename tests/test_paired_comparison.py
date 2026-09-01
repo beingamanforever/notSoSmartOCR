@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
-from experiments import paired_comparison  # noqa: E402
+from experiments import paired_comparison, public_benchmark  # noqa: E402
 
 
 def test_cli_compares_every_case_and_is_deterministic(tmp_path: Path) -> None:
@@ -134,6 +134,79 @@ def test_same_cascade_file_selects_local_and_repaired_metrics() -> None:
     )
 
 
+def test_same_file_selects_named_benchmark_arms() -> None:
+    payload = _payload(
+        [("success", "alpha", "")],
+        dataset="clinocr",
+        case_ids=["normal/template_1_sample_2_normal"],
+    )
+    case = payload["cases"][0]
+    del case["prediction"]
+    del case["metrics"]
+    case["cluster_id"] = "template_1"
+    case["arms"] = {
+        "strict_osd": {
+            "prediction": "",
+            "metrics": _metrics("", "alpha"),
+        },
+        "selective_fallback": {
+            "prediction": "alpha",
+            "metrics": _metrics("alpha", "alpha"),
+        },
+    }
+
+    result = paired_comparison.compare_payloads(
+        payload,
+        payload,
+        baseline_variant="arm:strict_osd",
+        candidate_variant="arm:selective_fallback",
+        resamples=20,
+    )
+
+    assert result["metrics"]["cer"]["baseline_micro"] == 1.0
+    assert result["metrics"]["cer"]["candidate_micro"] == 0.0
+    assert result["metrics"]["cer"]["micro_delta"] == -1.0
+
+    with pytest.raises(ValueError, match="Unsupported baseline variant"):
+        paired_comparison.compare_payloads(
+            payload,
+            payload,
+            baseline_variant="missing",
+            candidate_variant="arm:selective_fallback",
+            resamples=20,
+        )
+
+
+def test_compare_files_selects_nested_runs(tmp_path: Path) -> None:
+    baseline = _payload([("success", "alpha", "x")])
+    candidate = _payload([("success", "alpha", "alpha")])
+    baseline_path = tmp_path / "baseline.json"
+    candidate_path = tmp_path / "candidate.json"
+    baseline_path.write_text(json.dumps({"runs": {"auto": baseline}}))
+    candidate_path.write_text(json.dumps({"runs": {"auto": candidate}}))
+
+    result = paired_comparison.compare_files(
+        baseline_path,
+        candidate_path,
+        baseline_run="auto",
+        candidate_run="auto",
+        resamples=20,
+    )
+
+    assert result["baseline"]["run"] == "auto"
+    assert result["candidate"]["run"] == "auto"
+    assert result["metrics"]["cer"]["candidate_micro"] == 0.0
+
+    with pytest.raises(ValueError, match="has no run 'missing'"):
+        paired_comparison.compare_files(
+            baseline_path,
+            candidate_path,
+            baseline_run="missing",
+            candidate_run="auto",
+            resamples=20,
+        )
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -198,6 +271,23 @@ def test_recomputes_edits_instead_of_trusting_stored_metrics() -> None:
     assert result["metrics"]["cer"]["micro_delta"] < 0
     assert result["metrics"]["wer"]["candidate_micro"] == 0.0
     assert result["metrics"]["wer"]["micro_delta"] < 0
+
+
+def test_full_page_recomputation_uses_exact_distance() -> None:
+    reference = "patient takes aspirin 10 mg daily " * 40
+    prediction = "patient takes aspirin 10 mcg nightly " * 40
+
+    recomputed = paired_comparison._recompute_metrics(prediction, reference)
+    expected = public_benchmark._score(prediction, reference)
+
+    assert recomputed["cer"] == {
+        "edits": expected["cer"]["edits"],
+        "reference_units": expected["cer"]["reference_units"],
+    }
+    assert recomputed["wer"] == {
+        "edits": expected["wer"]["edits"],
+        "reference_units": expected["wer"]["reference_units"],
+    }
 
 
 @pytest.mark.parametrize(
@@ -324,4 +414,4 @@ def _payload(
 
 
 def _metrics(prediction: str, reference: str) -> dict[str, object]:
-    return paired_comparison._score(prediction, reference)
+    return paired_comparison._recompute_metrics(prediction, reference)

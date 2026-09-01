@@ -53,6 +53,22 @@ def test_empty_non_text_visual_region_is_not_risky() -> None:
     assert "risky" not in identify_risky_regions(document)
 
 
+def test_invalid_date_is_flagged_but_not_rewritten() -> None:
+    document = _document(
+        TextRegion(
+            id="date",
+            kind="text",
+            text="DOB: 02/31/2024",
+            confidence=0.9,
+            bounding_box=BoundingBox(0, 0, 20, 20),
+            reading_order=1,
+            provider="local",
+        )
+    )
+
+    assert identify_risky_regions(document) == {"date": ["invalid_calendar_date"]}
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -112,7 +128,9 @@ def test_rowspan_does_not_hide_later_invalid_span(invalid_span: str) -> None:
 def test_valid_rowspan_leaves_rectangularity_indeterminate() -> None:
     document = _document()
     document.pages[0].regions[2].reading_order = 3
-    document.pages[0].regions[2].text = (
+    document.pages[0].regions[
+        2
+    ].text = (
         "<table><tr><td rowspan='2'>a</td><td>b</td></tr><tr><td>c</td></tr></table>"
     )
 
@@ -143,8 +161,8 @@ def test_patch_rejects_unauthorized_or_protected_changes(
     assert document.pages[0].regions[1].text == ""
 
 
-def _document() -> DocumentResult:
-    regions = [
+def _document(*custom_regions: TextRegion) -> DocumentResult:
+    regions = list(custom_regions) or [
         TextRegion(
             id="stable",
             kind="word",
