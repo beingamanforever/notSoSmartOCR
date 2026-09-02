@@ -1,0 +1,49 @@
+% The shared candidate-resolution rule: how a challenger is adopted without erasing evidence.
+% Regenerate: tectonic evidence_resolution.tex && pdftocairo -svg evidence_resolution.pdf evidence_resolution.svg
+\input{orx-tikz-preamble}
+
+\begin{document}
+\hyphenpenalty=10000\exhyphenpenalty=10000
+\begin{tikzpicture}[orx, node distance=6mm and 12mm]
+
+  \node[data, minimum width=74mm] (primary)
+    {Incumbent reading\\\scriptsize literal text, box, confidence, provider};
+  \node[data, right=of primary, minimum width=74mm] (chal)
+    {Challenger candidates\\\scriptsize second view, second engine, or crop specialist};
+
+  \node[block, below=9mm of $(primary)!0.5!(chal)$, minimum width=165mm,
+        align=center, text width=159mm] (compare)
+    {Normalize and compare\\
+     \scriptsize casefold and collapse whitespace, extract the numeric value where one
+     exists, then select the best-supported challenger by agreement first and confidence second};
+
+  \node[ours, below=of compare, minimum width=165mm, align=left, text width=159mm] (rule)
+    {\textbf{Adoption rules, applied in order}\\
+     \scriptsize 1.\ the incumbent is empty and a challenger agrees $\rightarrow$ adopt the challenger\\
+     \scriptsize 2.\ the incumbent boxes conflict geometrically and a challenger reads the same value $\rightarrow$ adopt\\
+     \scriptsize 3.\ the incumbent is under the confidence floor and a challenger is more confident $\rightarrow$ adopt\\
+     \scriptsize 4.\ otherwise the incumbent stands};
+
+  \node[block, below=of rule, minimum width=165mm, align=left, text width=159mm] (record)
+    {\textbf{Record, whichever rule fired}\\
+     \scriptsize selected text carrying the merged evidence IDs of every supporting candidate;
+     \texttt{alternatives[]} holding each distinct rejected reading with its own provider;
+     \texttt{resolution} set to \texttt{conflicting} when a challenger of equal or higher
+     confidence still disagrees with the surviving text};
+
+  \node[data, below=of record, minimum width=140mm] (route)
+    {\texttt{accept\_local}, or \texttt{review} if any region is unresolved or conflicting};
+
+  \draw[flow] (primary.south) -- ([xshift=-38mm]compare.north);
+  \draw[flow] (chal.south)    -- ([xshift=38mm]compare.north);
+  \draw[flow] (compare) -- (rule);
+  \draw[flow] (rule)    -- (record);
+  \draw[flow] (record)  -- node[edgelbl, right] {page evidence} (route);
+
+  \node[stagelbl, anchor=north west, align=left, text width=163mm]
+    at ($(record.west |- route.south) + (0,-2mm)$)
+    {one rule serves tile fusion, table cells, and the handwriting sidecar; nothing in
+     this path deletes a reading, because adoption demotes the incumbent to an alternative};
+
+\end{tikzpicture}
+\end{document}

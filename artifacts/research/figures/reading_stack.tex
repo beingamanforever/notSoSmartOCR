@@ -1,0 +1,87 @@
+% The gated reading stack: when each guard fires, what it computes, what it may change.
+% Regenerate: tectonic reading_stack.tex && pdftocairo -svg reading_stack.pdf reading_stack.svg
+\input{orx-tikz-preamble}
+
+\begin{document}
+\hyphenpenalty=10000\exhyphenpenalty=10000
+\begin{tikzpicture}[orx, node distance=3.5mm and 5mm]
+
+  \node[block, minimum width=37mm] (s1) {1. Orientation guard};
+  \node[block, right=of s1, minimum width=37mm] (s2) {2. Routed local view};
+  \node[block, right=of s2, minimum width=37mm] (s3) {3. Tiny-text tiles};
+  \node[block, right=of s3, minimum width=37mm] (s4) {4. Wide-band recovery};
+
+  \node[muted, below=6mm of s1, minimum width=37mm, minimum height=14mm, align=left, text width=32mm] (t1)
+    {\scriptsize \textbf{Gate}\\
+     \scriptsize every page: docTR and Tesseract OSD are both read};
+  \node[muted, right=of t1, minimum width=37mm, minimum height=14mm, align=left, text width=32mm] (t2)
+    {\scriptsize \textbf{Gate}\\
+     \scriptsize a dark document frame is located inside the scan};
+  \node[muted, right=of t2, minimum width=37mm, minimum height=14mm, align=left, text width=32mm] (t3)
+    {\scriptsize \textbf{Gate}\\
+     \scriptsize baseline median region height at most 10\,px};
+  \node[muted, right=of t3, minimum width=37mm, minimum height=14mm, align=left, text width=32mm] (t4)
+    {\scriptsize \textbf{Gate}\\
+     \scriptsize a shallow, page-wide, low-confidence text band};
+
+  \node[block, below=of t1, minimum width=37mm, minimum height=22mm, align=left, text width=32mm] (a1)
+    {\scriptsize \textbf{Computation}\\
+     \scriptsize read up to four rotated views with the inner reader, then rank by
+     character coverage and supporting-word count};
+  \node[block, right=of a1, minimum width=37mm, minimum height=22mm, align=left, text width=32mm] (a2)
+    {\scriptsize \textbf{Computation}\\
+     \scriptsize crop to the located frame and read it twice with the same engine,
+     once under Otsu and once under Sauvola thresholding};
+  \node[block, right=of a2, minimum width=37mm, minimum height=22mm, align=left, text width=32mm] (a3)
+    {\scriptsize \textbf{Computation}\\
+     \scriptsize reread three vertically overlapping bands, translate each tile box
+     back to the page, match by box overlap};
+  \node[block, right=of a3, minimum width=37mm, minimum height=22mm, align=left, text width=32mm] (a4)
+    {\scriptsize \textbf{Computation}\\
+     \scriptsize pad the band, upscale $3\times$ with Lanczos, and hand only that crop
+     to the fallback recognizer};
+
+  \node[ours, below=of a1, minimum width=37mm, minimum height=26mm, align=left, text width=32mm] (o1)
+    {\scriptsize \textbf{Evidence effect}\\
+     \scriptsize one view is selected and every box is mapped back into the original
+     page space; a non-zero angle or a fallback selector routes to review};
+  \node[ours, right=of o1, minimum width=37mm, minimum height=26mm, align=left, text width=32mm] (o2)
+    {\scriptsize \textbf{Evidence effect}\\
+     \scriptsize the adaptive view wins only as a strict superset: baseline token
+     recall at least 0.98, two or more added tokens, and no confidence loss};
+  \node[ours, right=of o2, minimum width=37mm, minimum height=26mm, align=left, text width=32mm] (o3)
+    {\scriptsize \textbf{Evidence effect}\\
+     \scriptsize every baseline region is preserved and each tile reading is attached
+     as an alternative; a tile-only region is promoted only when two tiles agree
+     exactly above confidence 0.85};
+  \node[ours, right=of o3, minimum width=37mm, minimum height=26mm, align=left, text width=32mm] (o4)
+    {\scriptsize \textbf{Evidence effect}\\
+     \scriptsize replacement needs a bounded correction or missing-text test to pass;
+     a low-overlap recovery must also be confirmed by an independent reader at 0.98
+     recall and similarity};
+
+  \draw[flow] (s1) -- (s2);
+  \draw[flow] (s2) -- (s3);
+  \draw[flow] (s3) -- (s4);
+
+  \draw[flow] (s1) -- (t1);
+  \draw[flow] (s2) -- (t2);
+  \draw[flow] (s3) -- (t3);
+  \draw[flow] (s4) -- (t4);
+  \draw[flow] (t1) -- (a1);
+  \draw[flow] (t2) -- (a2);
+  \draw[flow] (t3) -- (a3);
+  \draw[flow] (t4) -- (a4);
+  \draw[flow] (a1) -- (o1);
+  \draw[flow] (a2) -- (o2);
+  \draw[flow] (a3) -- (o3);
+  \draw[flow] (a4) -- (o4);
+
+  \node[stagelbl, above=1.5mm of s1.north west, anchor=south west]
+    {a closed gate passes its input through unchanged};
+
+  \node[stagelbl, below=1.5mm of o1.south west, anchor=north west]
+    {the accented row is the invariant: no guard deletes a region it did not create};
+
+\end{tikzpicture}
+\end{document}
