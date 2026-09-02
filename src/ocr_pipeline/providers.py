@@ -2,20 +2,46 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import io
+import json
 import math
 import subprocess
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Iterator, Protocol
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import Request, urlopen
 
 from PIL import Image
 
 from .contracts import BoundingBox, TextRegion
 
 NEMOTRON_BOX_TOLERANCE = 0.02
+MINISTRAL_OCR_PROMPT = (
+    "Transcribe all visible text from this document in reading order. "
+    "Preserve line breaks, tables, form labels, checkbox states, and handwriting. "
+    "Do not add, correct, or summarize content."
+)
+MINISTRAL_MODEL_REVISION = "6f9c4b12a95b139af68670a6713616b757923735"
+MINISTRAL_MODEL_ORIGIN = "Mistral AI, France"
+MINISTRAL_MODEL_LICENSE = "Apache-2.0"
+PHI4_HANDWRITING_PROMPT = (
+    "Transcribe only the handwritten text exactly. Do not correct or explain it."
+)
+PHI4_MODEL_ID = "microsoft/Phi-4-multimodal-instruct"
+PHI4_MODEL_REVISION = "93f923e1a7727d1c4f446756212d9d3e8fcc5d81"
+PHI4_MODEL_ORIGIN = "Microsoft, United States"
+PHI4_MODEL_LICENSE = "MIT"
+PHI4_ADAPTER_FORMAT = "phi4_vision_decoder_lora_v2"
+PHI4_LORA_PARTS = ("lora_A.vision", "lora_B.vision")
+PHI4_LORA_TARGETS = ("qkv_proj", "o_proj", "gate_up_proj", "down_proj")
+_PHI4_SDPA_LOCK = threading.RLock()
+MAX_HANDWRITING_SERVICE_RESPONSE_BYTES = 1_000_000
 
 
 class LocalReader(Protocol):
@@ -28,6 +54,412 @@ class ReaderError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class Phi4HandwritingReader:
+    """Local Phi-4 crop recognizer with a validated vision-decoder adapter."""
+
+    name = "phi4-handwriting"
+
+    def __init__(
+        self,
+        adapter_path: Path,
+        *,
+        model_name_or_path: str | Path = PHI4_MODEL_ID,
+        model_revision: str = PHI4_MODEL_REVISION,
+        device: str = "cuda:0",
+        max_new_tokens: int = 128,
+        max_batch_items: int = 16,
+        batch_size: int = 2,
+        local_files_only: bool = True,
+        processor: object | None = None,
+        model: object | None = None,
+        generation_config: object | None = None,
+        torch_module: object | None = None,
+    ) -> None:
+        adapter_path = Path(adapter_path)
+        model_source = Path(model_name_or_path)
+        if not adapter_path.is_file():
+            raise FileNotFoundError(f"Phi-4 adapter was not found: {adapter_path}")
+        if max_new_tokens <= 0:
+            raise ValueError("Phi-4 max_new_tokens must be positive")
+        if max_batch_items <= 0:
+            raise ValueError("Phi-4 max_batch_items must be positive")
+        if batch_size <= 0 or batch_size > max_batch_items:
+            raise ValueError("Phi-4 batch_size must fit within max_batch_items")
+        if str(model_name_or_path) == PHI4_MODEL_ID:
+            if model_revision != PHI4_MODEL_REVISION:
+                raise ValueError("Phi-4 must use the pinned model revision")
+        elif not model_source.is_dir():
+            raise FileNotFoundError(
+                f"Local Phi-4 model directory was not found: {model_source}"
+            )
+        self.adapter_path = adapter_path
+        self.model_name_or_path = str(model_name_or_path)
+        self.model_revision = model_revision
+        self.device = device
+        self.max_new_tokens = max_new_tokens
+        self.max_batch_items = max_batch_items
+        self.batch_size = batch_size
+        self.local_files_only = local_files_only
+        self._processor = processor
+        self._model = model
+        self._generation_config = generation_config
+        self._torch = torch_module
+        self._adapter_loaded = False
+        self._adapter_provenance: dict[str, Any] | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def provenance(self) -> dict[str, Any]:
+        adapter = self._adapter_provenance or {
+            "format": PHI4_ADAPTER_FORMAT,
+            "source": self.adapter_path.name,
+            "validated": False,
+        }
+        official_model = self.model_name_or_path == PHI4_MODEL_ID
+        return {
+            "id": PHI4_MODEL_ID
+            if official_model
+            else Path(self.model_name_or_path).name,
+            "source": self.model_name_or_path if official_model else "local_directory",
+            "revision": self.model_revision if official_model else "unverified",
+            "origin": PHI4_MODEL_ORIGIN if official_model else "unverified",
+            "license": PHI4_MODEL_LICENSE if official_model else "unverified",
+            "identity_verified": official_model,
+            "local_files_only": self.local_files_only,
+            "adapter": dict(adapter),
+        }
+
+    def transcribe_batch(self, images: Sequence[Image.Image]) -> list[str]:
+        if not images:
+            return []
+        if len(images) > self.max_batch_items:
+            raise ReaderError(
+                "phi4_handwriting_batch_too_large",
+                "Phi-4 handwriting crop batch exceeds its configured limit",
+            )
+        with self._lock:
+            processor, model, generation_config, torch_module = (
+                self._initialize_components()
+            )
+            output = []
+            for start in range(0, len(images), self.batch_size):
+                output.extend(
+                    self._transcribe_batch(
+                        images[start : start + self.batch_size],
+                        processor,
+                        model,
+                        generation_config,
+                        torch_module,
+                    )
+                )
+            return output
+
+    def _initialize_components(self) -> tuple[object, object, object | None, object]:
+        if self._torch is None or self._processor is None or self._model is None:
+            try:
+                import torch
+                import transformers.utils as transformers_utils
+                from transformers.utils import import_utils
+            except (ImportError, OSError) as error:
+                raise ReaderError(
+                    "phi4_handwriting_import_failed",
+                    "Phi-4 handwriting dependencies are unavailable",
+                ) from error
+
+            try:
+                with _force_phi4_sdpa(transformers_utils, import_utils):
+                    from transformers import (
+                        AutoModelForCausalLM,
+                        AutoProcessor,
+                        GenerationConfig,
+                    )
+
+                    options: dict[str, object] = {
+                        "trust_remote_code": True,
+                        "local_files_only": self.local_files_only,
+                    }
+                    if self.model_name_or_path == PHI4_MODEL_ID:
+                        options["revision"] = self.model_revision
+                    self._torch = torch
+                    self._processor = AutoProcessor.from_pretrained(
+                        self.model_name_or_path,
+                        dynamic_hd=1,
+                        **options,
+                    )
+                    self._generation_config = GenerationConfig.from_pretrained(
+                        self.model_name_or_path,
+                        **options,
+                    )
+                    self._model = AutoModelForCausalLM.from_pretrained(
+                        self.model_name_or_path,
+                        torch_dtype=torch.bfloat16,
+                        _attn_implementation="sdpa",
+                        **options,
+                    ).to(self.device)
+            except Exception as error:
+                raise ReaderError(
+                    "phi4_handwriting_init_failed",
+                    "Phi-4 handwriting model could not be initialized",
+                ) from error
+
+        if not self._adapter_loaded:
+            self._load_adapter(self._model, self._torch)
+        return (
+            self._processor,
+            self._model,
+            self._generation_config,
+            self._torch,
+        )
+
+    def _load_adapter(self, model: object, torch_module: object) -> None:
+        try:
+            model.set_lora_adapter("vision")
+            parameters = list(model.named_parameters())
+            expected = {
+                name
+                for name, _ in parameters
+                if any(part in name for part in PHI4_LORA_PARTS)
+                and any(target in name for target in PHI4_LORA_TARGETS)
+            }
+            if not expected:
+                raise ValueError("model exposes no vision-decoder LoRA")
+            payload = torch_module.load(
+                self.adapter_path,
+                map_location="cpu",
+                weights_only=True,
+            )
+            state, provenance = _phi4_adapter_payload(payload, expected)
+            load_result = model.load_state_dict(state, strict=False)
+            if getattr(load_result, "unexpected_keys", []):
+                raise ValueError("adapter contains unexpected parameters")
+            model.eval()
+        except Exception as error:
+            raise ReaderError(
+                "phi4_handwriting_adapter_failed",
+                "Phi-4 handwriting adapter provenance or parameters are invalid",
+            ) from error
+        self._adapter_provenance = {
+            "format": PHI4_ADAPTER_FORMAT,
+            "source": self.adapter_path.name,
+            "validated": True,
+            **provenance,
+        }
+        self._adapter_loaded = True
+
+    def _transcribe_batch(
+        self,
+        images: Sequence[Image.Image],
+        processor: object,
+        model: object,
+        generation_config: object | None,
+        torch_module: object,
+    ) -> list[str]:
+        prompt = f"<|user|><|image_1|>{PHI4_HANDWRITING_PROMPT}<|end|><|assistant|>"
+        try:
+            inputs = processor(
+                text=[prompt] * len(images),
+                images=list(images),
+                padding=True,
+                return_tensors="pt",
+            ).to(self.device)
+            input_ids = inputs.get("input_ids")
+            if input_ids is None or not hasattr(input_ids, "shape"):
+                raise ValueError("processor returned no token ids")
+            prompt_tokens = int(input_ids.shape[-1])
+            generation_options: dict[str, object] = {
+                "max_new_tokens": self.max_new_tokens,
+                "do_sample": False,
+                "num_beams": 1,
+            }
+            if generation_config is not None:
+                generation_options["generation_config"] = generation_config
+            with torch_module.inference_mode():
+                output = model.generate(**inputs, **generation_options)
+            sequences = getattr(output, "sequences", output)
+            if len(sequences) != len(images):
+                raise ValueError("generation returned the wrong batch size")
+            generated = [sequence[prompt_tokens:] for sequence in sequences]
+            if any(
+                int(tokens.shape[-1] if hasattr(tokens, "shape") else len(tokens))
+                >= self.max_new_tokens
+                for tokens in generated
+            ):
+                raise ValueError("generation reached its token limit")
+            texts = [
+                processor.decode(
+                    tokens,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=False,
+                )
+                for tokens in generated
+            ]
+        except Exception as error:
+            raise ReaderError(
+                "phi4_handwriting_inference_failed",
+                "Phi-4 handwriting inference did not produce a bounded result",
+            ) from error
+        if any(not isinstance(text, str) for text in texts):
+            raise ReaderError(
+                "phi4_handwriting_output_failed",
+                "Phi-4 handwriting output was not text",
+            )
+        return [text.strip() for text in texts]
+
+
+class Phi4HandwritingServiceReader:
+    """Call a local, warm Phi-4 handwriting process over loopback HTTP."""
+
+    name = "phi4-handwriting"
+
+    def __init__(
+        self,
+        service_url: str,
+        *,
+        max_batch_items: int = 16,
+        timeout_seconds: float = 120,
+    ) -> None:
+        parsed = urlsplit(service_url)
+        if parsed.scheme != "http" or parsed.hostname not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }:
+            raise ValueError("Phi-4 handwriting service must use loopback HTTP")
+        if max_batch_items <= 0:
+            raise ValueError("Phi-4 max_batch_items must be positive")
+        if timeout_seconds <= 0:
+            raise ValueError("Phi-4 service timeout must be positive")
+        self.service_url = service_url.rstrip("/")
+        self.max_batch_items = max_batch_items
+        self.timeout_seconds = timeout_seconds
+        self._provenance: dict[str, Any] = {
+            "id": PHI4_MODEL_ID,
+            "source": "loopback_service",
+            "revision": PHI4_MODEL_REVISION,
+            "origin": PHI4_MODEL_ORIGIN,
+            "license": PHI4_MODEL_LICENSE,
+            "identity_verified": True,
+            "local_files_only": True,
+            "adapter": {
+                "format": PHI4_ADAPTER_FORMAT,
+                "source": "sidecar",
+                "validated": False,
+            },
+        }
+
+    @property
+    def provenance(self) -> dict[str, Any]:
+        return dict(self._provenance)
+
+    def transcribe_batch(self, images: Sequence[Image.Image]) -> list[str]:
+        if not images:
+            return []
+        if len(images) > self.max_batch_items:
+            raise ReaderError(
+                "phi4_handwriting_batch_too_large",
+                "Phi-4 handwriting crop batch exceeds its configured limit",
+            )
+        payload = json.dumps(
+            {"images": [_encode_png(image) for image in images]},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request = Request(
+            f"{self.service_url}/transcribe",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                body = response.read(MAX_HANDWRITING_SERVICE_RESPONSE_BYTES + 1)
+            if len(body) > MAX_HANDWRITING_SERVICE_RESPONSE_BYTES:
+                raise ValueError("service response exceeded its limit")
+            result = json.loads(body)
+            if not isinstance(result, dict):
+                raise ValueError("service response was not an object")
+            texts = result.get("texts")
+            provenance = result.get("provenance")
+            if (
+                not isinstance(texts, list)
+                or len(texts) != len(images)
+                or any(not isinstance(text, str) for text in texts)
+                or not isinstance(provenance, dict)
+            ):
+                raise ValueError("service response did not match its contract")
+        except (HTTPError, URLError, OSError, ValueError) as error:
+            raise ReaderError(
+                "phi4_handwriting_service_failed",
+                "The local Phi-4 handwriting service did not return a valid result",
+            ) from error
+        self._provenance = dict(provenance)
+        return [text.strip() for text in texts]
+
+
+def _encode_png(image: Image.Image) -> str:
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+@contextmanager
+def _force_phi4_sdpa(
+    transformers_utils: object,
+    import_utils: object,
+) -> Iterator[None]:
+    """Keep Phi-4 remote imports off an incompatible FlashAttention binary."""
+    with _PHI4_SDPA_LOCK:
+        names = (
+            "is_flash_attn_2_available",
+            "is_flash_attn_greater_or_equal_2_10",
+        )
+        targets = tuple(
+            (module, name, getattr(module, name))
+            for module in (transformers_utils, import_utils)
+            for name in names
+        )
+
+        def unavailable(*args: object, **kwargs: object) -> bool:
+            return False
+
+        for module, name, _ in targets:
+            setattr(module, name, unavailable)
+        try:
+            yield
+        finally:
+            for module, name, original in targets:
+                setattr(module, name, original)
+
+
+def _phi4_adapter_payload(
+    payload: object,
+    expected_names: set[str],
+) -> tuple[dict[str, object], dict[str, object]]:
+    if not isinstance(payload, dict) or payload.get("format") != PHI4_ADAPTER_FORMAT:
+        raise ValueError("unsupported adapter format")
+    provenance = payload.get("provenance")
+    if not isinstance(provenance, dict):
+        raise ValueError("adapter lacks training provenance")
+    family_ids = provenance.get("training_family_ids")
+    family_count = provenance.get("training_family_count")
+    if (
+        not isinstance(family_ids, list)
+        or not family_ids
+        or not all(
+            isinstance(value, str) and bool(value) and value == value.strip().casefold()
+            for value in family_ids
+        )
+        or len(set(family_ids)) != len(family_ids)
+        or family_count != len(family_ids)
+    ):
+        raise ValueError("adapter has invalid training provenance")
+    state = payload.get("state")
+    if not isinstance(state, dict) or set(state) != expected_names:
+        raise ValueError("adapter does not match the vision-decoder LoRA")
+    return state, {
+        "training_family_count": family_count,
+    }
 
 
 class TesseractReader:
@@ -335,6 +767,153 @@ class GLMOCRDirectReader:
         return self._processor, self._model
 
 
+class MinistralOCRReader:
+    """Unmeasured Ministral full-page OCR challenger."""
+
+    name = "ministral-ocr"
+
+    def __init__(
+        self,
+        *,
+        model_name: str = "mistralai/Ministral-3-3B-Base-2512",
+        model_revision: str = MINISTRAL_MODEL_REVISION,
+        prompt: str = MINISTRAL_OCR_PROMPT,
+        max_new_tokens: int = 8192,
+        processor: object | None = None,
+        model: object | None = None,
+    ) -> None:
+        if not prompt.strip():
+            raise ValueError("Ministral OCR prompt must not be empty")
+        if max_new_tokens <= 0:
+            raise ValueError("Ministral OCR max_new_tokens must be positive")
+        if len(model_revision) != 40 or any(
+            char not in "0123456789abcdef" for char in model_revision.lower()
+        ):
+            raise ValueError("Ministral OCR model revision must be an immutable commit")
+        self.model_name = model_name
+        self.model_revision = model_revision
+        self.prompt = prompt
+        self.max_new_tokens = max_new_tokens
+        self._processor = processor
+        self._model = model
+        self._lock = threading.Lock()
+
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        try:
+            with Image.open(image_path) as image:
+                width, height = image.size
+        except (OSError, ValueError) as error:
+            raise ReaderError("ministral_image_failed", str(error)) from error
+
+        with self._lock:
+            processor, model = self._initialize_components()
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "url": str(image_path)},
+                        {"type": "text", "text": self.prompt},
+                    ],
+                }
+            ]
+            try:
+                input_format = "chat_template"
+                try:
+                    inputs = processor.apply_chat_template(
+                        messages,
+                        add_generation_prompt=True,
+                        tokenize=True,
+                        return_dict=True,
+                        return_tensors="pt",
+                    )
+                except ValueError as error:
+                    if "does not have a chat template" not in str(error):
+                        raise
+                    input_format = "base_image_text"
+                    with Image.open(image_path) as source:
+                        inputs = processor(
+                            images=source.convert("RGB"),
+                            text=f"<s>[INST][IMG]{self.prompt}[/INST]",
+                            return_tensors="pt",
+                        )
+                inputs = inputs.to(model.device)
+                generated_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    do_sample=False,
+                )
+            except Exception as error:
+                raise ReaderError("ministral_predict_failed", str(error)) from error
+
+            try:
+                prompt_length = inputs["input_ids"].shape[1]
+                text = processor.decode(
+                    generated_ids[0][prompt_length:],
+                    skip_special_tokens=True,
+                )
+            except Exception as error:
+                raise ReaderError("ministral_output_failed", str(error)) from error
+
+        if not isinstance(text, str) or not text.strip():
+            raise ReaderError(
+                "ministral_output_failed", "Ministral OCR returned no decoded text"
+            )
+        provenance = {
+            "method": "ministral_full_page_generation",
+            "provider": self.name,
+            "model": {
+                "id": self.model_name,
+                "revision": self.model_revision,
+                "origin": MINISTRAL_MODEL_ORIGIN,
+                "license": MINISTRAL_MODEL_LICENSE,
+            },
+            "prompt": self.prompt,
+            "generation": {
+                "max_new_tokens": self.max_new_tokens,
+                "do_sample": False,
+            },
+            "processor_input": input_format,
+        }
+        return [
+            TextRegion(
+                id=f"p{page_number}-page-1",
+                kind="page_text",
+                text=text.strip(),
+                confidence=None,
+                bounding_box=BoundingBox(0, 0, width, height),
+                reading_order=1,
+                provider=self.name,
+                text_provenance=provenance,
+            )
+        ]
+
+    def _initialize_components(self) -> tuple[object, object]:
+        if self._processor is not None and self._model is not None:
+            return self._processor, self._model
+
+        try:
+            from transformers import AutoProcessor, Mistral3ForConditionalGeneration
+        except (ImportError, OSError) as error:
+            raise ReaderError("ministral_import_failed", str(error)) from error
+
+        try:
+            if self._processor is None:
+                self._processor = AutoProcessor.from_pretrained(
+                    self.model_name,
+                    revision=self.model_revision,
+                    fix_mistral_regex=True,
+                )
+            if self._model is None:
+                self._model = Mistral3ForConditionalGeneration.from_pretrained(
+                    self.model_name,
+                    revision=self.model_revision,
+                    device_map="auto",
+                )
+        except Exception as error:
+            raise ReaderError("ministral_init_failed", str(error)) from error
+        return self._processor, self._model
+
+
 class GraniteDoclingReader:
     """Compact IBM page parser that serializes DocTags as text or Markdown."""
 
@@ -534,6 +1113,7 @@ class NemotronOCRV2Reader:
                 page_number,
                 self.name,
                 image_size,
+                merge_level,
             )
         except (KeyError, TypeError, ValueError) as error:
             raise ReaderError(
@@ -605,6 +1185,7 @@ class NemotronOCRV2Reader:
                             page_number,
                             self.name,
                             image_size,
+                            self.merge_level,
                         )
                     except (KeyError, TypeError, ValueError) as error:
                         results.append(
@@ -635,6 +1216,7 @@ def _parse_nemotron_predictions(
     page_number: int,
     provider: str,
     image_size: tuple[int, int],
+    merge_level: str,
 ) -> list[TextRegion]:
     if isinstance(predictions, (str, bytes)) or not isinstance(predictions, Iterable):
         raise TypeError("predictions must be an iterable")
@@ -662,6 +1244,7 @@ def _parse_nemotron_predictions(
                 bounding_box=BoundingBox(left, top, right, bottom),
                 reading_order=len(regions) + 1,
                 provider=provider,
+                text_provenance={"merge_level": merge_level},
             )
         )
     return regions

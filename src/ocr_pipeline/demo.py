@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import subprocess
@@ -15,13 +16,20 @@ from pathlib import Path
 from secrets import token_urlsafe
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from .contracts import RegionStage
-from .pipeline import IMAGE_SUFFIXES, PipelineError, _prepare_pages, _source_kind
+from .pipeline import (
+    IMAGE_SUFFIXES,
+    PipelineError,
+    _PreparedPages,
+    _prepare_pages,
+    _source_kind,
+)
 from .pipeline import process_document
 from .preprocessing import RoutedTesseractReader
-from .providers import LocalReader
+from .providers import LocalReader, ReaderError
+from .rendering import render_evidence, render_page_markdown
 
 try:
     from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -39,9 +47,17 @@ except ImportError:  # pragma: no cover - exercised only without demo dependenci
 
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_DOCUMENT_PAGES = 32
+MAX_PAGE_PIXELS = 32_000_000
+MAX_DECODED_PIXELS = 200_000_000
 ACCEPTED_SUFFIXES = IMAGE_SUFFIXES | {".pdf"}
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 MULTIPART_OVERHEAD_BYTES = 64 * 1024
+EXAMPLE_FILES = {
+    "architecture": "artifacts/ocr-pipeline-architecture.pdf",
+    "hard-case-routing": "artifacts/hard-case-routing.pdf",
+}
+TABLE_EXAMPLE_NAME = "clinical-table"
 
 
 class RequestTooLarge(Exception):
@@ -171,19 +187,37 @@ def create_app(
     *,
     stages: Sequence[RegionStage] = (),
     max_upload_bytes: int = MAX_UPLOAD_BYTES,
+    max_pages: int = MAX_DOCUMENT_PAGES,
+    max_page_pixels: int = MAX_PAGE_PIXELS,
+    max_decoded_pixels: int = MAX_DECODED_PIXELS,
 ) -> Any:
     """Create the local demo app with an injectable OCR reader."""
     if FastAPI is None:
         raise RuntimeError("Install FastAPI and python-multipart to run the OCR demo")
     if max_upload_bytes <= 0:
         raise ValueError("max_upload_bytes must be positive")
+    if max_pages <= 0:
+        raise ValueError("max_pages must be positive")
+    if max_page_pixels <= 0:
+        raise ValueError("max_page_pixels must be positive")
+    if max_decoded_pixels <= 0:
+        raise ValueError("max_decoded_pixels must be positive")
 
     active_reader = reader or RoutedTesseractReader()
     active_stages = tuple(stages)
+    handwriting_stage = next(
+        (
+            stage
+            for stage in active_stages
+            if callable(getattr(stage, "review_region", None))
+        ),
+        None,
+    )
     temporary_root = tempfile.TemporaryDirectory(prefix="ocr-demo-")
     session_root = Path(temporary_root.name)
     sessions = SessionStore(session_root)
     backend_version = _backend_version(active_reader)
+    prepare_lock = threading.Lock()
     process_lock = threading.Lock()
 
     @asynccontextmanager
@@ -194,9 +228,10 @@ def create_app(
             sessions.cleanup()
             temporary_root.cleanup()
 
-    app = FastAPI(title="Clinical OCR Workbench", lifespan=handle_lifespan)
+    app = FastAPI(title="Not So Smart OCR", lifespan=handle_lifespan)
     app.state.session_root = session_root
     app.state.sessions = sessions
+    app.state.prepare_lock = prepare_lock
     app.state.process_lock = process_lock
     app.add_middleware(
         RequestLimitMiddleware,
@@ -213,6 +248,28 @@ def create_app(
     def handle_index() -> Any:
         html = Path(__file__).with_name("demo.html").read_text(encoding="utf-8")
         return HTMLResponse(html)
+
+    @app.get("/api/examples/{example_name}")
+    def handle_example(example_name: str) -> Any:
+        if example_name == TABLE_EXAMPLE_NAME:
+            return Response(
+                _table_example_png(),
+                media_type="image/png",
+                headers={
+                    "Content-Disposition": (
+                        'attachment; filename="synthetic-clinical-table.png"'
+                    )
+                },
+            )
+        relative_path = EXAMPLE_FILES.get(example_name)
+        if relative_path is None:
+            raise HTTPException(404, "Example not found")
+        example = Path(__file__).parents[2] / relative_path
+        if not example.is_file():
+            raise HTTPException(404, "Example not found")
+        return FileResponse(
+            example, media_type="application/pdf", filename=example.name
+        )
 
     @app.post("/api/process")
     def handle_process(request: Request, file: UploadFile = File(...)) -> Any:
@@ -234,6 +291,19 @@ def create_app(
             save_started = time.perf_counter()
             _save_upload(file, source, max_upload_bytes)
             save_seconds = time.perf_counter() - save_started
+            preview_queued = time.perf_counter()
+            with prepare_lock:
+                preview_queue_seconds = time.perf_counter() - preview_queued
+                preview_started = time.perf_counter()
+                prepared_pages, preview_failure = _render_previews(
+                    source,
+                    session_dir,
+                    max_pages=max_pages,
+                    max_page_pixels=max_page_pixels,
+                    max_pixels=max_decoded_pixels,
+                )
+                preview_seconds = time.perf_counter() - preview_started
+            preview_paths = list(prepared_pages.pages) if prepared_pages else []
             queued = time.perf_counter()
             pipeline_timings: dict[str, float] = {}
             with process_lock:
@@ -244,15 +314,16 @@ def create_app(
                     active_reader,
                     stages=active_stages,
                     timings=pipeline_timings,
+                    prepared_pages=prepared_pages,
+                    max_pages=max_pages,
+                    max_page_pixels=max_page_pixels,
+                    max_pixels=max_decoded_pixels,
                 )
                 elapsed_seconds = time.perf_counter() - started
                 coverage = _coverage_assessment(active_reader, len(document.pages))
             result = _sanitize_result(document.to_dict(), session_root)
             result["document_id"] = Path(original_name).stem
             result["source"]["name"] = original_name
-            preview_started = time.perf_counter()
-            preview_paths, preview_failure = _render_previews(source, session_dir)
-            preview_seconds = time.perf_counter() - preview_started
             total_seconds = time.perf_counter() - total_started
             response = {
                 "session_id": session_id,
@@ -264,6 +335,7 @@ def create_app(
                 "timing": {
                     "receive_seconds": round(receive_seconds, 3),
                     "save_seconds": round(save_seconds, 3),
+                    "preview_queue_seconds": round(preview_queue_seconds, 3),
                     "queue_seconds": round(queue_seconds, 3),
                     "pipeline_seconds": round(elapsed_seconds, 3),
                     "preview_seconds": round(preview_seconds, 3),
@@ -287,6 +359,7 @@ def create_app(
                 session_id,
                 {
                     "directory": session_dir,
+                    "document": document,
                     "pages": preview_paths,
                     "response": response,
                 },
@@ -334,6 +407,69 @@ def create_app(
             headers={"Content-Disposition": 'attachment; filename="ocr-result.md"'},
         )
 
+    @app.post("/api/sessions/{session_id}/handwriting")
+    def handle_handwriting(
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> Any:
+        if handwriting_stage is None:
+            raise HTTPException(409, "Handwriting rereading is not configured")
+        page_number = payload.get("page_number")
+        region_id = payload.get("region_id")
+        if (
+            isinstance(page_number, bool)
+            or not isinstance(page_number, int)
+            or page_number < 1
+            or not isinstance(region_id, str)
+            or not region_id
+        ):
+            raise HTTPException(400, "page_number and region_id are required")
+
+        session = _get_session(sessions, session_id)
+        with process_lock:
+            document = session["document"]
+            page = next(
+                (
+                    candidate
+                    for candidate in document.pages
+                    if candidate.page_number == page_number
+                ),
+                None,
+            )
+            if page is None:
+                raise HTTPException(404, "Page not found")
+            region_index = next(
+                (
+                    index
+                    for index, region in enumerate(page.regions)
+                    if region.id == region_id
+                ),
+                None,
+            )
+            if region_index is None:
+                raise HTTPException(404, "Region not found")
+            if page_number > len(session["pages"]):
+                raise HTTPException(409, "Page preview is unavailable")
+            try:
+                reviewed = handwriting_stage.review_region(
+                    session["pages"][page_number - 1],
+                    page_number,
+                    page.regions[region_index],
+                )
+            except ReaderError as error:
+                raise HTTPException(422, str(error)) from error
+            page.regions[region_index] = reviewed
+            page.text = render_evidence(page.regions)
+            page.route = "review"
+
+            response = session["response"]
+            result = _sanitize_result(document.to_dict(), session_root)
+            result["document_id"] = Path(response["filename"]).stem
+            result["source"]["name"] = response["filename"]
+            response["result"] = result
+            response["uncertainty"] = _uncertainty_summary(result)
+        return JSONResponse(response)
+
     @app.delete("/api/sessions/{session_id}")
     def handle_clear(session_id: str) -> Any:
         if not sessions.delete(session_id):
@@ -355,6 +491,63 @@ def _safe_filename(filename: str | None) -> str:
     return name or "upload"
 
 
+def _table_example_png() -> bytes:
+    image = Image.new("RGB", (1200, 720), "white")
+    draw = ImageDraw.Draw(image)
+    title_font = ImageFont.load_default(size=36)
+    body_font = ImageFont.load_default(size=24)
+    note_font = ImageFont.load_default(size=18)
+    navy = (21, 36, 59)
+    neutral = (238, 236, 229)
+    amber = (255, 242, 213)
+    rows = (
+        ("Test", "Result", "Unit", "Flag"),
+        ("Hemoglobin", "13.8", "g/dL", "Normal"),
+        ("Platelets", "245", "10^3/uL", "Normal"),
+        ("Glucose", "108", "mg/dL", "High"),
+        ("Creatinine", "0.9", "mg/dL", "Normal"),
+    )
+    columns = (80, 460, 680, 900, 1120)
+    row_height = 76
+    table_top = 190
+
+    draw.text((80, 60), "Synthetic lab results", fill=navy, font=title_font)
+    draw.text(
+        (80, 120),
+        "Generated locally for table-structure testing",
+        fill=navy,
+        font=note_font,
+    )
+    for row_index, row in enumerate(rows):
+        top = table_top + row_index * row_height
+        bottom = top + row_height
+        draw.rectangle(
+            (columns[0], top, columns[-1], bottom),
+            fill=amber
+            if row_index == 0
+            else neutral
+            if row_index % 2 == 0
+            else "white",
+            outline=navy,
+            width=3,
+        )
+        for column_index, text in enumerate(row):
+            left = columns[column_index]
+            right = columns[column_index + 1]
+            draw.line((right, top, right, bottom), fill=navy, width=3)
+            draw.text((left + 16, top + 22), text, fill=navy, font=body_font)
+    draw.text(
+        (80, 620),
+        "Synthetic example - no patient data",
+        fill=navy,
+        font=note_font,
+    )
+
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
 def _save_upload(file: Any, destination: Path, max_upload_bytes: int) -> None:
     total_bytes = 0
     with destination.open("wb") as output:
@@ -373,50 +566,72 @@ def _save_upload(file: Any, destination: Path, max_upload_bytes: int) -> None:
 def _render_previews(
     source: Path,
     session_dir: Path,
-) -> tuple[list[Path], dict[str, str] | None]:
+    *,
+    max_pages: int,
+    max_page_pixels: int,
+    max_pixels: int,
+) -> tuple[_PreparedPages | None, dict[str, str] | None]:
     preview_dir = session_dir / "pages"
     preview_dir.mkdir()
     try:
-        pages = _prepare_pages(
+        prepared = _prepare_pages(
             source,
             _source_kind(source),
             preview_dir,
             300,
             "pdftoppm",
+            max_pages=max_pages,
+            max_page_pixels=max_page_pixels,
+            max_pixels=max_pixels,
         )
     except PipelineError as error:
-        return [], {
+        if error.code in {"page_limit_exceeded", "pixel_limit_exceeded"}:
+            raise HTTPException(413, str(error)) from error
+        return None, {
             "stage": error.stage,
             "code": error.code,
             "message": "Page preview could not be rendered",
         }
 
     preview_paths: list[Path] = []
-    for page_number, page in enumerate(pages, start=1):
+    for page_number, page in enumerate(prepared.pages, start=1):
         destination = preview_dir / f"preview-{page_number}.png"
         if page != destination:
             try:
                 with Image.open(page) as image:
                     image.save(destination, format="PNG")
             except OSError:
-                return [], {
+                return None, {
                     "stage": "image",
                     "code": "invalid_image",
                     "message": "Page preview could not be rendered",
                 }
         preview_paths.append(destination)
-    return preview_paths, None
+    return _PreparedPages(prepared.source, tuple(preview_paths)), None
 
 
 def _sanitize_result(result: dict[str, Any], session_root: Path) -> dict[str, Any]:
     temporary_root = Path(tempfile.gettempdir())
-    for failure in result["failures"]:
-        message = failure["message"]
-        message = message.replace(str(session_root), "[session]")
-        failure["message"] = message.replace(
-            str(temporary_root), "[temporary directory]"
-        )
-    return result
+    replacements = (
+        (str(session_root.resolve()), "[session]"),
+        (str(session_root), "[session]"),
+        (str(temporary_root.resolve()), "[temporary directory]"),
+        (str(temporary_root), "[temporary directory]"),
+    )
+
+    def sanitize(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {key: sanitize(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [sanitize(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(sanitize(item) for item in value)
+        if isinstance(value, str):
+            for root, replacement in replacements:
+                value = value.replace(root, replacement)
+        return value
+
+    return sanitize(result)
 
 
 def _uncertainty_summary(result: dict[str, Any]) -> dict[str, Any]:
@@ -441,6 +656,13 @@ def _page_uncertainty(page: dict[str, Any]) -> dict[str, Any]:
     risk_reasons: list[str] = []
 
     for region in regions:
+        provenance = region.get("text_provenance") or {}
+        orientation = provenance.get("orientation")
+        if isinstance(orientation, dict):
+            angle = orientation.get("angle")
+            if angle in {90, 180, 270}:
+                risk_reasons.append(f"orientation_rotated_{angle}_degrees")
+
         structure = region.get("structure") or {}
         if region["kind"] == "coverage_risk":
             risk_reasons.extend(structure.get("reasons", []))
@@ -450,6 +672,11 @@ def _page_uncertainty(page: dict[str, Any]) -> dict[str, Any]:
             and structure.get("status") == "rejected"
         ):
             risk_reasons.append("rejected_table_candidate")
+        handwriting_review = structure.get("handwriting_review")
+        if isinstance(handwriting_review, dict):
+            reason = handwriting_review.get("reason")
+            if isinstance(reason, str) and reason:
+                risk_reasons.append(reason)
         if structure.get("role") == "table_source":
             continue
 
@@ -559,12 +786,17 @@ def _result_markdown(response: dict[str, Any]) -> str:
         f"- Coverage note: {response['coverage_assessment']['message']}",
     ]
     for page in result["pages"]:
+        page_markdown = render_page_markdown(
+            page["regions"],
+            page["text"]["evidence_ids"],
+            fallback=page["text"]["value"],
+        )
         lines.extend(
             [
                 "",
                 f"## Page {page['page_number']}",
                 "",
-                page["text"]["value"] or "_No text detected._",
+                page_markdown or "_No text detected._",
             ]
         )
     if result["failures"]:

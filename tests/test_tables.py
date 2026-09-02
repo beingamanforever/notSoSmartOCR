@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
+import pytest
 from PIL import Image
 
+import ocr_pipeline.tables as table_module
 from ocr_pipeline.contracts import BoundingBox, TextRegion
 from ocr_pipeline.pipeline import process_document
 from ocr_pipeline.providers import ReaderError
@@ -138,6 +141,98 @@ def test_agreed_challengers_replace_low_confidence_primary(tmp_path: Path) -> No
         "p1-tables-tesseract-raw-t1-source-1",
         "p1-tables-sauvola-t1-source-1",
     }
+
+
+def test_parallel_challengers_preserve_ordered_table_evidence(tmp_path: Path) -> None:
+    image_path = _image(tmp_path)
+    barrier = threading.Barrier(2)
+    primary = [_region("value", "4Z", 1, (55, 10, 90, 30), 0.55)]
+    stage = TatrTableStage(
+        OneCellExtractor(),
+        challengers=[
+            TableChallenger(
+                "raw",
+                BarrierReader(
+                    [_region("raw", "42", 1, (10, 10, 45, 30), 0.91)],
+                    barrier,
+                ),
+            ),
+            TableChallenger(
+                "enhanced",
+                BarrierReader(
+                    [_region("enhanced", "42", 1, (10, 10, 45, 30), 0.96)],
+                    barrier,
+                ),
+            ),
+        ],
+        parallel_challengers=True,
+    )
+
+    output = stage.apply(image_path, 1, primary)
+
+    table = next(region for region in output if region.kind == "table")
+    cell = table.structure["cells"][0]
+    assert cell["text"] == "42"
+    assert cell["source"] == "enhanced"
+    assert [item["provider"] for item in cell["supporters"]] == [
+        "raw",
+        "enhanced",
+    ]
+
+
+def test_parallel_challengers_reuse_one_crop_per_table(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = _image(tmp_path)
+    crop_calls: list[BoundingBox] = []
+    prepare_calls: list[tuple[int, int]] = []
+    original_crop = table_module._table_crop
+
+    def record_crop(
+        image: Image.Image,
+        box: BoundingBox,
+        padding: tuple[int, int],
+    ) -> tuple[Image.Image, tuple[int, int]]:
+        crop_calls.append(box)
+        return original_crop(image, box, padding)
+
+    def prepare(image: Image.Image) -> Image.Image:
+        prepare_calls.append(image.size)
+        return image.convert("L")
+
+    monkeypatch.setattr(table_module, "_table_crop", record_crop)
+    primary = [
+        _region("left", "4Z", 1, (10, 10, 30, 25), 0.55),
+        _region("right", "4Z", 2, (70, 10, 90, 25), 0.55),
+    ]
+    raw = FixedReader([_region("raw", "42", 1, (10, 10, 30, 25), 0.91)])
+    enhanced = FixedReader([_region("enhanced", "42", 1, (10, 10, 30, 25), 0.96)])
+
+    output = TatrTableStage(
+        TwoTableExtractor(),
+        challengers=[
+            TableChallenger("raw", raw),
+            TableChallenger("enhanced", enhanced, prepare=prepare),
+        ],
+        parallel_challengers=True,
+    ).apply(image_path, 1, primary)
+
+    tables = [region for region in output if region.kind == "table"]
+    assert crop_calls == [
+        BoundingBox(5, 5, 45, 40),
+        BoundingBox(60, 5, 100, 40),
+    ]
+    assert raw.image_sizes == [(50, 45), (50, 45)]
+    assert enhanced.image_sizes == [(50, 45), (50, 45)]
+    assert prepare_calls == [(50, 45), (50, 45)]
+    assert [
+        [
+            supporter["provider"]
+            for supporter in table.structure["cells"][0]["supporters"]
+        ]
+        for table in tables
+    ] == [["raw", "enhanced"], ["raw", "enhanced"]]
 
 
 def test_strong_disagreement_is_explicit_and_routes_review(tmp_path: Path) -> None:
@@ -404,6 +499,38 @@ def test_near_page_dense_grid_remains_a_table(tmp_path: Path) -> None:
     assert not any(region.kind == "table_candidate" for region in output)
 
 
+def test_near_page_table_keeps_text_outside_recognized_cells(tmp_path: Path) -> None:
+    image_path = _image(tmp_path, (100, 100))
+    source = [
+        _region("upper", "Upper", 1, (5, 5, 30, 10), 0.95),
+        _region("cell", "Cell", 2, (5, 35, 20, 45), 0.95),
+        _region("lower", "Lower", 3, (5, 90, 30, 95), 0.95),
+    ]
+
+    result = process_document(
+        image_path,
+        FixedReader(source),
+        stages=[TatrTableStage(BandGridExtractor())],
+    )
+
+    page = result.pages[0]
+    table = next(region for region in page.regions if region.kind == "table")
+    sources = {
+        region.id
+        for region in page.regions
+        if (region.structure or {}).get("role") == "table_source"
+    }
+    assert table.structure["row_count"] == 4
+    assert table.structure["column_count"] == 4
+    assert table.structure["cells"][0]["text"] == "Cell"
+    assert table.text_provenance["source_region_ids"] == ["cell"]
+    assert sources == {"cell"}
+    assert source[0].structure is None
+    assert source[2].structure is None
+    assert page.text.value == f"Upper {table.text} Lower"
+    assert page.text.evidence_ids == ["upper", table.id, "lower"]
+
+
 def test_small_sparse_grid_remains_a_table(tmp_path: Path) -> None:
     image_path = _image(tmp_path, (100, 100))
     source = [_region("alpha", "Alpha", 1, (12, 12, 25, 25), 0.95)]
@@ -577,6 +704,33 @@ class GridExtractor:
         ]
 
 
+class BandGridExtractor:
+    name = "band-grid"
+
+    def extract(
+        self, image_path: Path, tokens: list[dict[str, object]]
+    ) -> list[TablePrediction]:
+        cells = tuple(
+            TableCell(
+                BoundingBox(
+                    column * 25, 30 + row * 10, (column + 1) * 25, 40 + row * 10
+                ),
+                (row,),
+                (column,),
+            )
+            for row in range(4)
+            for column in range(4)
+        )
+        return [
+            TablePrediction(
+                BoundingBox(0, 0, 100, 100),
+                cells,
+                0.99,
+                {"id": "band-grid", "origin": "test"},
+            )
+        ]
+
+
 class FailingExtractor:
     name = "unavailable"
 
@@ -597,6 +751,20 @@ class FixedReader:
         with Image.open(image_path) as image:
             self.image_sizes.append(image.size)
         return self.regions
+
+
+class BarrierReader(FixedReader):
+    def __init__(
+        self,
+        regions: list[TextRegion],
+        barrier: threading.Barrier,
+    ) -> None:
+        super().__init__(regions)
+        self.barrier = barrier
+
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        self.barrier.wait(timeout=5)
+        return super().read(image_path, page_number)
 
 
 class FakeTatrPipeline:

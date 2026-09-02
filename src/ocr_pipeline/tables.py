@@ -12,6 +12,7 @@ import threading
 import unicodedata
 from collections import Counter
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from statistics import median
@@ -35,6 +36,7 @@ NEAR_PAGE_TABLE_AREA = 0.65
 MIN_NEAR_PAGE_ROWS = 3
 MIN_NEAR_PAGE_COLUMNS = 3
 MIN_NEAR_PAGE_CELLS = 9
+MAX_PARALLEL_CHALLENGERS = 4
 VALUE_PATTERN = re.compile(r"[+-]?\(?\d[\d,]*(?:\.\d+)?%?\)?")
 
 
@@ -83,6 +85,12 @@ class _Candidate:
     regions: tuple[TextRegion, ...]
 
 
+@dataclass(frozen=True)
+class _TableCrop:
+    path: Path
+    offset: tuple[int, int]
+
+
 class TatrTableStage:
     """Build structured tables while retaining every OCR evidence region."""
 
@@ -95,6 +103,7 @@ class TatrTableStage:
         challengers: Sequence[TableChallenger] = (),
         low_primary_confidence: float = 0.9,
         challenger_padding: int | tuple[int, int] | None = None,
+        parallel_challengers: bool = False,
     ) -> None:
         if not 0 <= low_primary_confidence <= 1:
             raise ValueError("low_primary_confidence must be from 0 to 1")
@@ -115,6 +124,7 @@ class TatrTableStage:
         self.challengers = tuple(challengers)
         self.low_primary_confidence = low_primary_confidence
         self.challenger_padding = challenger_padding
+        self.parallel_challengers = parallel_challengers
 
     def apply(
         self,
@@ -184,19 +194,18 @@ class TatrTableStage:
                 name: assigned[table_index - 1]
                 for name, assigned in challengers_by_table.items()
             }
-            _mark_sources(primary, table_id)
-            for items in challenger_groups.values():
+            table, primary_sources, challenger_sources = self._table_region(
+                table_id,
+                prediction,
+                primary,
+                challenger_groups,
+                table_index,
+            )
+            _mark_sources(primary_sources, table_id)
+            for items in challenger_sources.values():
                 _mark_sources(items, table_id)
                 retained_challengers.extend(items)
-            tables.append(
-                self._table_region(
-                    table_id,
-                    prediction,
-                    primary,
-                    challenger_groups,
-                    table_index,
-                )
-            )
+            tables.append(table)
 
         output = regions + retained_challengers + tables + rejected
         return sorted(
@@ -233,47 +242,105 @@ class TatrTableStage:
         )
         with tempfile.TemporaryDirectory(prefix="ocr-table-") as directory:
             root = Path(directory)
-            for challenger in self.challengers:
-                if challenger.scope == "page":
-                    prepared_path = image_path
-                    if challenger.prepare is not None:
-                        prepared_path = root / f"{_slug(challenger.name)}-page.png"
-                        _prepare_view(image, challenger, prepared_path)
-                    regions = challenger.reader.read(prepared_path, page_number)
-                    namespaced = [
-                        _challenger_region(
-                            region,
-                            challenger.name,
+            table_crops = (
+                _write_table_crops(image, predictions, padding, root)
+                if any(challenger.scope == "table" for challenger in self.challengers)
+                else ()
+            )
+            if self.parallel_challengers and len(self.challengers) > 1:
+                with ThreadPoolExecutor(
+                    max_workers=min(len(self.challengers), MAX_PARALLEL_CHALLENGERS),
+                    thread_name_prefix="table-ocr",
+                ) as executor:
+                    futures = [
+                        executor.submit(
+                            self._read_challenger,
+                            challenger,
+                            image,
+                            image_path,
+                            root,
                             page_number,
-                            0,
-                            index,
+                            predictions,
+                            table_crops,
                         )
-                        for index, region in enumerate(regions, start=1)
+                        for challenger in self.challengers
                     ]
-                    result[challenger.name] = _assign_regions(predictions, namespaced)
-                    continue
+                    for challenger, future in zip(
+                        self.challengers,
+                        futures,
+                        strict=True,
+                    ):
+                        result[challenger.name] = future.result()
+                return result
 
-                tables = []
-                for table_index, prediction in enumerate(predictions, start=1):
-                    crop, offset = _table_crop(image, prediction.bounding_box, padding)
-                    crop_path = root / f"{_slug(challenger.name)}-{table_index}.png"
-                    _prepare_view(crop, challenger, crop_path)
-                    regions = challenger.reader.read(crop_path, page_number)
-                    tables.append(
-                        [
-                            _challenger_region(
-                                region,
-                                challenger.name,
-                                page_number,
-                                table_index,
-                                index,
-                                offset,
-                            )
-                            for index, region in enumerate(regions, start=1)
-                        ]
-                    )
-                result[challenger.name] = tables
+            for challenger in self.challengers:
+                result[challenger.name] = self._read_challenger(
+                    challenger,
+                    image,
+                    image_path,
+                    root,
+                    page_number,
+                    predictions,
+                    table_crops,
+                )
         return result
+
+    def _read_challenger(
+        self,
+        challenger: TableChallenger,
+        image: Image.Image,
+        image_path: Path,
+        root: Path,
+        page_number: int,
+        predictions: Sequence[TablePrediction],
+        table_crops: Sequence[_TableCrop],
+    ) -> list[list[TextRegion]]:
+        if challenger.scope == "page":
+            prepared_path = image_path
+            if challenger.prepare is not None:
+                prepared_path = root / f"{_slug(challenger.name)}-page.png"
+                _prepare_view(image, challenger, prepared_path)
+            regions = challenger.reader.read(prepared_path, page_number)
+            namespaced = [
+                _challenger_region(
+                    region,
+                    challenger.name,
+                    page_number,
+                    0,
+                    index,
+                )
+                for index, region in enumerate(regions, start=1)
+            ]
+            return _assign_regions(predictions, namespaced)
+
+        tables = []
+        for table_index, crop in enumerate(table_crops, start=1):
+            prepared_path = crop.path
+            if challenger.prepare is not None:
+                prepared_path = root / f"{_slug(challenger.name)}-{table_index}.png"
+                try:
+                    with Image.open(crop.path) as image:
+                        _prepare_view(image, challenger, prepared_path)
+                except (OSError, UnidentifiedImageError) as error:
+                    raise ReaderError(
+                        "table_challenger_image_failed",
+                        str(error),
+                    ) from error
+            regions = challenger.reader.read(prepared_path, page_number)
+            tables.append(
+                [
+                    _challenger_region(
+                        region,
+                        challenger.name,
+                        page_number,
+                        table_index,
+                        index,
+                        crop.offset,
+                    )
+                    for index, region in enumerate(regions, start=1)
+                ]
+            )
+        return tables
 
     def _table_region(
         self,
@@ -282,11 +349,15 @@ class TatrTableStage:
         primary: list[TextRegion],
         challenger_groups: dict[str, list[TextRegion]],
         table_index: int,
-    ) -> TextRegion:
+    ) -> tuple[TextRegion, list[TextRegion], dict[str, list[TextRegion]]]:
         primary_cells = _assign_cells(prediction.cells, primary)
         challenger_cells = {
             name: _assign_cells(prediction.cells, regions)
             for name, regions in challenger_groups.items()
+        }
+        primary_sources = _assigned_regions(primary_cells)
+        challenger_sources = {
+            name: _assigned_regions(items) for name, items in challenger_cells.items()
         }
         cells = []
         table_alternatives = []
@@ -365,7 +436,7 @@ class TatrTableStage:
             + 1
         )
         reading_order = min(
-            (region.reading_order for region in primary), default=table_index
+            (region.reading_order for region in primary_sources), default=table_index
         )
         confidence_values = [
             cell["confidence"] for cell in cells if cell["confidence"] is not None
@@ -375,7 +446,7 @@ class TatrTableStage:
             if confidence_values
             else prediction.confidence
         )
-        return TextRegion(
+        table = TextRegion(
             id=table_id,
             kind="table",
             text=_markdown(cells, row_count, column_count),
@@ -385,7 +456,7 @@ class TatrTableStage:
             provider=self.extractor.name,
             text_provenance={
                 "method": "geometry_first_table_fusion",
-                "source_region_ids": [region.id for region in primary],
+                "source_region_ids": [region.id for region in primary_sources],
             },
             resolution="resolved",
             alternatives=table_alternatives,
@@ -398,6 +469,7 @@ class TatrTableStage:
                 "detection_confidence": prediction.confidence,
             },
         )
+        return table, primary_sources, challenger_sources
 
 
 class TatrTableExtractor:
@@ -914,6 +986,13 @@ def _assign_cells(
     return assigned
 
 
+def _assigned_regions(groups: Sequence[Sequence[TextRegion]]) -> list[TextRegion]:
+    return sorted(
+        (region for group in groups for region in group),
+        key=lambda region: (region.reading_order, region.id),
+    )
+
+
 def _span_grid(
     cells: Sequence[TableCell],
 ) -> tuple[dict[int, float], dict[int, float], BoundingBox] | None:
@@ -1026,6 +1105,26 @@ def _table_crop(
     if right <= left or bottom <= top:
         raise ReaderError("invalid_table_output", "A table challenger crop is empty")
     return image.crop((left, top, right, bottom)), (left, top)
+
+
+def _write_table_crops(
+    image: Image.Image,
+    predictions: Sequence[TablePrediction],
+    padding: tuple[int, int],
+    root: Path,
+) -> tuple[_TableCrop, ...]:
+    crops = []
+    for table_index, prediction in enumerate(predictions, start=1):
+        crop, offset = _table_crop(image, prediction.bounding_box, padding)
+        path = root / f"table-{table_index}.png"
+        try:
+            crop.save(path, format="PNG")
+        except Exception as error:
+            raise ReaderError("table_preprocess_failed", str(error)) from error
+        finally:
+            crop.close()
+        crops.append(_TableCrop(path, offset))
+    return tuple(crops)
 
 
 def _prepare_view(

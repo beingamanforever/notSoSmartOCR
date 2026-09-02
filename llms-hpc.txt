@@ -1,0 +1,124 @@
+# Algorithmica: Algorithms for Modern Hardware (HPC)
+
+> Distilled notes for optimizing numeric and data-heavy code (data science, ML, OCR pipelines) on a single CPU core.
+> Source: https://en.algorithmica.org/hpc/ by Sergey Slotin. Examples are C++/x86, but the reasoning transfers to NumPy, Numba, Cython, Rust, and CUDA kernels.
+> Scope note: chapters on number theory, cryptography, GCD, integer factorization, and segment trees are omitted as not relevant here.
+
+## Mental model
+
+- Operation counting is off by orders of magnitude on modern CPUs. Effective throughput ranges from ~1e7 ops/s (pointer chasing) to ~1e11 ops/s (SIMD linear algebra) on the same machine. https://en.algorithmica.org/hpc/complexity/languages/
+- Clock rates stopped scaling around 2005 (Dennard scaling ended, Moore's law did not). Extra transistors went into pipelining, out-of-order execution, superscalar units, wider SIMD, more cache, more cores. Design for parallelism, not fewer raw operations. https://en.algorithmica.org/hpc/complexity/hardware/
+- A low-level language does not give performance; it gives control over performance. https://en.algorithmica.org/hpc/complexity/languages/
+- Reference point, 1024x1024 matmul: pure Python 630 s, Java 10 s, C -O3 9 s, C with `-march=native -ffast-math` 0.6 s, NumPy/OpenBLAS 0.12 s. 5250x from first to last.
+
+## Memory hierarchy (the usual bottleneck)
+
+Approximate 2021 commodity numbers. https://en.algorithmica.org/hpc/external-memory/hierarchy/
+
+| Level | Size | Block | Latency | Bandwidth |
+|---|---|---|---|---|
+| L1 | 10K | 64B | 2 ns | 80 GB/s |
+| L2 | 100K | 64B | 5 ns | 40 GB/s |
+| L3 | 1M/core | 64B | 20 ns | 20 GB/s |
+| RAM | GBs | 64B | 100 ns | 10 GB/s |
+| SSD | TBs | 4K | 0.1 ms | 5 GB/s |
+| S3 | inf | - | 150 ms | - |
+
+- The transfer unit is the 64-byte cache line, not the byte. Count cache lines touched, not reads. A loop touching every 16th int of an array fetches exactly the same memory as one touching every int. https://en.algorithmica.org/hpc/cpu-cache/cache-lines/
+- Cache and its bandwidth scale with clock frequency; RAM does not. Fix the clock before comparing implementations. https://en.algorithmica.org/hpc/cpu-cache/bandwidth/
+- Read-only loops get roughly 2x the RAM bandwidth of read-write loops, because the memory bus switches direction. A write also triggers an implicit read-back unless you use non-temporal stores (`_mm256_stream_si256`), which give more than 2x on large arrays. Use them for output buffers you will not read again soon. https://en.algorithmica.org/hpc/cpu-cache/bandwidth/
+- Pointer chasing (random dependent reads) is multiple orders of magnitude slower than linear iteration: it blocks SIMD, blocks prefetching, and stalls the pipeline. This is the default cost of object-graph-heavy, dynamically typed code. https://en.algorithmica.org/hpc/cpu-cache/latency/
+- Memory-level parallelism: ~13-17 concurrent outstanding RAM reads, ~6 for L2. Linear access is fast because the CPU issues many requests at once; dependent access serializes them. https://en.algorithmica.org/hpc/cpu-cache/mlp/
+- Hardware prefetching handles forward/backward scans over several arrays with small strides, and nothing more complex. It is free and never harmful. https://en.algorithmica.org/hpc/cpu-cache/prefetching/
+- Software prefetch (`__builtin_prefetch`) helps only when the next address is computable well ahead and the memory bus has slack. It competes for issue slots and usually fails in real programs. https://en.algorithmica.org/hpc/cpu-cache/prefetching/
+- One core cannot saturate RAM bandwidth. Total bandwidth grows with cores but sublinearly; threads sharing an L3 slice contend. Pin threads symmetrically across L3 groups (`taskset`), and treat NUMA/affinity as a first-class benchmarking variable. https://en.algorithmica.org/hpc/cpu-cache/sharing/
+- RAM has row buffers of 1-8 KB. Accesses within one row skip two of three steps and run ~3x faster, so locality matters even below cache-line granularity. https://en.algorithmica.org/hpc/cpu-cache/aos-soa/
+
+## Data layout
+
+- Temporal locality: reuse the same data while it is still cached. Spatial locality: use neighbors that arrive in the same block. Reason qualitatively in these terms before computing hit rates. https://en.algorithmica.org/hpc/external-memory/locality/
+- AoS vs SoA is the row-store vs column-store decision. AoS (row) wins when you fetch most fields of a few records: one cache line instead of several. SoA (column) wins when you scan one field over everything, which is the analytics and vectorization case. Same tradeoff as PostgreSQL vs ClickHouse. https://en.algorithmica.org/hpc/cpu-cache/aos-soa/ https://en.algorithmica.org/hpc/external-memory/locality/
+- Align SIMD buffers to 32/64 bytes (`alignas(32)`, `std::aligned_alloc`) so a vector load never straddles two cache lines. https://en.algorithmica.org/hpc/cpu-cache/alignment/
+- Order struct fields largest to smallest to eliminate padding. Packing (`__attribute__((packed))`) shrinks memory at the cost of split loads and byte-stitching; usually a loss unless memory-bound. https://en.algorithmica.org/hpc/cpu-cache/alignment/
+- Beware power-of-two strides and dimensions. Cache associativity makes addresses collide: matmul at n=1536 is ~3x slower than at n=1535. Pad leading dimensions to break the pattern. https://en.algorithmica.org/hpc/algorithms/matmul/ https://en.algorithmica.org/hpc/cpu-cache/aos-soa/
+- Huge pages usually help 10-15%, but can make a power-of-two-strided access pattern 10x worse by increasing L3 conflict. Measure both. https://en.algorithmica.org/hpc/cpu-cache/aos-soa/
+- Recursive (depth-first) divide-and-conquer has better temporal locality than iterative (breadth-first): O((N/B) log(N/M)) block reads instead of O((N/B) log N). Hybridize by switching to the iterative base case at the bottom. https://en.algorithmica.org/hpc/external-memory/locality/
+- DP goes the other way: replace memoized recursion (random I/O) with a nested loop over a dense array, keep only the layers you need, then compress to bitset operations where the state is boolean. https://en.algorithmica.org/hpc/external-memory/locality/
+- Cache-oblivious recursive blocking is optimal at every cache level at once without tuning: recursive matmul is O(N^3 / (B sqrt(M))) instead of O(N^3 / B). Cache-aware blocking with explicit tile sizes is easier to tune and faster in practice. https://en.algorithmica.org/hpc/external-memory/oblivious/
+
+## Pipelining and branches
+
+- Three hazards: structural (unit busy, engineer around it), data (wait for the critical path, shorten it), control (branch mispredict, ~15-20 cycles, remove or make predictable). https://en.algorithmica.org/hpc/pipelining/hazards/
+- Predication replaces a branch with `cmov` or arithmetic masking. It evaluates both sides, so it wins only when the branch is predictable less than ~75% of the time. Compilers use that same 75% heuristic and often guess wrong. https://en.algorithmica.org/hpc/pipelining/branchless/
+- Branchless is not always better: a predicted branch also acts as implicit prefetching by speculating on the next load. Branchless binary search is ~4x faster in cache but needs explicit prefetch to match on large arrays. https://en.algorithmica.org/hpc/data-structures/binary-search/
+- If an instruction has latency L and throughput T, you need L*T independent accumulators to saturate it. One accumulator in a sum loop wastes half the add throughput; two fix it. This is the single most useful trick for reductions. https://en.algorithmica.org/hpc/pipelining/throughput/
+- Optimize latency (shorten the critical path) for queries and small branchy code. Optimize throughput (count instructions per iteration, find the saturated port) for hot data-parallel loops. https://en.algorithmica.org/hpc/pipelining/throughput/
+
+## SIMD
+
+- Widths: SSE 128-bit, AVX2 256-bit (available on ~95% of desktops/servers), AVX-512. 16 vector registers. Nobody is planning wider than 512 bits, which is already a full cache line. https://en.algorithmica.org/hpc/simd/intrinsics/
+- Auto-vectorization is the most common and often the right way to use SIMD, giving 5-10x on elementwise loops. Verify with `-fopt-info-vec-optimized` (or `missed` / `all` for the reasons). https://en.algorithmica.org/hpc/simd/auto-vectorization/
+- What blocks it: possible pointer aliasing (fix with `__restrict__` or `#pragma GCC ivdep`), unknown alignment (`alignas`, `std::assume_aligned`), runtime-unknown sizes (prefer compile-time constants, pad to a multiple of the SIMD width), branches inside the loop, and `volatile` accumulators.
+- Vectorized reduction: split one accumulator into 8 lanes, then finish with a horizontal sum. Add B>=2 separate vector accumulators for instruction-level parallelism. The extra accumulators only help while the data fits in L1; beyond that memory bandwidth is the ceiling. https://en.algorithmica.org/hpc/simd/reduction/
+- Prefer GCC vector extensions (`__attribute__((vector_size(32)))`, normal `+` and `*` operators) or a portable library (Highway, xsimd, EVE) over raw intrinsics; conversion to `__m256` types is free when you need a specific instruction. https://en.algorithmica.org/hpc/simd/intrinsics/
+- SPMD (ISPC, OpenMP `simd`, Julia `@simd`) is the middle ground: serial-looking code with guaranteed vectorization across compilers and targets. https://en.algorithmica.org/hpc/simd/auto-vectorization/
+
+## Case study: matrix multiplication (the template for any tiled kernel)
+
+Sequence of speedups from naive triple loop to ~93% of OpenBLAS in ~40 lines of C. https://en.algorithmica.org/hpc/algorithms/matmul/
+
+1. Naive `for-for-for`: 0.42 GFLOPS. Fix memory before arithmetic when data exceeds cache.
+2. Transpose B for sequential inner reads: +30%. Note that this does not actually improve caching; it enables vectorization.
+3. Vectorize the dot product (or add `__restrict__` and let the compiler do it): ~4x, to 2.3 GFLOPS. Now memory-bound past n=256.
+4. Register-reuse micro-kernel: compute a 6x16 tile of C at once, held in 12 of the 16 vector registers, using FMA. Tile shape is chosen from FMA latency x throughput (5 x 2 = 10 concurrent ops needed) and register count. Kernel choice is architecture-specific; BLAS ships one per microarchitecture.
+5. Cache blocking (macro-kernel): pick a B sub-block for L3, an A sub-block for L2, a smaller B sub-block for L1, then call the micro-kernel. Removes the memory bottleneck entirely and flattens the size-vs-performance curve.
+6. Remove allocations, make tile bounds compile-time constants, hand-hold register allocation: another ~50%.
+
+- Theoretical ceiling = SIMD width x FMA throughput x clock. OpenBLAS reaches ~80% of it; this code reaches ~75%.
+- FMA covers f32 and f64 but not integers. If intermediate values fit exactly in floats, converting to float and back is often faster than integer multiply-add.
+- Strassen (O(n^2.81)) has a large constant and is not used in mainstream BLAS; it only pays off above n~2000-4000.
+- The same kernel plus blocking structure applies to min-plus (distance) products and Floyd-Warshall, worth 30-50x there.
+
+## Other case studies worth copying
+
+- Argmin with SIMD: ~15x over naive scalar, ~22 GFLOPS vs 24 for plain min. Key trick: do not track the index in the hot loop. Keep a running vector minimum, use a cheap `testz` check per 16 elements, and only recover the index when the minimum actually changes. Watch the worst case: a monotonically decreasing array drops it ~10x, so use the two-pass "find the minimum, then find its index" variant. Also: `std::min_element` gives 0.28 GFLOPS versus 1.5 for a hand-written scalar loop. https://en.algorithmica.org/hpc/algorithms/argmin/
+- Prefix sum (cumsum/scan) with SIMD: only ~1.75-2.8x, because AVX lacks a full-register byte shift. Two phases (local prefix in-register, then accumulate), blocked at ~L1 size, with the two phases software-pipelined against each other and a prefetch on the lagging phase. https://en.algorithmica.org/hpc/algorithms/prefix/
+- Binary search: up to 4x over `std::lower_bound` in under 15 lines. Branchless `cmov` search plus explicit prefetch of both children; then the Eytzinger (BFS/ahnentafel) layout, one-indexed, cache-line-aligned, prefetching index 16k to fetch four levels ahead. Cost: the array must be rebuilt on insert. https://en.algorithmica.org/hpc/data-structures/binary-search/
+
+## Floating point
+
+- Floats are deterministic and exactly specified, often faster than integers, and every basic operation (including sqrt and log) is correctly rounded to within 0.5 ulp. The "floats are random noise" belief is wrong. https://en.algorithmica.org/hpc/arithmetic/float/
+- Machine epsilon bounds one operation: the true value lies in [x(1-eps), x(1+eps)]. n chained multiplications give relative error O(n*eps), which is fine. Additions of mixed magnitudes are the real danger. https://en.algorithmica.org/hpc/arithmetic/errors/
+- f32 loses integer exactness at 2^24: `x++` from 0 in a float stops at 16777216. Summing 2^24 ones onto 2^24 leaves the value unchanged. f64 holds integers exactly to 2^53. https://en.algorithmica.org/hpc/arithmetic/errors/
+- Use Kahan summation (relative error 2*eps + O(n*eps^2)) or pairwise/blocked summation instead of a naive accumulator, or accumulate in f64. Relevant for any long reduction: loss curves, means, norms, gradient accumulation.
+- Rewrite unstable expressions: `x*x - y*y` has relative error amplified by (x^2+y^2)/(x^2-y^2); `(x+y)*(x-y)` is both more accurate and cheaper.
+- Diagnose numerical instability by rerunning with `fesetround(FE_UPWARD)` and `FE_DOWNWARD` and comparing. This detects round-off sensitivity better than reducing precision, because round-to-nearest errors statistically cancel.
+- `-ffast-math` / `-Ofast` lets the compiler reassociate floating-point ops, which is what unlocks vectorized reductions. It also silently permits less precise code paths. Enable deliberately, per translation unit, and validate outputs.
+
+## Compilation
+
+- `-O2` for production, `-O3` for aggressive but correct, `-Ofast` for `-O3` plus non-standard-compliant float reassociation. https://en.algorithmica.org/hpc/compilation/flags/
+- `-march=native` (or a specific target like `-march=haswell`, or feature flags like `-mavx2`) is often the single biggest flag win; without it the binary targets a generic 2000-era x86. Use `#pragma GCC target("avx2")` to scope it to one hot file, or `__attribute__((target(...)))` for multiversioned functions dispatched at runtime.
+- `-funroll-loops` is off by default and makes binaries larger; apply per loop with `#pragma GCC unroll N`. https://en.algorithmica.org/hpc/compilation/situational/
+- Profile-guided optimization (`-fprofile-generate`, run on representative data, `-fprofile-use`) is worth 10-20% on large codebases and decides inlining, unrolling, and branch layout from real data instead of guesses.
+- `[[likely]]` / `[[unlikely]]` / `__builtin_expect` hint branch probability, but the hints are frequently lost before the backend decides on `cmov`.
+
+## Benchmarking
+
+- The loop is: measure, find the bottleneck, remove it, repeat. Invest in the harness; PGO and iteration speed both depend on it. https://en.algorithmica.org/hpc/profiling/benchmarking/
+- Keep one interface header and one file per implementation variant, take parameters from argv or `-D`, drive everything from a Makefile, and do the plotting and statistics in a Jupyter notebook. This is how you get curves over input size instead of single numbers.
+- Throughput vs latency are different measurements. A loop of independent calls measures throughput; to measure latency you must chain a dependency (`checksum ^= f(checksum ^ q[i])`). The gap is largest exactly where you are comparing branchy against branch-free code. https://en.algorithmica.org/hpc/profiling/noise/
+- Bias sources: unrepresentative data distribution (sequential inputs make branches artificially predictable), cold cache (do a warm-up run), dead-code elimination (keep a checksum, print it, or use `volatile`), and multi-objective structures like hash tables where no single number decides.
+- Noise sources: frequency scaling and turbo (pin the clock, or measure cycles with `perf stat`), hyper-threading, and noisy neighbors. Even the length of the executable's name can shift performance through stack alignment.
+- On a laptop, +/-5% run-to-run is normal. Treat sub-2x microbenchmark results as A/B tests and run to statistical significance before keeping a +1% change.
+
+## Rules of thumb
+
+1. Profile before optimizing; memory is the bottleneck more often than arithmetic.
+2. Fix the data layout first, then the access pattern, then vectorize, then micro-optimize registers.
+3. Linear, predictable access beats clever access. Random dependent access is the worst case at every level.
+4. Block for cache at every level; make the inner tile fit L1 and keep hot accumulators in registers.
+5. Use multiple accumulators to saturate instruction throughput.
+6. Let the compiler vectorize, and remove the obstacles that stop it (`__restrict__`, alignment, constant bounds, no branches).
+7. Watch power-of-two sizes for associativity conflicts.
+8. Reach for a tuned library (BLAS, and by extension NumPy/PyTorch) before hand-rolling; it is within ~20% of the hardware limit.

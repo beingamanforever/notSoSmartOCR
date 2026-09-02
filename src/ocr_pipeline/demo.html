@@ -3,21 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Clinical OCR Workbench</title>
+  <title>Not So Smart OCR</title>
   <style>
     :root {
-      color-scheme: dark;
-      --background: #090b0e;
-      --panel: #11151a;
-      --panel-raised: #171c22;
-      --line: #2a3038;
-      --line-strong: #3a424d;
-      --text: #f3f5f7;
-      --muted: #969faa;
-      --accent: #ff7a3d;
-      --accent-soft: #ff7a3d22;
-      --danger: #ff6675;
-      --success: #65d6a6;
+      color-scheme: light;
+      --background: #f4f2ed;
+      --panel: #ffffff;
+      --panel-raised: #eeece5;
+      --line: #d9d5cc;
+      --line-strong: #b8b2a7;
+      --text: #15243b;
+      --muted: #5b6678;
+      --accent: #a85b00;
+      --accent-soft: #fff2d5;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
         "Segoe UI", sans-serif;
     }
@@ -27,9 +25,7 @@
     body {
       margin: 0;
       min-height: 100vh;
-      background:
-        radial-gradient(circle at 15% 0%, #301910 0, transparent 30rem),
-        var(--background);
+      background: var(--background);
       color: var(--text);
     }
 
@@ -40,13 +36,13 @@
       outline-offset: 2px;
     }
 
-    .shell { max-width: 1500px; margin: 0 auto; padding: 28px; }
+    .shell { max-width: 1680px; margin: 0 auto; padding: 24px; }
     header {
       display: flex;
-      align-items: flex-end;
+      align-items: center;
       justify-content: space-between;
       gap: 24px;
-      margin-bottom: 24px;
+      margin-bottom: 18px;
     }
     .eyebrow {
       color: var(--accent);
@@ -55,14 +51,14 @@
       letter-spacing: .18em;
       text-transform: uppercase;
     }
-    h1 { margin: 7px 0 3px; font-size: clamp(1.7rem, 3vw, 2.7rem); letter-spacing: -.045em; }
+    h1 { margin: 4px 0 2px; font-size: clamp(1.7rem, 3vw, 2.45rem); letter-spacing: -.04em; }
     .subtitle { margin: 0; color: var(--muted); }
     .privacy { color: var(--muted); font-size: .82rem; text-align: right; }
 
     .toolbar, .card {
       border: 1px solid var(--line);
-      background: color-mix(in srgb, var(--panel) 95%, transparent);
-      box-shadow: 0 18px 50px #0007;
+      background: var(--panel);
+      box-shadow: 0 8px 26px #15243b12;
     }
     .toolbar {
       display: flex;
@@ -97,20 +93,66 @@
       cursor: pointer;
       font-weight: 680;
     }
-    .button:hover:not(:disabled) { border-color: #697482; transform: translateY(-1px); }
-    .button.primary { border-color: var(--accent); background: var(--accent); color: #1c0c05; }
+    .button:hover:not(:disabled) { border-color: var(--muted); transform: translateY(-1px); }
+    .button.primary { border-color: var(--accent); background: var(--accent); color: var(--panel); }
     .button:disabled { cursor: not-allowed; opacity: .42; }
 
+    .activity-line {
+      display: flex;
+      align-items: stretch;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
     .status-line {
       display: none;
+      flex: 1;
       padding: 11px 14px;
       border: 1px solid var(--line);
       border-radius: 10px;
-      margin-bottom: 18px;
       color: var(--muted);
     }
     .status-line.visible { display: block; }
-    .status-line.error { color: #ffd4d8; border-color: #71303a; background: #42182166; }
+    .status-line.busy, .status-line.error { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+    .status-line.success { color: var(--text); border-color: var(--line-strong); background: var(--panel-raised); }
+    .client-timer {
+      display: grid;
+      min-width: 178px;
+      grid-template-columns: 1fr auto;
+      align-content: center;
+      gap: 2px 12px;
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      font-variant-numeric: tabular-nums;
+    }
+    .client-timer[data-state="running"], .client-timer[data-state="error"] { border-color: var(--accent); background: var(--accent-soft); }
+    .client-timer[data-state="complete"] { border-color: var(--line-strong); background: var(--panel-raised); }
+    .timer-label { color: var(--muted); font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+    .timer-value { grid-row: 1 / 3; grid-column: 2; align-self: center; font-size: 1rem; }
+    .timer-state { color: var(--muted); font-size: .7rem; }
+
+    .examples {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: -6px 0 18px;
+      overflow-x: auto;
+      padding: 2px;
+    }
+    .examples-label { flex: 0 0 auto; color: var(--muted); font-size: .74rem; font-weight: 700; }
+    .example-button {
+      flex: 0 0 auto;
+      padding: 7px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--text);
+      cursor: pointer;
+      font-size: .76rem;
+      font-weight: 650;
+    }
+    .example-button:hover { border-color: var(--accent); background: var(--accent-soft); }
 
     .metadata { display: none; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
     .metadata.visible { display: flex; }
@@ -158,40 +200,45 @@
       font-size: .78rem;
     }
     .chip strong { color: var(--text); font-weight: 650; }
+    .chip[data-tone="success"] { border-color: var(--line-strong); background: var(--panel-raised); color: var(--text); }
+    .chip[data-tone="review"], .chip[data-tone="error"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 
     .risk-card {
       display: grid;
-      grid-template-columns: minmax(210px, .8fr) minmax(0, 1.2fr);
-      gap: 18px;
-      padding: 16px;
+      grid-template-columns: minmax(230px, .7fr) minmax(0, 1.3fr);
+      gap: 14px;
+      padding: 14px;
       margin-bottom: 18px;
       border: 1px solid var(--line);
       border-radius: 14px;
-      background: color-mix(in srgb, var(--panel) 95%, transparent);
-      box-shadow: 0 18px 50px #0007;
+      background: var(--panel);
+      box-shadow: 0 8px 26px #15243b12;
     }
+    .risk-card[data-state="review"] { border-left: 4px solid var(--accent); }
+    .risk-card[data-state="clear"] { border-left: 4px solid var(--text); }
     .risk-summary { min-width: 0; }
     .risk-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-bottom: 6px; }
     .risk-heading h2 { margin: 0; font-size: .95rem; }
     .risk-badge {
       padding: 4px 8px;
-      border: 1px solid #71303a;
+      border: 1px solid var(--accent);
       border-radius: 999px;
-      background: #42182166;
-      color: #ffd4d8;
+      background: var(--accent-soft);
+      color: var(--accent);
       font-size: .72rem;
       font-weight: 700;
     }
-    .risk-badge.clear { border-color: #285b49; background: #163b3066; color: var(--success); }
+    .risk-badge.clear { border-color: var(--line-strong); background: var(--panel-raised); color: var(--text); }
     .risk-copy { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.45; }
-    .risk-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
-    .risk-metric { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-raised); }
-    .risk-value { display: block; margin-top: 3px; font-size: 1rem; font-weight: 720; }
+    .risk-metrics { display: flex; flex-wrap: wrap; gap: 7px; }
+    .risk-metric { flex: 1 1 132px; min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-raised); }
+    .risk-value { display: block; margin-top: 2px; font-size: .96rem; font-weight: 720; }
     .risk-detail { display: block; margin-top: 2px; color: var(--muted); font-size: .68rem; }
-    .risk-reasons { display: flex; grid-column: 1 / -1; flex-wrap: wrap; gap: 6px; align-items: center; }
-    .risk-reason { padding: 4px 7px; border-radius: 6px; background: #ffffff0a; color: var(--muted); font-size: .72rem; }
+    .risk-reasons { display: flex; flex: 1 0 100%; flex-wrap: wrap; gap: 6px; align-items: center; padding-top: 2px; }
+    .risk-reason { padding: 4px 7px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-raised); color: var(--muted); font-size: .7rem; }
+    .risk-reason.flag { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
 
-    .workspace { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(360px, .88fr); gap: 18px; }
+    .workspace { display: grid; grid-template-columns: minmax(0, .95fr) minmax(420px, 1.05fr); gap: 18px; }
     .card { min-width: 0; border-radius: 16px; overflow: hidden; }
     .card-head {
       min-height: 57px;
@@ -205,8 +252,8 @@
     .card-title { font-weight: 720; letter-spacing: -.01em; }
     .page-controls { display: flex; align-items: center; gap: 8px; }
     .icon-button {
-      width: 34px;
       height: 34px;
+      padding: 0 10px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: var(--panel-raised);
@@ -242,10 +289,7 @@
       display: grid;
       place-items: center;
       padding: 20px;
-      background-color: #080a0d;
-      background-image: linear-gradient(#ffffff08 1px, transparent 1px),
-        linear-gradient(90deg, #ffffff08 1px, transparent 1px);
-      background-size: 24px 24px;
+      background-color: var(--panel-raised);
     }
     canvas {
       display: none;
@@ -254,8 +298,8 @@
       max-width: 100%;
       max-height: 64vh;
       border-radius: 3px;
-      background: white;
-      box-shadow: 0 16px 48px #000b;
+      background: var(--panel);
+      box-shadow: 0 10px 36px #15243b2b;
       cursor: crosshair;
     }
     canvas.visible { display: block; }
@@ -263,6 +307,11 @@
     .empty-state strong { display: block; color: var(--text); font-size: 1.02rem; }
 
     .inspector { padding: 14px 16px 16px; border-top: 1px solid var(--line); }
+    .inspector-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+    .inspector-action { flex: 0 0 auto; }
+    .reread-status { color: var(--muted); font-size: .72rem; }
+    .reread-status:empty { display: none; }
+    .reread-status.error { color: var(--accent); }
     .inspector-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
     .datum { min-width: 0; }
     .label { display: block; color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
@@ -299,20 +348,48 @@
     .tab-panel { display: none; min-height: 560px; max-height: 70vh; overflow: auto; padding: 18px; }
     .tab-panel.active { display: block; }
     .rendered-page { margin-bottom: 24px; }
+    .rendered-page + .rendered-page { padding-top: 24px; border-top: 1px solid var(--line); }
     .rendered-page h2 { margin: 0 0 9px; font-size: .78rem; letter-spacing: .11em; text-transform: uppercase; color: var(--accent); }
-    .rendered-page p { margin: 0; line-height: 1.75; white-space: pre-wrap; }
-    pre { margin: 0; color: #cbd4dd; font: .78rem/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+    .rendered-content { max-width: 78ch; }
+    .rendered-page p { margin: 0; line-height: 1.72; white-space: pre-wrap; }
+    pre { margin: 0; color: var(--text); font: .78rem/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+    .semantic-block { margin: 0 0 13px; line-height: 1.65; white-space: pre-wrap; }
+    .semantic-block.title { margin: 4px 0 18px; font-size: 1.4rem; font-weight: 760; line-height: 1.25; }
+    .semantic-block.heading { margin: 20px 0 8px; font-size: 1rem; font-weight: 730; line-height: 1.35; }
+    .semantic-block.header { color: var(--muted); font-size: .76rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+    .semantic-block.footer { padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: .76rem; }
+    .semantic-block.table { overflow-x: auto; padding: 2px 0 8px; }
+    .document-table { width: 100%; border-collapse: collapse; font-size: .84rem; line-height: 1.45; }
+    .document-table th, .document-table td { min-width: 90px; padding: 9px 10px; border: 1px solid var(--line-strong); text-align: left; vertical-align: top; white-space: pre-wrap; }
+    .document-table th { background: var(--panel-raised); font-weight: 720; }
+    .document-table td.evidence-conflicting, .document-table td.evidence-unreadable,
+    .document-table th.evidence-conflicting, .document-table th.evidence-unreadable { background: var(--accent-soft); }
+    .semantic-block.control, .semantic-block.handwriting { padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--accent-soft); }
+    .semantic-block.figure, .semantic-block.field { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-raised); }
+    .semantic-block.list { padding-left: 18px; }
+    .evidence-state { display: inline-flex; margin: 0 7px 7px 0; padding: 3px 7px; border: 1px solid var(--accent); border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: .67rem; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; vertical-align: middle; }
+    .evidence-alternatives { margin: 7px 0 0; color: var(--muted); font-size: .76rem; }
+    .evidence-alternatives summary { cursor: pointer; font-weight: 650; }
+    .evidence-alternatives ul { margin: 6px 0 0; padding-left: 18px; }
+    .layout-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+    .layout-table th, .layout-table td { padding: 9px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    .layout-table th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; }
     .failure {
       margin-bottom: 10px;
       padding: 13px;
-      border: 1px solid #5f2c35;
+      border: 1px solid var(--accent);
       border-radius: 10px;
-      background: #35151b66;
+      background: var(--accent-soft);
     }
-    .failure-code { color: var(--danger); font: .78rem ui-monospace, monospace; }
+    .failure-code { color: var(--accent); font: .78rem ui-monospace, monospace; }
     .failure-message { margin-top: 6px; line-height: 1.5; }
-    .success-note { color: var(--success); }
-    .downloads { display: flex; flex-wrap: wrap; gap: 8px; }
+    .success-note { color: var(--text); }
+    .downloads { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .copy-control { display: inline-flex; align-items: center; gap: 7px; }
+    .copy-status { min-width: 0; color: var(--text); font-size: .72rem; font-weight: 700; }
+    .copy-status.error { color: var(--accent); }
+    .download[data-copy-state="copied"] { border-color: var(--line-strong); background: var(--panel-raised); color: var(--text); }
+    .download[data-copy-state="error"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
     .download {
       padding: 7px 10px;
       border: 1px solid var(--line);
@@ -337,13 +414,25 @@
       .tab-panel { min-height: 420px; }
     }
     @media (max-width: 580px) {
+      .shell { padding: 12px; }
+      .activity-line { flex-direction: column; }
+      .client-timer { width: 100%; }
       .toolbar { align-items: stretch; flex-wrap: wrap; }
       .file-field { flex-basis: 100%; }
       .button { flex: 1; }
       .card-head { align-items: flex-start; flex-direction: column; }
-      .risk-metrics { grid-template-columns: 1fr 1fr; }
       .categories { align-items: flex-start; flex-direction: column; }
       .inspector-grid { grid-template-columns: 1fr 1fr; }
+      .downloads { display: grid; width: 100%; grid-template-columns: 1fr 1fr; }
+      .copy-control { grid-column: 1 / -1; }
+      .copy-control .download { flex: 1; }
+      .download { text-align: center; }
+      .tabs { padding-inline: 8px; }
+      .tab { padding-inline: 10px; }
+      .tab-panel { padding: 14px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .button:hover:not(:disabled) { transform: none; }
     }
   </style>
 </head>
@@ -351,11 +440,11 @@
   <main class="shell">
     <header>
       <div>
-        <div class="eyebrow">Local evidence viewer</div>
-        <h1>Clinical OCR Workbench</h1>
-        <p class="subtitle">Inspect every page, region, and failure without leaving this machine.</p>
+        <div class="eyebrow" aria-hidden="true">Local evidence viewer</div>
+        <h1>Not So Smart OCR</h1>
+        <p class="subtitle">A local document parser that keeps text, layout, evidence, and failures visible.</p>
       </div>
-      <div class="privacy">Local processing<br>25 MB maximum</div>
+      <div class="privacy">Private execution path<br>25 MB maximum</div>
     </header>
 
     <form class="toolbar" id="upload-form">
@@ -368,28 +457,42 @@
       <button class="button" id="clear-button" type="button" disabled>Clear</button>
     </form>
 
-    <div class="status-line" id="status-line" role="status" aria-live="polite"></div>
+    <nav class="examples" aria-label="Generated example documents">
+      <span class="examples-label">Try a generated example</span>
+      <button class="example-button" type="button" data-example="architecture">OCR architecture</button>
+      <button class="example-button" type="button" data-example="hard-case-routing">Hard-case routing</button>
+      <button class="example-button" type="button" data-example="clinical-table">Clinical table</button>
+    </nav>
+
+    <div class="activity-line" id="activity-line" hidden>
+      <div class="status-line" id="status-line" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div class="client-timer" id="client-timer" data-state="idle" aria-label="Client request timing" hidden>
+        <span class="timer-label">Client wall time</span>
+        <strong class="timer-value" id="client-elapsed">0.0 s</strong>
+        <span class="timer-state" id="client-timer-state">Idle</span>
+      </div>
+    </div>
     <div class="metadata" id="metadata" aria-label="Processing metadata"></div>
     <details class="timing-card" id="timing-card" hidden>
-      <summary><span>Performance breakdown</span><span class="timing-total" id="timing-total"></span></summary>
+      <summary><span>Backend stage timing</span><span class="timing-total" id="timing-total"></span></summary>
       <div class="timing-list" id="timing-list"></div>
     </details>
 
     <section class="risk-card" id="risk-card" aria-labelledby="risk-title" hidden>
       <div class="risk-summary">
         <div class="risk-heading">
-          <h2 id="risk-title">Evidence risk</h2>
+          <h2 id="risk-title">Evidence diagnostics</h2>
           <span class="risk-badge" id="risk-badge"></span>
         </div>
         <p class="risk-copy" id="risk-copy"></p>
       </div>
       <div class="risk-metrics" aria-label="Current page evidence diagnostics">
-        <div class="risk-metric"><span class="label">Mean provider confidence</span><span class="risk-value" id="risk-confidence">-</span><span class="risk-detail" id="risk-confidence-detail"></span></div>
+        <div class="risk-metric"><span class="label">Provider confidence</span><span class="risk-value" id="risk-confidence">-</span><span class="risk-detail" id="risk-confidence-detail"></span></div>
         <div class="risk-metric"><span class="label">Primary regions</span><span class="risk-value" id="risk-primary">-</span></div>
-        <div class="risk-metric"><span class="label">Unresolved / conflicting</span><span class="risk-value" id="risk-unresolved">-</span></div>
+        <div class="risk-metric"><span class="label">Unreadable / conflicting</span><span class="risk-value" id="risk-unresolved">-</span></div>
         <div class="risk-metric"><span class="label">Alternative disagreements</span><span class="risk-value" id="risk-disagreements">-</span></div>
         <div class="risk-metric"><span class="label">Execution failures</span><span class="risk-value" id="risk-failures">-</span></div>
-        <div class="risk-reasons" id="risk-reasons" aria-label="Review reasons"></div>
+        <div class="risk-reasons" id="risk-reasons" aria-label="Review reasons and region categories"></div>
       </div>
     </section>
 
@@ -398,9 +501,9 @@
         <div class="card-head">
           <span class="card-title">Page preview</span>
           <div class="page-controls">
-            <button class="icon-button" id="previous-page" type="button" aria-label="Previous page" disabled>←</button>
+            <button class="icon-button" id="previous-page" type="button" disabled>Previous</button>
             <span class="page-count" id="page-count">No pages</span>
-            <button class="icon-button" id="next-page" type="button" aria-label="Next page" disabled>→</button>
+            <button class="icon-button" id="next-page" type="button" disabled>Next</button>
           </div>
         </div>
         <div class="categories" id="region-categories" hidden>
@@ -415,6 +518,10 @@
           <canvas id="page-canvas" tabindex="0" aria-label="OCR page with region overlays"></canvas>
         </div>
         <div class="inspector" id="inspector">
+          <div class="inspector-head">
+            <span class="reread-status" id="reread-status" role="status" aria-live="polite" aria-atomic="true"></span>
+            <button class="download inspector-action" id="reread-handwriting" type="button" hidden disabled>Reread handwriting</button>
+          </div>
           <div class="inspector-grid">
             <div class="datum"><span class="label">Kind</span><span class="value" id="region-kind">None selected</span></div>
             <div class="datum"><span class="label">Confidence</span><span class="value" id="region-confidence">-</span></div>
@@ -431,25 +538,34 @@
         </div>
       </article>
 
-      <article class="card">
+      <article class="card output-card">
         <div class="card-head">
           <span class="card-title">Document output</span>
           <div class="downloads">
-            <button class="download" id="copy-json" type="button" disabled>Copy JSON</button>
-            <a class="download" id="download-json" aria-disabled="true">JSON</a>
-            <a class="download" id="download-markdown" aria-disabled="true">Markdown</a>
+            <span class="copy-control">
+              <button class="download" id="copy-json" type="button" data-copy-state="idle" disabled>Copy JSON</button>
+              <span class="copy-status" id="copy-status" role="status" aria-live="polite" aria-atomic="true"></span>
+            </span>
+            <a class="download" id="download-json" download aria-disabled="true">Download JSON</a>
+            <a class="download" id="download-markdown" download aria-disabled="true">Download Markdown</a>
           </div>
         </div>
         <div class="tabs" role="tablist" aria-label="Output views">
-          <button class="tab" role="tab" aria-selected="true" aria-controls="panel-text" id="tab-text">Rendered text</button>
-          <button class="tab" role="tab" aria-selected="false" aria-controls="panel-json" id="tab-json">Structured JSON</button>
-          <button class="tab" role="tab" aria-selected="false" aria-controls="panel-failures" id="tab-failures">Failures</button>
+          <button class="tab" role="tab" type="button" aria-selected="true" aria-controls="panel-rendered" id="tab-rendered">Rendered</button>
+          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-layout" id="tab-layout" tabindex="-1">Layout</button>
+          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-processed" id="tab-processed" tabindex="-1">Processed</button>
+          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-raw" id="tab-raw" tabindex="-1">Raw</button>
+          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-json" id="tab-json" tabindex="-1">JSON</button>
+          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-failures" id="tab-failures" tabindex="-1">Failures</button>
         </div>
-        <div class="tab-panel active" role="tabpanel" id="panel-text" aria-labelledby="tab-text">
+        <div class="tab-panel active" role="tabpanel" id="panel-rendered" aria-labelledby="tab-rendered">
           <div class="empty-state"><strong>No result yet</strong>Parsed text will remain linked to its source regions.</div>
         </div>
-        <div class="tab-panel" role="tabpanel" id="panel-json" aria-labelledby="tab-json"><pre>{}</pre></div>
-        <div class="tab-panel" role="tabpanel" id="panel-failures" aria-labelledby="tab-failures">
+        <div class="tab-panel" role="tabpanel" id="panel-layout" aria-labelledby="tab-layout" hidden></div>
+        <div class="tab-panel" role="tabpanel" id="panel-processed" aria-labelledby="tab-processed" hidden></div>
+        <div class="tab-panel" role="tabpanel" id="panel-raw" aria-labelledby="tab-raw" hidden><pre>[]</pre></div>
+        <div class="tab-panel" role="tabpanel" id="panel-json" aria-labelledby="tab-json" hidden><pre>{}</pre></div>
+        <div class="tab-panel" role="tabpanel" id="panel-failures" aria-labelledby="tab-failures" hidden>
           <div class="empty-state"><strong>No result yet</strong>Ingest, render, and OCR failures will be shown explicitly.</div>
         </div>
       </article>
@@ -463,31 +579,78 @@
       selectedOverlay: -1,
       image: null,
       imageRequest: 0,
-      hiddenKinds: new Set()
+      hiddenKinds: new Set(),
+      selectedFile: null,
+      clientTimerStartedAt: null,
+      clientTimerId: null,
+      copyResetId: null,
+      rereadBusy: false
     };
     const byId = (id) => document.getElementById(id);
+    const INLINE_MAX_GAP_HEIGHTS = 3;
     const cleanupWarning = " The previous temporary session could not be removed and will be cleared when the server stops.";
     const fileInput = byId("source-file");
     const form = byId("upload-form");
     const canvas = byId("page-canvas");
     const context = canvas.getContext("2d");
+    const rootStyle = getComputedStyle(document.documentElement);
+    const structureColor = rootStyle.getPropertyValue("--text").trim();
+    const actionColor = rootStyle.getPropertyValue("--accent").trim();
+    const neutralColor = rootStyle.getPropertyValue("--panel").trim();
 
     fileInput.addEventListener("change", () => {
       const file = fileInput.files[0];
+      state.selectedFile = file || null;
       byId("file-name").textContent = file ? file.name : "Choose one image, PDF, or TIFF";
       byId("parse-button").disabled = !file;
+      byId("clear-button").disabled = !file && !state.response;
     });
+
+    document.querySelectorAll("[data-example]").forEach((button) => {
+      button.addEventListener("click", () => handleExample(button));
+    });
+
+    async function handleExample(button) {
+      const name = button.dataset.example;
+      setStatus("Loading generated example...", false, "busy");
+      try {
+        const response = await fetch(`/api/examples/${encodeURIComponent(name)}`);
+        if (!response.ok) throw new Error("The example could not be loaded");
+        const blob = await response.blob();
+        const filename = response.headers.get("content-disposition")?.match(/filename="?([^";]+)"?/)?.[1] || `${name}.pdf`;
+        fileInput.value = "";
+        state.selectedFile = new File(
+          [blob],
+          filename,
+          { type: blob.type || "application/octet-stream" }
+        );
+        byId("file-name").textContent = `${filename} · generated example`;
+        byId("parse-button").disabled = false;
+        byId("clear-button").disabled = false;
+        setStatus("Generated example ready. Select Parse to run the local pipeline.", false, "success");
+      } catch (error) {
+        state.selectedFile = null;
+        byId("parse-button").disabled = true;
+        setStatus(error.message, true);
+      }
+    }
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const file = fileInput.files[0];
+      const file = state.selectedFile;
       if (!file) return;
       const previousSessionId = state.response?.session_id;
+      startClientTimer();
       resetResult();
-      setBusy(true, "Parsing document locally...");
+      state.selectedFile = file;
+      setBusy(
+        true,
+        "Running local OCR and specialist stages. This backend returns the complete result when processing finishes; it does not stream OCR tokens."
+      );
       const body = new FormData();
       body.append("file", file);
       let cleanupFailed = false;
+      let timerOutcome = "error";
       try {
         if (previousSessionId) {
           try {
@@ -504,19 +667,22 @@
         state.selectedOverlay = -1;
         resetHiddenKinds();
         renderResult();
+        timerOutcome = "complete";
         const coverage = payload.coverage_assessment;
         const cleanupNote = cleanupFailed ? cleanupWarning : "";
         setStatus(
           payload.result.status === "success"
             ? `OCR execution succeeded. ${coverage.message}${cleanupNote}`
             : `Parsing finished with status: ${payload.result.status}. ${coverage.message}${cleanupNote}`,
-          false
+          false,
+          payload.result.status === "success" ? "success" : ""
         );
         byId("clear-button").disabled = false;
       } catch (error) {
         resetResult();
         setStatus(`${error.message}${cleanupFailed ? cleanupWarning : ""}`, true);
       } finally {
+        stopClientTimer(timerOutcome);
         setBusy(false);
       }
     });
@@ -524,12 +690,14 @@
     byId("clear-button").addEventListener("click", async () => {
       const sessionId = state.response?.session_id;
       fileInput.value = "";
+      state.selectedFile = null;
       byId("file-name").textContent = "Choose one image, PDF, or TIFF";
       byId("parse-button").disabled = true;
       resetResult();
+      resetClientTimer();
       try {
         if (sessionId) await deleteSession(sessionId);
-        setStatus("Session cleared from local temporary storage.", false);
+        setStatus("Session cleared from local temporary storage.", false, "success");
       } catch {
         setStatus(
           "The local view was cleared, but the temporary server session could not be removed. It will be cleared when the server stops.",
@@ -539,15 +707,159 @@
     });
 
     byId("copy-json").addEventListener("click", handleCopyJson);
+    byId("reread-handwriting").addEventListener("click", handleRereadHandwriting);
 
     async function handleCopyJson() {
       if (!state.response) return;
+      const content = JSON.stringify(state.response.result, null, 2);
+      const button = byId("copy-json");
+      button.disabled = true;
+      button.setAttribute("aria-busy", "true");
+      button.textContent = "Copying...";
       try {
-        await navigator.clipboard.writeText(JSON.stringify(state.response.result, null, 2));
-        setStatus("Structured JSON copied to the clipboard.", false);
+        await copyText(content);
+        showCopyStatus("JSON copied", "copied");
       } catch {
-        setStatus("JSON could not be copied. Open Structured JSON to copy it manually.", true);
+        showCopyStatus("Copy failed", "error");
+      } finally {
+        button.disabled = !state.response;
+        button.setAttribute("aria-busy", "false");
       }
+    }
+
+    async function handleRereadHandwriting() {
+      const sessionId = state.response?.session_id;
+      const page = state.response?.result.pages[state.pageIndex];
+      const region = currentOverlays()[state.selectedOverlay];
+      if (!sessionId || !page || !region || !currentRegions().some((item) => item.id === region.id)) return;
+
+      state.rereadBusy = true;
+      updateRereadAction(region);
+      setRereadStatus("Rereading the selected region locally...");
+      byId("parse-button").disabled = true;
+      byId("clear-button").disabled = true;
+      try {
+        const response = await fetch(`/api/sessions/${sessionId}/handwriting`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ page_number: page.page_number, region_id: region.id })
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.detail || "The selected region could not be reread");
+        state.response = payload;
+        renderResult();
+        setRereadStatus("Handwriting reread complete.");
+      } catch (error) {
+        setRereadStatus(error.message, true);
+      } finally {
+        state.rereadBusy = false;
+        updateRereadAction(currentOverlays()[state.selectedOverlay]);
+        byId("parse-button").disabled = !state.selectedFile;
+        byId("clear-button").disabled = !state.response && !state.selectedFile;
+      }
+    }
+
+    function setRereadStatus(message, isError = false) {
+      const status = byId("reread-status");
+      status.textContent = message;
+      status.classList.toggle("error", isError);
+    }
+
+    function updateRereadAction(region) {
+      const button = byId("reread-handwriting");
+      const selectable = Boolean(
+        state.response?.session_id
+        && region
+        && currentRegions().some((item) => item.id === region.id)
+      );
+      button.hidden = !selectable;
+      button.disabled = !selectable || state.rereadBusy;
+    }
+
+    async function copyText(content) {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        try {
+          await navigator.clipboard.writeText(content);
+          return;
+        } catch {
+          // The legacy path remains useful on local HTTP pages and denied permissions.
+        }
+      }
+      if (!copyTextWithTextarea(content)) throw new Error("Clipboard unavailable");
+    }
+
+    function copyTextWithTextarea(content) {
+      const textarea = document.createElement("textarea");
+      textarea.value = content;
+      textarea.readOnly = true;
+      textarea.tabIndex = -1;
+      textarea.setAttribute("aria-hidden", "true");
+      textarea.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+      document.body.append(textarea);
+      textarea.focus({ preventScroll: true });
+      textarea.select();
+      textarea.setSelectionRange(0, textarea.value.length);
+      try {
+        return document.execCommand("copy");
+      } catch {
+        return false;
+      } finally {
+        textarea.remove();
+      }
+    }
+
+    function showCopyStatus(message, copyState) {
+      const button = byId("copy-json");
+      const status = byId("copy-status");
+      window.clearTimeout(state.copyResetId);
+      button.dataset.copyState = copyState;
+      button.textContent = copyState === "copied" ? "Copied" : "Try copy again";
+      status.textContent = message;
+      status.classList.toggle("error", copyState === "error");
+      state.copyResetId = window.setTimeout(() => {
+        button.dataset.copyState = "idle";
+        button.textContent = "Copy JSON";
+        status.textContent = "";
+        status.classList.remove("error");
+      }, 1600);
+    }
+
+    function startClientTimer() {
+      window.clearInterval(state.clientTimerId);
+      state.clientTimerStartedAt = performance.now();
+      byId("activity-line").hidden = false;
+      const timer = byId("client-timer");
+      timer.hidden = false;
+      timer.dataset.state = "running";
+      byId("client-timer-state").textContent = "Running";
+      renderClientElapsed();
+      state.clientTimerId = window.setInterval(renderClientElapsed, 100);
+    }
+
+    function renderClientElapsed() {
+      if (state.clientTimerStartedAt == null) return;
+      const elapsedSeconds = (performance.now() - state.clientTimerStartedAt) / 1000;
+      byId("client-elapsed").textContent = `${elapsedSeconds.toFixed(1)} s`;
+    }
+
+    function stopClientTimer(outcome) {
+      if (state.clientTimerStartedAt == null) return;
+      renderClientElapsed();
+      window.clearInterval(state.clientTimerId);
+      state.clientTimerId = null;
+      state.clientTimerStartedAt = null;
+      byId("client-timer").dataset.state = outcome;
+      byId("client-timer-state").textContent = outcome === "complete" ? "Complete" : "Stopped on error";
+    }
+
+    function resetClientTimer() {
+      window.clearInterval(state.clientTimerId);
+      state.clientTimerId = null;
+      state.clientTimerStartedAt = null;
+      byId("client-elapsed").textContent = "0.0 s";
+      byId("client-timer-state").textContent = "Idle";
+      byId("client-timer").dataset.state = "idle";
+      byId("client-timer").hidden = true;
     }
 
     async function deleteSession(sessionId) {
@@ -558,16 +870,23 @@
     }
 
     function setBusy(busy, message = "") {
-      byId("parse-button").disabled = busy || !fileInput.files[0];
-      byId("clear-button").disabled = busy || !state.response;
+      const parseButton = byId("parse-button");
+      form.setAttribute("aria-busy", String(busy));
+      parseButton.textContent = busy ? "Parsing..." : "Parse";
+      parseButton.disabled = busy || !state.selectedFile;
+      byId("clear-button").disabled = busy || (!state.response && !state.selectedFile);
       byId("copy-json").disabled = busy || !state.response;
-      if (busy) setStatus(message, false);
+      document.querySelectorAll("[data-example]").forEach((button) => {
+        button.disabled = busy;
+      });
+      if (busy) setStatus(message, false, "busy");
     }
 
-    function setStatus(message, isError) {
+    function setStatus(message, isError, tone = "") {
       const status = byId("status-line");
+      byId("activity-line").hidden = false;
       status.textContent = message;
-      status.className = `status-line visible${isError ? " error" : ""}`;
+      status.className = `status-line visible${isError ? " error" : tone ? ` ${tone}` : ""}`;
     }
 
     function renderResult() {
@@ -576,7 +895,14 @@
       renderMetadata(payload);
       renderTiming(payload.timing);
       renderUncertainty();
-      renderText(result.pages);
+      renderRendered(result.pages);
+      renderLayout(result.pages);
+      renderProcessed(result.pages);
+      byId("panel-raw").querySelector("pre").textContent = JSON.stringify(
+        result.pages.map((page) => ({ page_number: page.page_number, regions: page.regions })),
+        null,
+        2
+      );
       byId("panel-json").querySelector("pre").textContent = JSON.stringify(result, null, 2);
       renderFailures(result.failures, payload.preview_failure);
       byId("download-json").href = `/api/sessions/${payload.session_id}/result.json`;
@@ -598,8 +924,11 @@
       }
 
       card.hidden = false;
+      card.dataset.state = page.review_required ? "review" : "clear";
       const badge = byId("risk-badge");
-      badge.textContent = page.review_required ? `Page ${page.page_number}: review required` : `Page ${page.page_number}: no flags`;
+      badge.textContent = page.review_required
+        ? `Review required · page ${page.page_number}`
+        : `No review flags · page ${page.page_number}`;
       badge.classList.toggle("clear", !page.review_required);
       byId("risk-copy").textContent = summary.interpretation;
       byId("risk-confidence").textContent = page.mean_primary_confidence == null
@@ -607,16 +936,23 @@
         : `${(page.mean_primary_confidence * 100).toFixed(1)}%`;
       byId("risk-confidence-detail").textContent = page.mean_primary_confidence == null
         ? "No scored primary evidence"
-        : `${page.confidence_regions} of ${page.primary_regions} regions scored`;
+        : `Provider-reported · ${page.confidence_regions} of ${page.primary_regions} scored`;
       byId("risk-primary").textContent = page.primary_regions;
       byId("risk-unresolved").textContent = `${page.unresolved_evidence} / ${page.conflicting_evidence}`;
       byId("risk-disagreements").textContent = page.disagreeing_alternatives;
       byId("risk-failures").textContent = page.failure_count;
-      const reasons = page.risk_reasons.length ? page.risk_reasons : ["No additional review reasons"];
-      byId("risk-reasons").replaceChildren(...reasons.map((reason) => {
+      const reasons = page.risk_reasons.length ? page.risk_reasons : ["No deterministic review reasons"];
+      const tags = [
+        ...reasons.map((label) => ({ label, flag: page.risk_reasons.length > 0 })),
+        ...Object.entries(page.category_counts || {}).map(([category, count]) => ({
+          label: `${category} · ${count}`,
+          flag: false
+        }))
+      ];
+      byId("risk-reasons").replaceChildren(...tags.map(({ label, flag }) => {
         const item = document.createElement("span");
-        item.className = "risk-reason";
-        item.textContent = reason.replaceAll("_", " ");
+        item.className = `risk-reason${flag ? " flag" : ""}`;
+        item.textContent = label.replaceAll("_", " ");
         return item;
       }));
     }
@@ -628,7 +964,7 @@
         ["Backend", payload.backend],
         ["Stages", payload.pipeline_stages.join(" + ") || "none"],
         ["Version", payload.backend_version],
-        ["Elapsed", `${payload.elapsed_seconds.toFixed(3)} s`],
+        ["Backend pipeline", `${payload.elapsed_seconds.toFixed(3)} s`],
         ["Geometry", payload.geometry],
         ["Coverage", payload.coverage_assessment.status.replaceAll("_", " ")],
         ["Schema", `v${result.schema_version}`]
@@ -637,6 +973,8 @@
       metadata.replaceChildren(...items.map(([label, value]) => {
         const chip = document.createElement("span");
         chip.className = "chip";
+        if (label === "Status") chip.dataset.tone = value === "success" ? "success" : "error";
+        if (label === "Coverage" && value !== "assessed") chip.dataset.tone = "review";
         const strong = document.createElement("strong");
         strong.textContent = `${label}: `;
         chip.append(strong, document.createTextNode(value));
@@ -654,15 +992,16 @@
       const values = [
         ["Receive + multipart", timing.receive_seconds],
         ["Store file", timing.save_seconds],
-        ["Queue", timing.queue_seconds],
-        ["Pipeline", timing.pipeline_seconds],
-        ["Preview", timing.preview_seconds],
+        ["Preview queue", timing.preview_queue_seconds],
+        ["Preview processing", timing.preview_seconds],
+        ["OCR queue", timing.queue_seconds],
+        ["OCR pipeline", timing.pipeline_seconds],
         ...Object.entries(timing.pipeline_steps || {}).map(([name, seconds]) => [
           name.replace(/^stage\./, "").replaceAll("_", " "),
           seconds
         ])
       ];
-      byId("timing-total").textContent = `${timing.total_seconds.toFixed(3)} s total`;
+      byId("timing-total").textContent = `${timing.total_seconds.toFixed(3)} s backend total`;
       byId("timing-list").replaceChildren(...values.map(([label, seconds]) => {
         const item = document.createElement("div");
         item.className = "timing-item";
@@ -674,8 +1013,289 @@
       card.hidden = false;
     }
 
-    function renderText(pages) {
-      const panel = byId("panel-text");
+    function renderRendered(pages) {
+      const panel = byId("panel-rendered");
+      panel.replaceChildren(...pages.map((page) => {
+        const section = document.createElement("section");
+        section.className = "rendered-page";
+        const heading = document.createElement("h2");
+        heading.textContent = `Page ${page.page_number}`;
+        const blocks = renderSemanticBlocks(displayRegions(page));
+        if (!blocks.length) {
+          const text = document.createElement("p");
+          text.className = "semantic-block text";
+          text.textContent = page.text.value || "No text detected.";
+          blocks.push(text);
+        }
+        const content = document.createElement("div");
+        content.className = "rendered-content";
+        content.append(...blocks);
+        section.append(heading, content);
+        return section;
+      }));
+      if (!pages.length) {
+        const empty = document.createElement("p");
+        empty.textContent = "No pages were produced.";
+        panel.replaceChildren(empty);
+      }
+    }
+
+    function displayRegions(page) {
+      const evidenceIds = new Set(page.text.evidence_ids || []);
+      const included = orderedRegions(page.regions).filter((region) => {
+        const role = region.structure?.role;
+        if (["table_source", "coverage_risk", "table_candidate"].includes(role)) return false;
+        if (["coverage_risk", "table_candidate"].includes(region.kind)) return false;
+        return evidenceIds.has(region.id)
+          || semanticKind(region) === "control"
+          || region.resolution !== "resolved";
+      });
+      const linkedLabels = new Set(
+        included
+          .filter((region) => semanticKind(region) === "control" && region.text)
+          .flatMap((region) => region.structure?.label_evidence_ids || [])
+      );
+      return included.filter((region) => !linkedLabels.has(region.id));
+    }
+
+    function orderedRegions(regions) {
+      return regions
+        .map((region, index) => ({ region, index }))
+        .sort((left, right) => {
+          const leftOrder = Number.isInteger(left.region.reading_order) ? left.region.reading_order : Number.MAX_SAFE_INTEGER;
+          const rightOrder = Number.isInteger(right.region.reading_order) ? right.region.reading_order : Number.MAX_SAFE_INTEGER;
+          return leftOrder - rightOrder || left.index - right.index;
+        })
+        .map(({ region }) => region);
+    }
+
+    function renderSemanticBlocks(regions) {
+      const groups = [];
+      orderedRegions(regions).forEach((region) => {
+        const kind = semanticKind(region);
+        const sourceKind = String(region.kind || "text");
+        const inline = /(^|_)(word|token)(_|$)/.test(sourceKind.toLowerCase())
+          || (sourceKind.toLowerCase() === "text"
+            && region.text_provenance?.merge_level === "word");
+        const previous = groups.at(-1);
+        if (
+          inline
+          && previous?.inline
+          && previous.kind === kind
+          && previous.region.resolution === "resolved"
+          && region.resolution === "resolved"
+          && sameTextLine(previous.lastRegion, region)
+        ) {
+          previous.text += ` ${region.text}`;
+          previous.lastRegion = region;
+          return;
+        }
+        groups.push({
+          kind,
+          text: region.text,
+          sourceKind,
+          role: region.structure?.role || "",
+          inline,
+          region,
+          lastRegion: region
+        });
+      });
+      return groups.map(renderSemanticBlock);
+    }
+
+    function renderSemanticBlock(group) {
+      const kind = group.kind;
+      if (kind === "table") return renderDocumentTable(group.region);
+      const tag = kind === "title" ? "h3" : kind === "heading" ? "h4" : "div";
+      const block = document.createElement(tag);
+      block.className = `semantic-block ${kind}`;
+      block.dataset.regionKind = kind;
+      block.dataset.sourceKind = group.sourceKind;
+      if (group.role) block.dataset.regionRole = group.role;
+      block.dataset.resolution = group.region.resolution || "resolved";
+      const label = kind === "field"
+        ? group.region.structure?.label || group.region.structure?.field_name
+        : null;
+      if (label && group.text) {
+        const strong = document.createElement("strong");
+        strong.textContent = `${label}: `;
+        block.append(strong, document.createTextNode(group.text));
+      } else {
+        block.textContent = group.text || "";
+      }
+      appendEvidenceState(block, group.region.resolution, group.region.alternatives);
+      return block;
+    }
+
+    function sameTextLine(first, second) {
+      const firstBox = normalizedBox(first.bounding_box);
+      const secondBox = normalizedBox(second.bounding_box);
+      if (!firstBox || !secondBox) return false;
+      const overlap = Math.min(firstBox.bottom, secondBox.bottom) - Math.max(firstBox.top, secondBox.top);
+      const height = Math.min(firstBox.bottom - firstBox.top, secondBox.bottom - secondBox.top);
+      const horizontalGap = secondBox.left - firstBox.right;
+      if (height <= 0 || overlap / height < 0.4) return false;
+      if (secondBox.left < firstBox.left) return false;
+      return horizontalGap >= -height && horizontalGap <= height * INLINE_MAX_GAP_HEIGHTS;
+    }
+
+    function renderDocumentTable(region) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "semantic-block table";
+      wrapper.dataset.regionKind = "table";
+      wrapper.dataset.sourceKind = region.kind || "table";
+      wrapper.dataset.regionRole = region.structure?.role || "table";
+      wrapper.dataset.resolution = region.resolution || "resolved";
+      const cells = normalizedTableCells(region.structure?.cells || []);
+      if (!cells.length) {
+        wrapper.textContent = region.text || "";
+        appendEvidenceState(wrapper, region.resolution, region.alternatives);
+        return wrapper;
+      }
+
+      const rowCount = Math.max(
+        Number(region.structure?.row_count) || 0,
+        ...cells.map((cell) => Math.max(...cell.rows) + 1)
+      );
+      const columnCount = Math.max(
+        Number(region.structure?.column_count) || 0,
+        ...cells.map((cell) => Math.max(...cell.columns) + 1)
+      );
+      const anchors = new Map(cells.map((cell) => [`${cell.rows[0]}:${cell.columns[0]}`, cell]));
+      const occupied = new Set();
+      const table = document.createElement("table");
+      table.className = "document-table";
+      table.setAttribute("aria-label", "Extracted table evidence");
+      const body = document.createElement("tbody");
+      for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+        const row = document.createElement("tr");
+        for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
+          const key = `${rowIndex}:${columnIndex}`;
+          if (occupied.has(key)) continue;
+          const cell = anchors.get(key);
+          const element = document.createElement(
+            cell?.column_header || cell?.projected_row_header ? "th" : "td"
+          );
+          if (!cell) {
+            row.append(element);
+            continue;
+          }
+          const rowSpan = Math.max(...cell.rows) - Math.min(...cell.rows) + 1;
+          const columnSpan = Math.max(...cell.columns) - Math.min(...cell.columns) + 1;
+          if (rowSpan > 1) element.rowSpan = rowSpan;
+          if (columnSpan > 1) element.colSpan = columnSpan;
+          for (let cellRow = Math.min(...cell.rows); cellRow <= Math.max(...cell.rows); cellRow += 1) {
+            for (let cellColumn = Math.min(...cell.columns); cellColumn <= Math.max(...cell.columns); cellColumn += 1) {
+              if (cellRow !== rowIndex || cellColumn !== columnIndex) occupied.add(`${cellRow}:${cellColumn}`);
+            }
+          }
+          element.textContent = cell.text || "";
+          const resolution = cell.resolution || "resolved";
+          element.dataset.resolution = resolution;
+          if (resolution !== "resolved") element.classList.add(`evidence-${resolution}`);
+          const alternatives = alternativeTexts(cell.alternatives, cell.text);
+          appendEvidenceState(element, resolution, cell.alternatives);
+          row.append(element);
+        }
+        body.append(row);
+      }
+      table.append(body);
+      wrapper.append(table);
+      appendEvidenceState(wrapper, region.resolution, region.alternatives);
+      return wrapper;
+    }
+
+    function normalizedTableCells(cells) {
+      const normalized = cells.flatMap((cell) => {
+        if (!cell || typeof cell !== "object") return [];
+        const rows = Array.isArray(cell.row_nums) && cell.row_nums.length
+          ? cell.row_nums.map(Number)
+          : Number.isInteger(cell.row_index) ? [cell.row_index] : [];
+        const columns = Array.isArray(cell.column_nums) && cell.column_nums.length
+          ? cell.column_nums.map(Number)
+          : Number.isInteger(cell.column_index) ? [cell.column_index] : [];
+        return rows.length && columns.length ? [{ ...cell, rows, columns }] : [];
+      });
+      const indexed = normalized.filter((cell) => !Array.isArray(cell.row_nums));
+      if (indexed.length && Math.min(...indexed.map((cell) => cell.rows[0])) >= 1) {
+        indexed.forEach((cell) => { cell.rows = cell.rows.map((row) => row - 1); });
+      }
+      if (indexed.length && Math.min(...indexed.map((cell) => cell.columns[0])) >= 1) {
+        indexed.forEach((cell) => { cell.columns = cell.columns.map((column) => column - 1); });
+      }
+      return normalized.sort((left, right) => left.rows[0] - right.rows[0] || left.columns[0] - right.columns[0]);
+    }
+
+    function appendEvidenceState(container, resolution, alternatives) {
+      if (!resolution || resolution === "resolved") return;
+      const values = alternativeTexts(alternatives, container.textContent);
+      const state = document.createElement("span");
+      state.className = "evidence-state";
+      state.textContent = `${resolution} evidence`;
+      container.prepend(state);
+      if (!values.length) return;
+      const details = document.createElement("details");
+      details.className = "evidence-alternatives";
+      const summary = document.createElement("summary");
+      summary.textContent = `${values.length} alternative${values.length === 1 ? "" : "s"}`;
+      const list = document.createElement("ul");
+      values.forEach((value) => {
+        const item = document.createElement("li");
+        item.textContent = value;
+        list.append(item);
+      });
+      details.append(summary, list);
+      container.append(details);
+    }
+
+    function alternativeTexts(alternatives, selected) {
+      const selectedText = String(selected || "").trim();
+      return (Array.isArray(alternatives) ? alternatives : [])
+        .map((alternative) => String(alternative?.text || "").trim())
+        .filter((text, index, values) => text && text !== selectedText && values.indexOf(text) === index);
+    }
+
+    function renderLayout(pages) {
+      const panel = byId("panel-layout");
+      const table = document.createElement("table");
+      table.className = "layout-table";
+      const head = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      ["Page", "Order", "Category", "Bounding box", "Provider", "Resolution"].forEach((label) => {
+        const cell = document.createElement("th");
+        cell.scope = "col";
+        cell.textContent = label;
+        headRow.append(cell);
+      });
+      head.append(headRow);
+      const body = document.createElement("tbody");
+      pages.forEach((page) => page.regions.forEach((region) => {
+        const row = document.createElement("tr");
+        const box = normalizedBox(region.bounding_box);
+        [
+          page.page_number,
+          region.reading_order ?? "-",
+          semanticKind(region),
+          box ? `${box.left}, ${box.top}, ${box.right}, ${box.bottom}` : "-",
+          region.provider || "-",
+          region.resolution || "-"
+        ].forEach((value) => {
+          const cell = document.createElement("td");
+          cell.textContent = value;
+          row.append(cell);
+        });
+        body.append(row);
+      }));
+      table.append(head, body);
+      if (!body.childElementCount) {
+        panel.textContent = "No layout regions were produced.";
+        return;
+      }
+      panel.replaceChildren(table);
+    }
+
+    function renderProcessed(pages) {
+      const panel = byId("panel-processed");
       panel.replaceChildren(...pages.map((page) => {
         const section = document.createElement("section");
         section.className = "rendered-page";
@@ -686,11 +1306,7 @@
         section.append(heading, text);
         return section;
       }));
-      if (!pages.length) {
-        const empty = document.createElement("p");
-        empty.textContent = "No pages were produced.";
-        panel.replaceChildren(empty);
-      }
+      if (!pages.length) panel.textContent = "No processed pages were produced.";
     }
 
     function renderFailures(failures, previewFailure) {
@@ -784,7 +1400,7 @@
     }
 
     function currentOverlays() {
-      return pageOverlays().filter((region) => !state.hiddenKinds.has(region.kind));
+      return pageOverlays().filter((region) => !state.hiddenKinds.has(categoryKey(region)));
     }
 
     function pageOverlays() {
@@ -824,7 +1440,10 @@
 
     function renderCategories() {
       const categories = new Map();
-      pageOverlays().forEach((region) => categories.set(region.kind, (categories.get(region.kind) || 0) + 1));
+      pageOverlays().forEach((region) => {
+        const category = categoryKey(region);
+        categories.set(category, (categories.get(category) || 0) + 1);
+      });
       const container = byId("region-categories");
       container.hidden = categories.size === 0;
       byId("category-list").replaceChildren(...Array.from(categories, ([kind, count]) => {
@@ -835,7 +1454,7 @@
         button.className = "category-button";
         button.setAttribute("aria-pressed", String(visible));
         button.setAttribute("aria-label", `${visible ? "Hide" : "Show"} ${label} overlays, ${count}`);
-        button.style.setProperty("--category-color", regionColor(kind));
+        button.style.setProperty("--category-color", regionColor());
         const swatch = document.createElement("span");
         swatch.className = "category-swatch";
         swatch.setAttribute("aria-hidden", "true");
@@ -853,6 +1472,33 @@
       renderCategories();
       renderRegionList(currentOverlays());
       drawPage();
+    }
+
+    function categoryKey(regionOrKind) {
+      const kind = typeof regionOrKind === "object" && regionOrKind !== null
+        ? regionOrKind.kind
+        : regionOrKind;
+      if (kind === "table_candidate") return kind;
+      return semanticKind(regionOrKind);
+    }
+
+    function semanticKind(regionOrKind) {
+      const region = typeof regionOrKind === "object" && regionOrKind !== null ? regionOrKind : null;
+      const kind = region ? region.kind : regionOrKind;
+      const role = region?.structure?.role || "";
+      const value = `${kind || "text"} ${role}`.toLowerCase();
+      if (value.includes("section") && value.includes("head")) return "heading";
+      if (value.includes("heading")) return "heading";
+      if (value.includes("footer")) return "footer";
+      if (value.includes("title")) return "title";
+      if (value.includes("header")) return "header";
+      if (value.includes("table")) return "table";
+      if (value.includes("list")) return "list";
+      if (value.includes("figure") || value.includes("image")) return "figure";
+      if (value.includes("form") || value.includes("field")) return "field";
+      if (value.includes("checkbox") || value.includes("radio") || value.includes("control")) return "control";
+      if (value.includes("handwrit")) return "handwriting";
+      return "text";
     }
 
     function normalizedBox(box) {
@@ -875,7 +1521,7 @@
       context.lineWidth = Math.max(2, canvas.width / 800);
       currentOverlays().forEach((region, index) => {
         const box = region.bounding_box;
-        const color = index === state.selectedOverlay ? "#ff7a3d" : regionColor(region.kind);
+        const color = index === state.selectedOverlay ? actionColor : regionColor();
         context.strokeStyle = color;
         context.fillStyle = `${color}1f`;
         context.fillRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
@@ -889,19 +1535,13 @@
         const labelTop = Math.max(0, box.top - fontSize - 6);
         context.fillStyle = color;
         context.fillRect(box.left, labelTop, labelWidth, fontSize + 6);
-        context.fillStyle = "#081016";
+        context.fillStyle = neutralColor;
         context.fillText(label, box.left + 5, labelTop + fontSize + 1);
       });
     }
 
-    function regionColor(kind) {
-      if (kind === "table_cell") return "#65d6a6";
-      if (kind.includes("table")) return "#ef6cab";
-      if (kind.includes("title") || kind.includes("header")) return "#ffb454";
-      if (kind.includes("formula")) return "#d9de61";
-      if (kind.includes("figure") || kind.includes("image")) return "#b394ff";
-      if (kind.includes("checkbox") || kind.includes("control")) return "#65d6a6";
-      return "#37c7ff";
+    function regionColor() {
+      return structureColor;
     }
 
     canvas.addEventListener("click", (event) => {
@@ -948,6 +1588,8 @@
     }
 
     function updateInspector(region) {
+      if (!state.rereadBusy) setRereadStatus("");
+      updateRereadAction(region);
       byId("region-kind").textContent = region?.kind || "None selected";
       byId("region-confidence").textContent = region?.confidence == null ? "-" : `${(region.confidence * 100).toFixed(1)}%`;
       byId("region-provider").textContent = region?.provider || "-";
@@ -961,12 +1603,30 @@
       byId("region-text").textContent = region?.text || "Click an overlay to inspect its evidence.";
     }
 
-    document.querySelectorAll(".tab").forEach((tab) => {
-      tab.addEventListener("click", () => {
-        document.querySelectorAll(".tab").forEach((item) => item.setAttribute("aria-selected", String(item === tab)));
-        document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.toggle("active", panel.id === tab.getAttribute("aria-controls")));
+    const tabs = Array.from(document.querySelectorAll(".tab"));
+    tabs.forEach((tab) => {
+      tab.addEventListener("click", () => activateTab(tab));
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+        event.preventDefault();
+        const offset = event.key === "ArrowRight" ? 1 : -1;
+        const next = tabs[(tabs.indexOf(tab) + offset + tabs.length) % tabs.length];
+        next.click();
+        next.focus();
       });
     });
+
+    function activateTab(tab) {
+      tabs.forEach((item) => {
+        item.setAttribute("aria-selected", String(item === tab));
+        item.tabIndex = item === tab ? 0 : -1;
+      });
+      document.querySelectorAll(".tab-panel").forEach((panel) => {
+        const active = panel.id === tab.getAttribute("aria-controls");
+        panel.classList.toggle("active", active);
+        panel.hidden = !active;
+      });
+    }
 
     function resetResult() {
       state.response = null;
@@ -993,9 +1653,19 @@
       byId("download-json").setAttribute("aria-disabled", "true");
       byId("download-markdown").setAttribute("aria-disabled", "true");
       byId("copy-json").disabled = true;
-      byId("panel-text").textContent = "No result yet.";
+      window.clearTimeout(state.copyResetId);
+      state.copyResetId = null;
+      byId("copy-json").dataset.copyState = "idle";
+      byId("copy-json").textContent = "Copy JSON";
+      byId("copy-status").textContent = "";
+      byId("copy-status").classList.remove("error");
+      byId("panel-rendered").textContent = "No result yet.";
+      byId("panel-layout").textContent = "No result yet.";
+      byId("panel-processed").textContent = "No result yet.";
+      byId("panel-raw").querySelector("pre").textContent = "[]";
       byId("panel-json").querySelector("pre").textContent = "{}";
       byId("panel-failures").textContent = "No result yet.";
+      activateTab(byId("tab-rendered"));
     }
   </script>
 </body>

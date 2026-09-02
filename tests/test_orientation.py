@@ -50,6 +50,11 @@ class AngleReader:
         ]
 
 
+class ReviewAngleReader(AngleReader):
+    def page_needs_review(self, page_number: int) -> bool:
+        return True
+
+
 class StructureStage:
     name = "structure"
 
@@ -202,6 +207,51 @@ def test_classifier_zero_skips_osd_and_uses_one_ocr_call(tmp_path: Path) -> None
     page = reader.coverage_assessment(1)["pages"][0]
     assert page["selector"] == "orientation_classifier"
     assert page["osd_status"] == "skipped_zero_prediction"
+
+
+def test_orientation_propagates_selected_reader_review(tmp_path: Path) -> None:
+    image_path = _image(tmp_path)
+    source = ReviewAngleReader()
+    reader = OrientationReader(
+        source,
+        orientation_detector=lambda _: {"angle": 0, "confidence": 0.98},
+    )
+
+    result = process_document(image_path, reader)
+
+    assert result.pages[0].route == "review"
+    page = reader.coverage_assessment(1)["pages"][0]
+    assert page["nested_reader_reviews"] == {"0": True}
+    assert result.pages[0].regions[0].text_provenance["orientation"][
+        "nested_reader_reviews"
+    ] == {"0": True}
+
+
+def test_uncertain_zero_prediction_recovers_sideways_text_coverage(
+    tmp_path: Path,
+) -> None:
+    image_path = _image(tmp_path)
+    source = AngleReader(
+        {0: 0.72, 90: 0.71, 180: 0.71, 270: 0.7},
+        words_by_angle={0: 10, 90: 100, 180: 120, 270: 10},
+    )
+    reader = OrientationReader(
+        source,
+        orientation_detector=lambda _: {"angle": 0, "confidence": 0.82},
+        osd_detector=lambda _: _osd(0, 20.0),
+    )
+
+    result = process_document(image_path, reader)
+
+    assert source.calls == [0, 90, 180, 270]
+    assert result.status == "success"
+    assert result.pages[0].route == "review"
+    assert len(result.pages[0].regions) == 120
+    assert result.pages[0].regions[0].bounding_box == BoundingBox(12, 3, 18, 7)
+    page = reader.coverage_assessment(1)["pages"][0]
+    assert page["angle"] == 180
+    assert page["selector"] == "orientation_evidence_fallback"
+    assert page["view_selection_reason"] == "coverage_recovery"
 
 
 def test_classifier_osd_disagreement_scores_only_two_views(tmp_path: Path) -> None:

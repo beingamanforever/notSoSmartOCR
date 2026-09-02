@@ -23,7 +23,7 @@ from ocr_pipeline import (
 from ocr_pipeline import cli as ocr_cli
 from ocr_pipeline import providers as ocr_providers
 from ocr_pipeline.contracts import BoundingBox, DocumentResult, EvidenceText, TextRegion
-from ocr_pipeline.pipeline import process_document
+from ocr_pipeline.pipeline import _prepare_pages, process_document
 
 
 def test_cli_preserves_page_order_evidence_and_failures(tmp_path: Path) -> None:
@@ -238,6 +238,38 @@ def test_image_ingestion_applies_exif_orientation_before_ocr(tmp_path: Path) -> 
     with Image.open(source) as original:
         assert original.size == (40, 20)
         assert original.getexif()[274] == 8
+
+
+def test_prepared_pages_match_direct_processing(tmp_path: Path) -> None:
+    source = tmp_path / "rotated.jpg"
+    image = Image.new("RGB", (40, 20), "white")
+    exif = Image.Exif()
+    exif[274] = 8
+    image.save(source, exif=exif)
+    prepared_dir = tmp_path / "prepared"
+    prepared_dir.mkdir()
+    prepared = _prepare_pages(source, "image", prepared_dir, 300, "pdftoppm")
+
+    direct = process_document(source, _RecordingReader())
+    reused = process_document(source, _RecordingReader(), prepared_pages=prepared)
+
+    assert reused.to_dict() == direct.to_dict()
+
+
+def test_prepared_pages_from_another_source_are_rejected(tmp_path: Path) -> None:
+    first = tmp_path / "first.png"
+    second = tmp_path / "second.png"
+    Image.new("RGB", (40, 20), "white").save(first)
+    Image.new("RGB", (80, 60), "white").save(second)
+    prepared_dir = tmp_path / "prepared"
+    prepared_dir.mkdir()
+    prepared = _prepare_pages(first, "image", prepared_dir, 300, "pdftoppm")
+
+    result = process_document(second, _RecordingReader(), prepared_pages=prepared)
+
+    assert result.status == "failed"
+    assert result.pages == []
+    assert [failure.code for failure in result.failures] == ["prepared_source_mismatch"]
 
 
 def test_cli_selects_model_readers_and_passes_reader_options(

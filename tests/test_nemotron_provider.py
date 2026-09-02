@@ -57,6 +57,7 @@ def test_nemotron_reader_preserves_regions_confidence_and_order(
     assert first.bounding_box.top == 20
     assert first.bounding_box.right == 96
     assert first.bounding_box.bottom == 40
+    assert first.text_provenance == {"merge_level": "paragraph"}
     assert second.reading_order == 2
 
 
@@ -269,6 +270,10 @@ def test_nemotron_reader_can_rerun_with_a_different_merge_level(
     final = reader.read_with_merge_level(image_path, 1, "paragraph")
 
     assert [region.text for region in selected + final] == ["word", "paragraph"]
+    assert [region.text_provenance for region in selected + final] == [
+        {"merge_level": "word"},
+        {"merge_level": "paragraph"},
+    ]
     assert pipeline.merge_levels == ["word", "paragraph"]
 
 

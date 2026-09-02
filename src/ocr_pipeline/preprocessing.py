@@ -9,6 +9,8 @@ import threading
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, replace
+from difflib import SequenceMatcher
+from math import ceil, floor
 from pathlib import Path
 
 from PIL import Image, ImageStat, UnidentifiedImageError
@@ -24,6 +26,9 @@ MATCH_OVERLAP = 0.5
 AGREEMENT_OVERLAP = 0.75
 AGREEMENT_CONFIDENCE = 0.85
 MIN_AREA_RATIO = 0.35
+WIDE_BAND_SCALE = 3
+CONFIRMATION_RECALL = 0.98
+CONFIRMATION_SIMILARITY = 0.98
 
 
 class RoutedTesseractReader:
@@ -218,8 +223,8 @@ class TiledReader:
         page_number: int,
     ) -> list[TextRegion]:
         overlap = round(height * self.overlap_fraction)
-        regions = []
         with tempfile.TemporaryDirectory(prefix="ocr-tiles-") as directory:
+            tiles: list[tuple[Path, int, int]] = []
             for tile_number in range(self.tile_count):
                 core_top = round(tile_number * height / self.tile_count)
                 core_bottom = round((tile_number + 1) * height / self.tile_count)
@@ -229,19 +234,360 @@ class TiledReader:
                 source.crop((0, crop_top, width, crop_bottom)).save(
                     tile_path, format="PNG"
                 )
-                tile_regions = self.reader.read(tile_path, page_number)
+                tiles.append((tile_path, crop_top, tile_number + 1))
+
+            read_batch = getattr(self.reader, "read_batch", None)
+            if callable(read_batch) and getattr(self.reader, "batch_size", 1) > 1:
+                results = read_batch(
+                    [path for path, _, _ in tiles],
+                    [page_number] * len(tiles),
+                )
+                if not isinstance(results, list) or len(results) != len(tiles):
+                    raise ReaderError(
+                        "invalid_batch_output",
+                        "Tile reader returned the wrong number of results",
+                    )
+            else:
+                results = [
+                    self.reader.read(tile_path, page_number)
+                    for tile_path, _, _ in tiles
+                ]
+
+            regions = []
+            for (tile_path, crop_top, tile_number), tile_regions in zip(
+                tiles,
+                results,
+                strict=True,
+            ):
+                if isinstance(tile_regions, ReaderError):
+                    raise tile_regions
+                if not isinstance(tile_regions, list) or not all(
+                    isinstance(region, TextRegion) for region in tile_regions
+                ):
+                    raise ReaderError(
+                        "invalid_batch_output",
+                        f"Tile reader returned an invalid result for {tile_path.name}",
+                    )
                 for region in tile_regions:
                     regions.append(
                         _translate_tile_region(
                             region,
                             crop_top,
-                            tile_number + 1,
+                            tile_number,
                             len(regions) + 1,
                             page_number,
                             self.name,
                         )
                     )
-        return regions
+            return regions
+
+    def _save_assessment(self, page_number: int, value: dict[str, object]) -> None:
+        with self._lock:
+            self._assessments[page_number] = value
+
+
+class WideBandFallbackReader:
+    """Reread only shallow, page-wide, low-confidence text bands."""
+
+    def __init__(
+        self,
+        reader: LocalReader,
+        fallback_reader: LocalReader,
+        *,
+        confirmation_reader: LocalReader | None = None,
+        low_confidence: float = 0.9,
+        minimum_fallback_confidence: float = 0.8,
+        minimum_width_fraction: float = 0.65,
+        maximum_height_fraction: float = 0.08,
+        crop_padding: int = 8,
+    ) -> None:
+        if not 0 <= low_confidence <= 1:
+            raise ValueError("low_confidence must be from 0 to 1")
+        if not 0 <= minimum_fallback_confidence <= 1:
+            raise ValueError("minimum_fallback_confidence must be from 0 to 1")
+        if not 0 < minimum_width_fraction <= 1:
+            raise ValueError("minimum_width_fraction must be from 0 to 1")
+        if not 0 < maximum_height_fraction < 1:
+            raise ValueError("maximum_height_fraction must be from 0 to 1")
+        if crop_padding < 0:
+            raise ValueError("crop_padding must not be negative")
+        self.reader = reader
+        self.fallback_reader = fallback_reader
+        self.confirmation_reader = confirmation_reader
+        self.name = f"{reader.name}-wide-band-fallback"
+        self.low_confidence = low_confidence
+        self.minimum_fallback_confidence = minimum_fallback_confidence
+        self.minimum_width_fraction = minimum_width_fraction
+        self.maximum_height_fraction = maximum_height_fraction
+        self.crop_padding = crop_padding
+        self._assessments: dict[int, dict[str, object]] = {}
+        self._lock = threading.Lock()
+
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        baseline = self.reader.read(image_path, page_number)
+        baseline_needs_review = _reader_needs_review(self.reader, page_number)
+        try:
+            with Image.open(image_path) as source:
+                width, height = source.size
+                groups = _wide_band_groups(
+                    baseline,
+                    width,
+                    height,
+                    low_confidence=self.low_confidence,
+                    minimum_width_fraction=self.minimum_width_fraction,
+                    maximum_height_fraction=self.maximum_height_fraction,
+                    minimum_gap=self.crop_padding,
+                )
+                qualifying_count = sum(len(group) for group in groups)
+                if not groups:
+                    self._save_assessment(
+                        page_number,
+                        {
+                            "page_number": page_number,
+                            "status": "not_routed",
+                            "selected_view": "baseline",
+                            "qualifying_regions": 0,
+                            "band_count": 0,
+                            "replaced_bands": 0,
+                            "nested_reader_review": baseline_needs_review,
+                            "bands": [],
+                        },
+                    )
+                    return baseline
+                selected_groups: dict[str, list[TextRegion]] = {}
+                alternative_regions: dict[str, TextRegion] = {}
+                band_assessments = []
+                with tempfile.TemporaryDirectory(prefix="ocr-wide-bands-") as directory:
+                    for band_number, group in enumerate(groups, start=1):
+                        crop = _padded_box(
+                            [region.bounding_box for region in group],
+                            width,
+                            height,
+                            self.crop_padding,
+                        )
+                        crop_path = Path(directory) / f"band-{band_number}.png"
+                        cropped = source.crop(
+                            (crop.left, crop.top, crop.right, crop.bottom)
+                        )
+                        cropped.resize(
+                            (
+                                (crop.right - crop.left) * WIDE_BAND_SCALE,
+                                (crop.bottom - crop.top) * WIDE_BAND_SCALE,
+                            ),
+                            Image.Resampling.LANCZOS,
+                        ).save(crop_path, format="PNG")
+                        try:
+                            fallback = self.fallback_reader.read(crop_path, page_number)
+                        except ReaderError as error:
+                            band_assessments.append(
+                                {
+                                    "band_number": band_number,
+                                    "source_region_ids": [
+                                        region.id for region in group
+                                    ],
+                                    "crop": asdict(crop),
+                                    "selected_view": "baseline",
+                                    "reason": "fallback_failed",
+                                    "failure_code": error.code,
+                                }
+                            )
+                            continue
+
+                        fallback_needs_review = _reader_needs_review(
+                            self.fallback_reader,
+                            page_number,
+                        )
+
+                        usable_fallback = [
+                            region for region in fallback if _band_tokens(region.text)
+                        ]
+                        translated = _translate_fallback_regions(
+                            usable_fallback,
+                            crop,
+                            page_number,
+                            band_number,
+                            self.name,
+                        )
+                        selected, assessment = _assess_band_replacement(
+                            group,
+                            translated,
+                            self.minimum_fallback_confidence,
+                        )
+                        if fallback_needs_review:
+                            selected = False
+                            assessment["selected_view"] = "baseline"
+                            assessment["reason"] = "fallback_requires_review"
+                            assessment["selection_reason"] = None
+                        confirmation_regions: list[TextRegion] = []
+                        if (
+                            not selected
+                            and not fallback_needs_review
+                            and self.confirmation_reader is not None
+                            and assessment["confirmation_candidate"]
+                        ):
+                            try:
+                                confirmation = self.confirmation_reader.read(
+                                    crop_path,
+                                    page_number,
+                                )
+                            except ReaderError as error:
+                                assessment.update(
+                                    {
+                                        "confirmation_status": "failed",
+                                        "confirmation_failure_code": error.code,
+                                    }
+                                )
+                            else:
+                                usable_confirmation = [
+                                    region
+                                    for region in confirmation
+                                    if _band_tokens(region.text)
+                                ]
+                                confirmation_regions = _translate_fallback_regions(
+                                    usable_confirmation,
+                                    crop,
+                                    page_number,
+                                    band_number,
+                                    self.name,
+                                    selected_view="confirmation",
+                                )
+                                confirmed, confirmation_assessment = (
+                                    _assess_band_confirmation(
+                                        translated,
+                                        confirmation_regions,
+                                        self.minimum_fallback_confidence,
+                                    )
+                                )
+                                confirmation_review = _reader_needs_review(
+                                    self.confirmation_reader,
+                                    page_number,
+                                )
+                                if confirmation_review:
+                                    confirmed = False
+                                    confirmation_assessment["confirmation_status"] = (
+                                        "requires_review"
+                                    )
+                                assessment.update(confirmation_assessment)
+                                assessment["confirmation_review"] = confirmation_review
+                                if confirmed:
+                                    selected = True
+                                    assessment.update(
+                                        {
+                                            "selected_view": "fallback",
+                                            "reason": "evidence_confirmed",
+                                            "selection_reason": (
+                                                "independent_view_confirmation"
+                                            ),
+                                        }
+                                    )
+                        assessment.update(
+                            {
+                                "band_number": band_number,
+                                "source_region_ids": [region.id for region in group],
+                                "crop": asdict(crop),
+                                "ignored_fallback_regions": len(fallback)
+                                - len(usable_fallback),
+                                "fallback_review": fallback_needs_review,
+                            }
+                        )
+                        band_assessments.append(assessment)
+                        if selected:
+                            selected_regions = _attach_originals(
+                                translated,
+                                group,
+                            )
+                            if confirmation_regions:
+                                selected_regions = _attach_fallbacks(
+                                    selected_regions,
+                                    confirmation_regions,
+                                    source="confirmation",
+                                )
+                            selected_groups[group[0].id] = selected_regions
+                        elif translated:
+                            evidence_regions = _attach_fallbacks(group, translated)
+                            if confirmation_regions:
+                                evidence_regions = _attach_fallbacks(
+                                    evidence_regions,
+                                    confirmation_regions,
+                                    source="confirmation",
+                                )
+                            alternative_regions.update(
+                                {region.id: region for region in evidence_regions}
+                            )
+        except (OSError, UnidentifiedImageError, ValueError) as error:
+            raise ReaderError("preprocess_failed", str(error)) from error
+
+        replaced_ids = {
+            region.id
+            for group in groups
+            if group[0].id in selected_groups
+            for region in group
+        }
+        replaced_bands = len(selected_groups)
+        assessment = {
+            "page_number": page_number,
+            "status": "recovered" if replaced_bands else "uncertain",
+            "selected_view": "fused" if replaced_bands else "baseline",
+            "qualifying_regions": qualifying_count,
+            "band_count": len(groups),
+            "replaced_bands": replaced_bands,
+            "nested_reader_review": baseline_needs_review
+            or any(
+                bool(band.get("fallback_review"))
+                or bool(band.get("confirmation_review"))
+                for band in band_assessments
+            ),
+            "bands": band_assessments,
+        }
+        self._save_assessment(page_number, assessment)
+        if not replaced_bands and not alternative_regions:
+            return baseline
+
+        output = []
+        for region in baseline:
+            if region.id in selected_groups:
+                output.extend(selected_groups[region.id])
+            elif region.id in alternative_regions:
+                output.append(alternative_regions[region.id])
+            elif region.id not in replaced_ids:
+                output.append(region)
+        output = [
+            replace(region, reading_order=order)
+            for order, region in enumerate(output, 1)
+        ]
+        return output
+
+    def page_needs_review(self, page_number: int) -> bool:
+        with self._lock:
+            assessment = dict(self._assessments.get(page_number, {}))
+        return (
+            bool(assessment.get("nested_reader_review"))
+            or assessment.get("status") == "uncertain"
+        )
+
+    def coverage_assessment(self, page_count: int) -> dict[str, object]:
+        with self._lock:
+            pages = [
+                dict(self._assessments.get(number, {}))
+                for number in range(1, page_count + 1)
+            ]
+        routed = [page for page in pages if page.get("status") != "not_routed"]
+        if not routed:
+            return {
+                "status": "not_assessed",
+                "message": "No low-confidence wide text band was routed.",
+                "pages": pages,
+            }
+        replaced = sum(int(page.get("replaced_bands", 0)) for page in routed)
+        bands = sum(int(page.get("band_count", 0)) for page in routed)
+        return {
+            "status": "review_recommended",
+            "message": (
+                f"Wide-band fallback assessed {bands} band(s) on {len(routed)} "
+                f"page(s) and accepted {replaced} evidence-backed replacement(s)."
+            ),
+            "pages": pages,
+        }
 
     def _save_assessment(self, page_number: int, value: dict[str, object]) -> None:
         with self._lock:
@@ -620,6 +966,488 @@ def _translate_regions(
             )
         )
     return translated
+
+
+def _wide_band_groups(
+    regions: list[TextRegion],
+    width: int,
+    height: int,
+    *,
+    low_confidence: float,
+    minimum_width_fraction: float,
+    maximum_height_fraction: float,
+    minimum_gap: int,
+) -> list[list[TextRegion]]:
+    lines: list[list[TextRegion]] = []
+    candidates = [
+        region
+        for region in regions
+        if _is_band_candidate(region, height, maximum_height_fraction)
+    ]
+    for region in sorted(
+        candidates,
+        key=lambda item: (
+            item.bounding_box.top,
+            item.bounding_box.left,
+            item.reading_order,
+        ),
+    ):
+        line = next(
+            (
+                current
+                for current in reversed(lines)
+                if _same_text_line(current, region)
+            ),
+            None,
+        )
+        if line is None:
+            lines.append([region])
+        else:
+            line.append(region)
+
+    selected = [
+        line
+        for line in lines
+        if (
+            _box_union([region.bounding_box for region in line]).right
+            - _box_union([region.bounding_box for region in line]).left
+        )
+        / width
+        >= minimum_width_fraction
+        and _mean_confidence(line) < low_confidence
+    ]
+    selected_ids = {region.id for line in selected for region in line}
+    groups: list[list[TextRegion]] = []
+    current: list[TextRegion] = []
+    for line in lines:
+        if not any(region.id in selected_ids for region in line):
+            current = []
+            continue
+        line = sorted(line, key=lambda region: (region.bounding_box.left, region.id))
+        if not current or not _adjacent_text_lines(current, line, minimum_gap):
+            groups.append(line)
+            current = groups[-1]
+        else:
+            current.extend(line)
+    return [
+        sorted(group, key=lambda region: (region.reading_order, region.id))
+        for group in groups
+    ]
+
+
+def _is_band_candidate(
+    region: TextRegion,
+    height: int,
+    maximum_height_fraction: float,
+) -> bool:
+    box = region.bounding_box
+    return (
+        bool(_band_tokens(region.text))
+        and region.resolution in {"resolved", "conflicting"}
+        and region.confidence is not None
+        and box.right > box.left
+        and box.bottom > box.top
+        and (box.bottom - box.top) / height <= maximum_height_fraction
+    )
+
+
+def _same_text_line(line: list[TextRegion], region: TextRegion) -> bool:
+    box = _box_union([item.bounding_box for item in line])
+    other = region.bounding_box
+    overlap = max(0, min(box.bottom, other.bottom) - max(box.top, other.top))
+    shorter = min(box.bottom - box.top, other.bottom - other.top)
+    center_gap = abs((box.top + box.bottom) - (other.top + other.bottom)) / 2
+    return overlap >= shorter * 0.5 or center_gap <= max(2, shorter * 0.35)
+
+
+def _adjacent_text_lines(
+    current: list[TextRegion],
+    following: list[TextRegion],
+    minimum_gap: int,
+) -> bool:
+    current_box = _box_union([region.bounding_box for region in current])
+    following_box = _box_union([region.bounding_box for region in following])
+    vertical_gap = max(0, following_box.top - current_box.bottom)
+    maximum_gap = max(
+        minimum_gap,
+        current_box.bottom - current_box.top,
+        following_box.bottom - following_box.top,
+    )
+    overlap = max(
+        0,
+        min(current_box.right, following_box.right)
+        - max(current_box.left, following_box.left),
+    )
+    narrower = min(
+        current_box.right - current_box.left,
+        following_box.right - following_box.left,
+    )
+    return vertical_gap <= maximum_gap and overlap >= narrower * 0.5
+
+
+def _padded_box(
+    boxes: list[BoundingBox],
+    width: int,
+    height: int,
+    padding: int,
+) -> BoundingBox:
+    box = _box_union(boxes)
+    return BoundingBox(
+        left=max(0, box.left - padding),
+        top=max(0, box.top - padding),
+        right=min(width, box.right + padding),
+        bottom=min(height, box.bottom + padding),
+    )
+
+
+def _box_union(boxes: list[BoundingBox]) -> BoundingBox:
+    return BoundingBox(
+        left=min(box.left for box in boxes),
+        top=min(box.top for box in boxes),
+        right=max(box.right for box in boxes),
+        bottom=max(box.bottom for box in boxes),
+    )
+
+
+def _translate_fallback_regions(
+    regions: list[TextRegion],
+    crop: BoundingBox,
+    page_number: int,
+    band_number: int,
+    stage_name: str,
+    *,
+    selected_view: str = "fallback",
+) -> list[TextRegion]:
+    translated = []
+    for index, region in enumerate(regions, start=1):
+        box = region.bounding_box
+        provenance = dict(region.text_provenance or {})
+        provenance.update(
+            {
+                "stage": stage_name,
+                "source_crop": asdict(crop),
+                "upscale_factor": WIDE_BAND_SCALE,
+                "selected_view": selected_view,
+            }
+        )
+        translated.append(
+            replace(
+                region,
+                id=(f"p{page_number}-wide-band-{band_number}-{selected_view}-{index}"),
+                bounding_box=BoundingBox(
+                    left=crop.left + floor(box.left / WIDE_BAND_SCALE),
+                    top=crop.top + floor(box.top / WIDE_BAND_SCALE),
+                    right=crop.left + ceil(box.right / WIDE_BAND_SCALE),
+                    bottom=crop.top + ceil(box.bottom / WIDE_BAND_SCALE),
+                ),
+                text_provenance=provenance,
+                alternatives=list(region.alternatives),
+            )
+        )
+    return translated
+
+
+def _assess_band_replacement(
+    baseline: list[TextRegion],
+    fallback: list[TextRegion],
+    minimum_fallback_confidence: float,
+) -> tuple[bool, dict[str, object]]:
+    baseline_tokens = _band_token_counts(baseline)
+    fallback_tokens = _band_token_counts(fallback)
+    baseline_count = sum(baseline_tokens.values())
+    fallback_count = sum(fallback_tokens.values())
+    added = sum((fallback_tokens - baseline_tokens).values())
+    removed = sum((baseline_tokens - fallback_tokens).values())
+    retained = sum((fallback_tokens & baseline_tokens).values())
+    baseline_token_recall = retained / baseline_count if baseline_count else 0.0
+    baseline_characters = sum(
+        len("".join(_band_tokens(region.text))) for region in baseline
+    )
+    fallback_characters = sum(
+        len("".join(_band_tokens(region.text))) for region in fallback
+    )
+    coverage_ratio = (
+        fallback_characters / baseline_characters if baseline_characters else 0.0
+    )
+    baseline_confidence = _mean_confidence(baseline)
+    fallback_confidence = _mean_confidence(fallback)
+    baseline_text = " ".join(_band_tokens(" ".join(region.text for region in baseline)))
+    fallback_text = " ".join(_band_tokens(" ".join(region.text for region in fallback)))
+    text_similarity = SequenceMatcher(None, baseline_text, fallback_text).ratio()
+    valid_text = bool(fallback) and all(
+        _valid_fallback_region(region) for region in fallback
+    )
+    repeated_text_risk = _has_repeated_text_risk(fallback)
+    plausible_density = _has_plausible_text_density(fallback)
+    correction_token_count = fallback_count >= baseline_count and fallback_count <= max(
+        baseline_count + 2, ceil(baseline_count * 1.25)
+    )
+    correction_coverage = 0.9 <= coverage_ratio <= 1.35
+    better_confidence = (
+        fallback_confidence >= minimum_fallback_confidence
+        and fallback_confidence >= baseline_confidence + 0.05
+    )
+    correction = (
+        correction_token_count
+        and correction_coverage
+        and text_similarity >= 0.6
+        and better_confidence
+    )
+    missing_text_candidate = (
+        baseline_confidence <= 0.55
+        and fallback_confidence >= minimum_fallback_confidence
+        and fallback_confidence >= baseline_confidence + 0.15
+        and fallback_count >= ceil(baseline_count * 1.25)
+        and fallback_count <= baseline_count * 3
+        and 1.1 <= coverage_ratio <= 3.0
+    )
+    missing_text_recovery = (
+        missing_text_candidate and baseline_token_recall >= MATCH_OVERLAP
+    )
+    confirmation_candidate = (
+        missing_text_candidate
+        and baseline_token_recall < MATCH_OVERLAP
+        and valid_text
+        and plausible_density
+        and not repeated_text_risk
+    )
+    selected = (
+        valid_text
+        and plausible_density
+        and (correction or missing_text_recovery)
+        and not repeated_text_risk
+    )
+    selection_reason = (
+        "missing_text_recovery" if missing_text_recovery else "correction"
+    )
+    return selected, {
+        "selected_view": "fallback" if selected else "baseline",
+        "reason": "evidence_improved" if selected else "fallback_not_better",
+        "selection_reason": selection_reason if selected else None,
+        "valid_text": valid_text,
+        "plausible_density": plausible_density,
+        "baseline_tokens": baseline_count,
+        "fallback_tokens": fallback_count,
+        "added_tokens": added,
+        "removed_tokens": removed,
+        "baseline_token_recall": round(baseline_token_recall, 6),
+        "coverage_ratio": round(coverage_ratio, 6),
+        "text_similarity": round(text_similarity, 6),
+        "baseline_mean_confidence": round(baseline_confidence, 6),
+        "fallback_mean_confidence": round(fallback_confidence, 6),
+        "repeated_text_risk": repeated_text_risk,
+        "confirmation_candidate": confirmation_candidate,
+    }
+
+
+def _assess_band_confirmation(
+    fallback: list[TextRegion],
+    confirmation: list[TextRegion],
+    minimum_confidence: float,
+) -> tuple[bool, dict[str, object]]:
+    fallback_tokens = _band_token_counts(fallback)
+    confirmation_tokens = _band_token_counts(confirmation)
+    shared = sum((fallback_tokens & confirmation_tokens).values())
+    fallback_count = sum(fallback_tokens.values())
+    confirmation_count = sum(confirmation_tokens.values())
+    fallback_recall = shared / fallback_count if fallback_count else 0.0
+    confirmation_recall = shared / confirmation_count if confirmation_count else 0.0
+    fallback_text = " ".join(_band_tokens(" ".join(r.text for r in fallback)))
+    confirmation_text = " ".join(_band_tokens(" ".join(r.text for r in confirmation)))
+    similarity = SequenceMatcher(None, fallback_text, confirmation_text).ratio()
+    valid_text = bool(confirmation) and all(
+        _valid_fallback_region(region) for region in confirmation
+    )
+    plausible_density = _has_plausible_text_density(confirmation)
+    repeated_text_risk = _has_repeated_text_risk(confirmation)
+    literal_agreement = _literal_tokens(fallback) == _literal_tokens(confirmation)
+    confirmed = (
+        valid_text
+        and plausible_density
+        and not repeated_text_risk
+        and _mean_confidence(confirmation) >= minimum_confidence
+        and fallback_recall >= CONFIRMATION_RECALL
+        and confirmation_recall >= CONFIRMATION_RECALL
+        and similarity >= CONFIRMATION_SIMILARITY
+        and literal_agreement
+    )
+    return confirmed, {
+        "confirmation_status": "agreed" if confirmed else "disagreed",
+        "confirmation_regions": len(confirmation),
+        "confirmation_mean_confidence": round(_mean_confidence(confirmation), 6),
+        "confirmation_fallback_recall": round(fallback_recall, 6),
+        "confirmation_token_recall": round(confirmation_recall, 6),
+        "confirmation_text_similarity": round(similarity, 6),
+        "confirmation_valid_text": valid_text,
+        "confirmation_plausible_density": plausible_density,
+        "confirmation_repeated_text_risk": repeated_text_risk,
+        "confirmation_literal_agreement": literal_agreement,
+    }
+
+
+def _has_repeated_text_risk(regions: list[TextRegion]) -> bool:
+    normalized_regions = [
+        " ".join(_band_tokens(region.text)) for region in regions if region.text.strip()
+    ]
+    if any(
+        current == previous and len(current.split()) >= 2
+        for previous, current in zip(
+            normalized_regions,
+            normalized_regions[1:],
+            strict=False,
+        )
+    ):
+        return True
+    tokens = " ".join(normalized_regions).split()
+    for size in range(2, min(8, len(tokens) // 2) + 1):
+        for start in range(len(tokens) - (size * 2) + 1):
+            if (
+                tokens[start : start + size]
+                == tokens[start + size : start + (size * 2)]
+            ):
+                return True
+    return False
+
+
+def _valid_fallback_region(region: TextRegion) -> bool:
+    provenance = region.text_provenance or {}
+    crop = provenance.get("source_crop")
+    box = region.bounding_box
+    return (
+        bool(_band_tokens(region.text))
+        and region.confidence is not None
+        and 0 <= region.confidence <= 1
+        and isinstance(crop, dict)
+        and box.left >= crop.get("left", 0)
+        and box.top >= crop.get("top", 0)
+        and box.right <= crop.get("right", -1)
+        and box.bottom <= crop.get("bottom", -1)
+        and _box_area(box) > 0
+    )
+
+
+def _has_plausible_text_density(regions: list[TextRegion]) -> bool:
+    for region in regions:
+        box = region.bounding_box
+        height = box.bottom - box.top
+        if height <= 0:
+            return False
+        characters = len("".join(_band_tokens(region.text)))
+        width_in_text_heights = (box.right - box.left) / height
+        if characters > max(4, ceil(width_in_text_heights * 4)):
+            return False
+    return True
+
+
+def _attach_originals(
+    fallback: list[TextRegion], baseline: list[TextRegion]
+) -> list[TextRegion]:
+    alternatives: list[list[TextAlternative]] = [
+        list(region.alternatives) for region in fallback
+    ]
+    conflicts = [region.resolution == "conflicting" for region in fallback]
+    for original in baseline:
+        target = max(
+            range(len(fallback)),
+            key=lambda index: _overlap_ratio(
+                fallback[index].bounding_box,
+                original.bounding_box,
+            ),
+        )
+        provenance = dict(original.text_provenance or {})
+        provenance.update(
+            {
+                "original_region_id": original.id,
+                "original_bounding_box": asdict(original.bounding_box),
+            }
+        )
+        alternatives[target].append(
+            TextAlternative(
+                text=original.text,
+                confidence=original.confidence,
+                provider=original.provider,
+                text_provenance=provenance,
+            )
+        )
+        alternatives[target].extend(original.alternatives)
+        conflicts[target] = (
+            conflicts[target]
+            or original.resolution == "conflicting"
+            or any(
+                _normalized_text(alternative.text) != _normalized_text(original.text)
+                for alternative in original.alternatives
+            )
+        )
+    return [
+        replace(
+            region,
+            resolution="conflicting" if conflicts[index] else region.resolution,
+            alternatives=alternatives[index],
+        )
+        for index, region in enumerate(fallback)
+    ]
+
+
+def _attach_fallbacks(
+    baseline: list[TextRegion],
+    fallback: list[TextRegion],
+    *,
+    source: str = "fallback",
+) -> list[TextRegion]:
+    alternatives = [list(region.alternatives) for region in baseline]
+    for candidate in fallback:
+        target = max(
+            range(len(baseline)),
+            key=lambda index: _overlap_ratio(
+                baseline[index].bounding_box,
+                candidate.bounding_box,
+            ),
+        )
+        provenance = dict(candidate.text_provenance or {})
+        provenance.update(
+            {
+                f"{source}_region_id": candidate.id,
+                f"{source}_bounding_box": asdict(candidate.bounding_box),
+            }
+        )
+        alternatives[target].append(
+            TextAlternative(
+                text=candidate.text,
+                confidence=candidate.confidence,
+                provider=candidate.provider,
+                text_provenance=provenance,
+            )
+        )
+    return [
+        replace(
+            region,
+            resolution=region.resolution,
+            alternatives=alternatives[index],
+        )
+        for index, region in enumerate(baseline)
+    ]
+
+
+def _reader_needs_review(reader: LocalReader, page_number: int) -> bool:
+    check = getattr(reader, "page_needs_review", None)
+    return bool(callable(check) and check(page_number))
+
+
+def _band_token_counts(regions: list[TextRegion]) -> Counter[str]:
+    return Counter(token for region in regions for token in _band_tokens(region.text))
+
+
+def _literal_tokens(regions: list[TextRegion]) -> list[str]:
+    return [
+        token
+        for region in regions
+        for token in _band_tokens(region.text)
+        if token in {"%", "$"} or any(character.isdigit() for character in token)
+    ]
+
+
+def _band_tokens(text: str) -> list[str]:
+    return re.findall(r"[^\W_]+|[%$]", text.casefold())
 
 
 def _token_counts(regions: list[TextRegion]) -> Counter[str]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from itertools import product
+from random import Random
 
 import pytest
 
@@ -56,9 +57,27 @@ def test_edit_counts_matches_reference_exhaustively() -> None:
 
     for prediction in sequences:
         for reference in sequences:
-            assert edit_counts(prediction, reference) == _reference_edit_counts(
-                prediction, reference
-            )
+            counts = edit_counts(prediction, reference)
+            expected = _reference_edit_counts(prediction, reference)
+
+            assert counts == expected
+
+
+def test_edit_counts_matches_reference_for_random_sequences() -> None:
+    random = Random(7)
+
+    for _ in range(500):
+        prediction = tuple(random.choices("abcd", k=random.randrange(12)))
+        reference = tuple(random.choices("abcd", k=random.randrange(12)))
+        counts = edit_counts(prediction, reference)
+        expected = _reference_edit_counts(prediction, reference)
+
+        assert counts == expected
+
+
+def test_edit_counts_uses_canonical_alignment_for_ties() -> None:
+    assert edit_counts(("a", "b"), ("b", "a")) == EditCounts(0, 0, 2)
+    assert edit_counts([{"token": "a"}], [{"token": "b"}]) == EditCounts(0, 0, 1)
 
 
 def test_bit_parallel_distance_matches_alignment_exhaustively() -> None:

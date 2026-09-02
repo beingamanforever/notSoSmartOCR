@@ -95,7 +95,11 @@ def consensus_scores(texts: Sequence[str]) -> tuple[float, ...]:
 def edit_counts(
     prediction: Sequence[object], reference: Sequence[object]
 ) -> EditCounts:
-    """Align a prediction to a reference and count edit operation types."""
+    """Count edits in a deterministic minimum alignment.
+
+    Extra prediction items are insertions and missing prediction items are
+    deletions. Ties prefer substitutions, then deletions, then insertions.
+    """
     start = 0
     prediction_end = len(prediction)
     reference_end = len(reference)

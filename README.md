@@ -1,85 +1,210 @@
-# notSoSmartOCR
+# Not So Smart OCR
 
-An evidence-preserving OCR research pipeline for clinical and structured documents. It keeps literal text, pixel geometry, reading order, alternatives, provider provenance, and explicit failures in one swappable schema instead of flattening a page into an untraceable text blob.
+**Evidence-linked OCR for clinical and structured documents.**
 
-![Pipeline architecture](artifacts/ocr-pipeline-architecture.svg)
+[Architecture](#architecture) · [Results](#results-at-a-glance) ·
+[Quick start](#local-quick-start) · [Research report](artifacts/ocr-evidence-report.md)
 
-## What is implemented
+Not So Smart OCR is a modular research pipeline that keeps text tied to source pixels.
+It preserves geometry, reading order, provider provenance, alternatives, structure,
+and explicit failures in one JSON schema so a specialist can challenge a reading
+without silently erasing the original evidence.
 
-- Ordered PDF, TIFF, and image ingestion with EXIF normalization.
-- Swappable local readers for Tesseract, NVIDIA Nemotron OCR v2, and IBM Granite Docling.
-- Mindee docTR orientation proposals with OSD disagreement and two-view coverage recovery.
-- Ordered region stages with schema v2 alternatives and `resolved`, `conflicting`, or `unreadable` outcomes.
-- Microsoft Table Transformer detection and structure geometry with local OCR challengers.
-- Review-only geometric control extraction and deterministic evidence-risk signals.
-- Evidence-safe tiny-text and crop repair: new text is retained as an alternative unless independent evidence supports promotion.
-- A local workbench with linked overlays, dynamic category filters, copyable
-  structured JSON, stage timing, inspectable rejected structure proposals, and
-  evidence-risk diagnostics that are explicitly not a calibrated probability.
-- Failure-inclusive public evaluators for transcription, layout, tables, forms, controls, reading order, and multi-page structure.
+> Research status: the current system is not production-ready and has not
+> demonstrated superiority over a frozen frontier baseline. The report keeps
+> measured gains, negative results, and remaining gaps in the same denominator.
 
-Chinese-origin models and backbones are excluded from the deployable path. Paddle, GLM, Qwen, and DeepSeek remain explicit public-data comparators only.
+![Evidence-linked OCR pipeline](artifacts/research/figures/pipeline_architecture.svg)
 
-## Run it
+## Architecture
 
-The lean path needs Python, Pillow, Tesseract, and Poppler `pdftoppm`.
+```text
+PDF, TIFF, or image
+  -> ordered page preparation
+  -> swappable literal reader
+  -> ordered region stages
+  -> schema v2 document result
+  -> local inspection and review routing
+```
+
+The core boundary is deliberately small:
+
+| Layer | Contract | Current examples |
+| --- | --- | --- |
+| Reader | Produces literal, positioned `TextRegion` evidence | Tesseract, NVIDIA Nemotron OCR v2, IBM Granite Docling |
+| Region stage | Receives regions and returns enriched regions | tables, controls, handwriting alternatives, evidence-risk review |
+| Result | Keeps pages, regions, alternatives, provenance, failures, and route | JSON-serializable `DocumentResult`, schema version 2 |
+| Workbench | Inspects the result without changing the model route | page overlays, evidence details, stage timing, JSON and Markdown export |
+
+Readers implement `LocalReader`; enrichment components implement `RegionStage`.
+`process_document(..., reader, stages=(...))` composes them in order. A failed
+stage is recorded instead of being hidden, and unresolved or conflicting evidence
+is routed to review.
+
+The eligible path excludes Chinese-origin models and backbones. Such models may
+appear only as research comparators on public data. Model origin, license, and
+dataset notes are tracked in [data/README.md](data/README.md).
+
+## Local quick start
+
+The lean demo uses Python, Pillow, Tesseract, and Poppler. The repository does
+not currently provide a package manifest. GPU specialists run in separate
+model-specific environments.
+
+Install system tools on macOS:
+
+```bash
+brew install tesseract poppler
+```
+
+On Debian or Ubuntu:
+
+```bash
+sudo apt-get install tesseract-ocr poppler-utils
+```
+
+Create the lean Python environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install Pillow fastapi uvicorn python-multipart
+```
+
+Extract evidence-linked JSON from an image or PDF:
 
 ```bash
 PYTHONPATH=src python -m ocr_pipeline.cli page.png \
   --reader tesseract --output result.json
-
-PYTHONPATH=src python -m ocr_pipeline.cli page.png \
-  --reader nemotron-ocr-v2 --nemotron-language multi \
-  --nemotron-merge-level paragraph --output result.json
-
-PYTHONPATH=src uvicorn 'ocr_pipeline.demo:create_app' --factory \
-  --host 127.0.0.1 --port 8080
 ```
 
-Nemotron and table specialists use their official isolated GPU runtimes. The
-default demo factory uses the local routed Tesseract reader. The verified GPU
-workbench is assembled by `experiments/serve_gpu_demo.py` with Nemotron OCR v2,
-tiny-text evidence reruns, docTR orientation, Table Transformer, controls, and
-evidence-risk routing. The UI exposes that configured stack as read-only
-metadata instead of offering a model picker that can silently change results.
+Start the local review workbench, then open `http://127.0.0.1:8000`:
 
-## Measured evidence
+```bash
+PYTHONPATH=src python -m ocr_pipeline.demo
+```
 
-All benchmark failures remain in the denominator. Component rows are single fixed-panel runs unless an interval is stated.
+The default workbench uses the local routed Tesseract reader. Optional GPU
+readers and stages are assembled by
+[`experiments/serve_gpu_demo.py`](experiments/serve_gpu_demo.py); run it with
+`--help` to see the required local model paths. Those environments are not part
+of the lean install above.
 
-| Capability | Fixed panel | Result |
+Keep the optional Phi-4 adapter warm in its compatible environment, then point
+the GPU demo at the loopback service:
+
+```bash
+PYTHONPATH=src /path/to/phi4/python \
+  experiments/serve_phi4_handwriting.py \
+  --adapter /private/path/vision_decoder_lora-runtime.pt \
+  --torch-site /path/to/torch/site-packages --warmup
+
+PYTHONPATH=src python experiments/serve_gpu_demo.py \
+  <required local model arguments> \
+  --phi4-handwriting-url http://127.0.0.1:8083
+```
+
+Both processes bind to loopback. Crop bytes remain in memory and the Phi-4
+service is contacted only when a user selects a region and requests a
+handwriting reread. The browser is a private review surface; the configured
+backend may run on the same machine or on an authorized GPU reached through a
+private tunnel.
+
+## Swappable stages and safety boundary
+
+The verified GPU composition can add orientation selection, tiny-text tiling,
+wide-band recovery, Table Transformer geometry, control extraction, and
+deterministic evidence-risk routing. Each component keeps its own provenance.
+
+The Phi-4 handwriting adapter is an optional, on-demand research stage. A user
+must select an existing bounded region before it runs. The adapter can add a
+candidate or corroborate an existing reading, but disagreement is retained as
+alternative evidence. The rejected automatic classifier is available only for
+offline experiments and is not enabled in the demo. Adapter weights stay on the
+authorized private GPU host and outside Git.
+
+## Results at a glance
+
+The strongest public result is selective Nemotron versus the Tesseract floor on
+all 328 ClinOCR evaluation pages. Failures remain in the denominator.
+
+| Reader | Coverage | CER | WER | Page latency |
+| --- | ---: | ---: | ---: | ---: |
+| Tesseract | 299/328 | 0.488293 | 0.611352 | p50 1.844 s, p95 5.990 s |
+| Selective Nemotron | 282/328 | **0.331423** | **0.417869** | p50 1.862 s, p95 2.355 s |
+
+The paired CER change is -0.156870 with a cluster 95% interval of
+[-0.185387, -0.113176]. This establishes improvement over the local floor,
+not a frontier-model win.
+
+![Public OCR comparison](artifacts/research/figures/public_ocr_comparison.svg)
+
+The five-page hard panel is a development snapshot. Its redacted per-page
+artifact was not retained in the tracked evidence tree, so it is not the
+primary reproducibility result.
+
+| Five-page configuration | CER | WER | Hallucination rate | Missed-character rate | Completion | Warm latency |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Frozen old baseline | 0.559161 | 0.766033 | 0.28249 | 0.146711 | Not reported here | Not reported here |
+| Final safe wide-band v5 | **0.550873** | **0.760095** | **0.281256** | 0.154117 | 5/5 success | p50 2.786 s, p95 6.523 s |
+
+The final route slightly improves CER, WER, and hallucination rate while
+increasing missed-character rate. Operational success means the pipeline
+returned a valid result, not that the page was transcribed correctly.
+
+| Component check | Fixed evidence | Decision |
 | --- | --- | --- |
-| Transcription floor | ClinOCR eval, 328 pages | Tesseract: 91.2% coverage, 0.488293 CER, 0.611352 WER |
-| Eligible local candidate | Same 328 pages | Nemotron selective: 86.0% coverage, 0.331423 CER, 0.417869 WER |
-| Guarded orientation | ClinOCR rotated eval, 56 pages | 56/56 covered and minimum-CER view selected; case-mean CER 0.100211, WER 0.121439 |
-| Table detection | PubTables-1M test, 60 tables | TATR: 1.000000 recall and 0.991736 F1 at IoU 0.50 and 0.75 |
-| Table structure | PubTables-1M test, 60 tables | TATR: 0.990225 GriTS Top, 0.991262 Con, 0.984719 Loc, 0.977380 cell exact |
-| Targeted table fusion | 2 reviewed financial tables, 187 cells | Nemotron 182/187; tri-source fusion 187/187 exact |
-| Clear controls | 52 reviewed controls | State macro-F1 1.0000, label association F1 0.9903; dense grids remain review-only |
-| Handwriting rejection | 46 reviewed clinical fields | Strict exact: PyLaia 0/46, TrOCR 1/46; both rejected |
-| Private hard track | 41 generated clinical-style pages plus 3 supplied failures | 44/44 operational success, 0/44 manually complete, 44/44 review-routed |
-| False-table guard | 2 supplied application screenshots | Both page-sized false tables rejected; OCR preserved and proposals retained for review |
-| Tiny-text hard-track ablation | Frozen 41 clinical pages | 3,780 crop alternatives, 235 unsupported tile-only candidates, 0 promoted; primary text preserved |
+| Tables | Presence F1 1.0 on 5 pages; structure descriptors remain poor | Keep structure review-routed |
+| Phi-4 handwriting adapter | Already-localized C14 crops: 50/88 exact and 0.135294 CER, versus stock 32/88 and 0.401471 CER | Crop specialist only; no measured end-to-end handwriting gain |
+| Automatic handwriting classifier | 18 proposals, 8 matches, 9/44 box recall; warm p50 7.497 s | Rejected for automatic routing |
 
-On the paired 328-page ClinOCR panel, Nemotron reduced CER by 0.156870 with a 16-template-cluster 95% interval of [-0.185387, -0.113176]. This proves improvement over the Tesseract CPU floor, not over a frontier model. The guarded orientation result uses a gold-free selector, but its 56/56 minimum-CER count is a post-selection diagnostic and aggregate guarded latency is unavailable. The 187-cell table result is a targeted two-table failure panel with no repeated-run uncertainty, not a general benchmark. Operational `success` is schema completion, not correctness; the private hard track remains unsuitable for unattended use.
+![Handwriting adapter comparison](artifacts/research/figures/handwriting_adapter_comparison.svg)
 
-![Hard-case route outcomes](artifacts/hard-case-routing.svg)
+The warmed Phi-4 process took 0.606 s on a blank 320 by 96 crop after a 24.964 s
+cold load and occupied 11,646 MiB on the measured A10G. These are single-host
+observations, not general service guarantees.
 
-![Table cell comparison](artifacts/table-cell-comparison.svg)
+The adapter result measures recognition after localization. It does not measure
+page-level handwriting detection, end-to-end recall, or unattended safety. The
+classifier result is insufficient to supply that missing localization step.
 
-## Verify and reproduce
+## Privacy
+
+- Private clinical pages, crops, labels, and predictions stay local or on the
+  authorized private GPU host.
+- Private material is not sent to Jina, OpenRouter, hosted comparators, or other
+  third-party services.
+- The local demo binds to loopback by default and deletes its temporary session
+  files when the process exits.
+- Held-out private evaluation data must remain isolated from training and tuning
+  data.
+
+Do not expose the demo to a network or use it for unattended clinical decisions.
+
+## Test
+
+In a prepared development environment:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src \
   python -m pytest -p no:cacheprovider tests -q
+
 ruff check src experiments tests
 ruff format --check src experiments tests
-
-MPLCONFIGDIR=/private/tmp/notso-ocr-mpl \
-  python artifacts/table-cell-comparison.py
-tectonic --outdir artifacts artifacts/ocr-pipeline-architecture.tex
 ```
 
-Dataset revisions, licenses, and acquisition notes are in [data/README.md](data/README.md). The concise measured report, figure captions, limitations, and exact evidence paths are in [artifacts/ocr-evidence-report.md](artifacts/ocr-evidence-report.md). The expanded 44-page visual audit is summarized in [experiments/PRIVATE_HARD_CASE_EVALUATION.md](experiments/PRIVATE_HARD_CASE_EVALUATION.md). The broader research and fine-tuning plan is in [OCR_PIPELINE_RESEARCH_AND_PLAN.md](OCR_PIPELINE_RESEARCH_AND_PLAN.md).
+## Research record
 
-Hosted paired baselines remain blocked until a fresh inherited `OPENROUTER_API_KEY` and exact provider pins are available. No private clinical page is sent to Jina or a hosted model. No frontier-superiority claim is made.
+The reports carry protocols, denominators, limitations, and evidence paths so
+the README can stay concise:
+
+- [Complete OCR evidence report with plots](artifacts/ocr-evidence-report.md)
+- [Frozen hard-panel backend selection](artifacts/research/backend_selection.md)
+- [Phi-4 handwriting adapter evaluation](artifacts/research/phi4_finetuning_cost.md)
+- [Fine-tuning plan and execution status](artifacts/research/finetuning_plan.md)
+- [Handwriting proposal benchmark](artifacts/research/doctr_proposal_benchmark.md)
+- [Private hard-case visual evaluation](experiments/PRIVATE_HARD_CASE_EVALUATION.md)
+- [Demo design QA](design-qa.md)
+
+These reports are research snapshots. Claims should be read with their stated
+panel, date, and evidence boundary.

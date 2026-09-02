@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
 import subprocess
 import tempfile
 import time
 from collections.abc import Sequence
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -27,6 +29,12 @@ from .rendering import render_evidence
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 
 
+@dataclass(frozen=True)
+class _PreparedPages:
+    source: Path
+    pages: tuple[Path, ...]
+
+
 def process_document(
     source: str | Path,
     reader: LocalReader,
@@ -35,6 +43,10 @@ def process_document(
     pdftoppm_executable: str = "pdftoppm",
     stages: Sequence[RegionStage] = (),
     timings: dict[str, float] | None = None,
+    prepared_pages: _PreparedPages | None = None,
+    max_pages: int | None = None,
+    max_page_pixels: int | None = None,
+    max_pixels: int | None = None,
 ) -> DocumentResult:
     if timings is not None:
         timings.clear()
@@ -62,18 +74,38 @@ def process_document(
         return result
 
     try:
-        with tempfile.TemporaryDirectory(prefix="ocr-pipeline-") as temporary_dir:
-            prepare_started = time.perf_counter()
-            try:
-                pages = _prepare_pages(
-                    source_path,
-                    source_kind,
-                    Path(temporary_dir),
-                    pdf_dpi,
-                    pdftoppm_executable,
+        with ExitStack() as stack:
+            if prepared_pages is None:
+                temporary_dir = stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix="ocr-pipeline-")
                 )
-            finally:
-                _add_timing(timings, "prepare", prepare_started)
+                prepare_started = time.perf_counter()
+                try:
+                    prepared = _prepare_pages(
+                        source_path,
+                        source_kind,
+                        Path(temporary_dir),
+                        pdf_dpi,
+                        pdftoppm_executable,
+                        max_pages=max_pages,
+                        max_page_pixels=max_page_pixels,
+                        max_pixels=max_pixels,
+                    )
+                finally:
+                    _add_timing(timings, "prepare", prepare_started)
+            else:
+                prepared = prepared_pages
+            if prepared.source.resolve() != source_path.resolve():
+                raise PipelineError(
+                    "render",
+                    "prepared_source_mismatch",
+                    "Prepared pages belong to a different source",
+                )
+            pages = list(prepared.pages)
+            if not pages:
+                raise PipelineError(
+                    "render", "no_pages", "Prepared input contained no pages"
+                )
             batch_results: list[list[TextRegion] | ReaderError] | None = None
             read_batch = getattr(reader, "read_batch", None)
             if (
@@ -336,7 +368,11 @@ def _add_timing(
 def _region_needs_review(region: TextRegion) -> bool:
     if region.resolution != "resolved":
         return True
-    cells = (region.structure or {}).get("cells", [])
+    structure = region.structure or {}
+    handwriting_review = structure.get("handwriting_review")
+    if isinstance(handwriting_review, dict) and handwriting_review.get("required"):
+        return True
+    cells = structure.get("cells", [])
     if isinstance(cells, list) and any(
         isinstance(cell, dict) and cell.get("resolution") != "resolved"
         for cell in cells
@@ -355,25 +391,54 @@ def _prepare_pages(
     temporary_dir: Path,
     pdf_dpi: int,
     pdftoppm_executable: str,
-) -> list[Path]:
+    *,
+    max_pages: int | None = None,
+    max_page_pixels: int | None = None,
+    max_pixels: int | None = None,
+) -> _PreparedPages:
+    _validate_resource_limits(max_pages, max_page_pixels, max_pixels)
     if source_kind == "image":
         if source.suffix.lower() in {".tif", ".tiff"}:
-            return _prepare_tiff_pages(source, temporary_dir)
-        return [_normalize_exif_orientation(source, temporary_dir)]
+            pages = _prepare_tiff_pages(
+                source,
+                temporary_dir,
+                max_pages=max_pages,
+                max_page_pixels=max_page_pixels,
+                max_pixels=max_pixels,
+            )
+        else:
+            _validate_image_limits(
+                source,
+                max_pages,
+                max_page_pixels,
+                max_pixels,
+            )
+            pages = [_normalize_exif_orientation(source, temporary_dir)]
+        return _PreparedPages(source.resolve(), tuple(pages))
     if pdf_dpi <= 0:
         raise PipelineError("render", "invalid_dpi", "PDF DPI must be positive")
 
+    page_count = _validate_pdf_limits(
+        source,
+        pdf_dpi,
+        max_pages,
+        max_page_pixels,
+        max_pixels,
+    )
+
     output_prefix = temporary_dir / "page"
+    command = [
+        pdftoppm_executable,
+        "-r",
+        str(pdf_dpi),
+        "-png",
+    ]
+    if page_count is not None:
+        command.extend(["-f", "1", "-l", str(page_count)])
+    command.extend([str(source), str(output_prefix)])
     try:
         completed = subprocess.run(
-            [
-                pdftoppm_executable,
-                "-r",
-                str(pdf_dpi),
-                "-png",
-                str(source),
-                str(output_prefix),
-            ],
+            command,
             capture_output=True,
             text=True,
             timeout=180,
@@ -399,15 +464,161 @@ def _prepare_pages(
         raise PipelineError("render", "no_pages", "pdftoppm produced no pages")
 
     numbered_pages.sort(key=lambda item: item[0])
-    return [page_path for _, page_path in numbered_pages]
+    return _PreparedPages(
+        source.resolve(),
+        tuple(page_path for _, page_path in numbered_pages),
+    )
 
 
-def _prepare_tiff_pages(source: Path, temporary_dir: Path) -> list[Path]:
+def _validate_resource_limits(
+    max_pages: int | None,
+    max_page_pixels: int | None,
+    max_pixels: int | None,
+) -> None:
+    if max_pages is not None and max_pages <= 0:
+        raise ValueError("max_pages must be positive")
+    if max_page_pixels is not None and max_page_pixels <= 0:
+        raise ValueError("max_page_pixels must be positive")
+    if max_pixels is not None and max_pixels <= 0:
+        raise ValueError("max_pixels must be positive")
+
+
+def _validate_image_limits(
+    source: Path,
+    max_pages: int | None,
+    max_page_pixels: int | None,
+    max_pixels: int | None,
+) -> None:
+    try:
+        with Image.open(source) as image:
+            _check_page_limit(1, max_pages)
+            page_pixels = image.width * image.height
+            _check_pixel_limit(page_pixels, max_page_pixels, "Page")
+            _check_pixel_limit(page_pixels, max_pixels, "Document")
+    except Image.DecompressionBombError as error:
+        raise PipelineError(
+            "ingest",
+            "pixel_limit_exceeded",
+            "Image exceeds the decoded pixel safety limit",
+        ) from error
+    except (OSError, UnidentifiedImageError) as error:
+        raise PipelineError("image", "invalid_image", str(error)) from error
+
+
+def _validate_pdf_limits(
+    source: Path,
+    pdf_dpi: int,
+    max_pages: int | None,
+    max_page_pixels: int | None,
+    max_pixels: int | None,
+) -> int | None:
+    if max_pages is None and max_page_pixels is None and max_pixels is None:
+        return None
+
+    summary = _pdfinfo(source)
+    match = re.search(r"^Pages:\s+(\d+)\s*$", summary, re.MULTILINE)
+    if match is None:
+        raise PipelineError(
+            "render",
+            "metadata_failed",
+            "pdfinfo did not report a page count",
+        )
+    page_count = int(match.group(1))
+    if page_count < 1:
+        raise PipelineError("render", "no_pages", "PDF contained no pages")
+    _check_page_limit(page_count, max_pages)
+    if max_page_pixels is None and max_pixels is None:
+        return page_count
+
+    details = _pdfinfo(source, page_count)
+    sizes = re.findall(
+        r"^Page\s+\d+\s+size:\s+([0-9.]+)\s+x\s+([0-9.]+)\s+pts",
+        details,
+        re.MULTILINE,
+    )
+    if len(sizes) != page_count:
+        raise PipelineError(
+            "render",
+            "metadata_failed",
+            "pdfinfo did not report every page size",
+        )
+    scale = pdf_dpi / 72
+    page_pixel_counts = [
+        math.ceil(float(width) * scale) * math.ceil(float(height) * scale)
+        for width, height in sizes
+    ]
+    for page_pixels in page_pixel_counts:
+        _check_pixel_limit(page_pixels, max_page_pixels, "Page")
+    _check_pixel_limit(sum(page_pixel_counts), max_pixels, "Document")
+    return page_count
+
+
+def _pdfinfo(source: Path, page_count: int | None = None) -> str:
+    command = ["pdfinfo"]
+    if page_count is not None:
+        command.extend(["-f", "1", "-l", str(page_count)])
+    command.append(str(source))
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except FileNotFoundError as error:
+        raise PipelineError("render", "renderer_unavailable", str(error)) from error
+    except subprocess.TimeoutExpired as error:
+        raise PipelineError(
+            "render", "renderer_timeout", "pdfinfo exceeded 30 seconds"
+        ) from error
+    if completed.returncode != 0:
+        message = completed.stderr.strip() or "pdfinfo returned no error message"
+        raise PipelineError("render", "renderer_failed", message)
+    return completed.stdout
+
+
+def _check_page_limit(page_count: int, max_pages: int | None) -> None:
+    if max_pages is not None and page_count > max_pages:
+        raise PipelineError(
+            "ingest",
+            "page_limit_exceeded",
+            f"Document has {page_count} pages; the limit is {max_pages}",
+        )
+
+
+def _check_pixel_limit(
+    pixel_count: int,
+    max_pixels: int | None,
+    scope: str,
+) -> None:
+    if max_pixels is not None and pixel_count > max_pixels:
+        raise PipelineError(
+            "ingest",
+            "pixel_limit_exceeded",
+            f"{scope} decodes to {pixel_count} pixels; the limit is {max_pixels}",
+        )
+
+
+def _prepare_tiff_pages(
+    source: Path,
+    temporary_dir: Path,
+    *,
+    max_pages: int | None = None,
+    max_page_pixels: int | None = None,
+    max_pixels: int | None = None,
+) -> list[Path]:
     pages: list[Path] = []
     try:
         with Image.open(source) as image:
+            _check_page_limit(image.n_frames, max_pages)
+            decoded_pixels = 0
             for index in range(image.n_frames):
                 image.seek(index)
+                page_pixels = image.width * image.height
+                _check_pixel_limit(page_pixels, max_page_pixels, "Page")
+                decoded_pixels += page_pixels
+                _check_pixel_limit(decoded_pixels, max_pixels, "Document")
                 frame = ImageOps.exif_transpose(image.copy())
                 if frame.mode not in {
                     "1",
@@ -423,6 +634,12 @@ def _prepare_tiff_pages(source: Path, temporary_dir: Path) -> list[Path]:
                 output = temporary_dir / f"page-{index + 1}.png"
                 frame.save(output, format="PNG")
                 pages.append(output)
+    except Image.DecompressionBombError as error:
+        raise PipelineError(
+            "ingest",
+            "pixel_limit_exceeded",
+            "Image exceeds the decoded pixel safety limit",
+        ) from error
     except (EOFError, OSError, UnidentifiedImageError, ValueError) as error:
         raise PipelineError("image", "invalid_image", str(error)) from error
     if not pages:

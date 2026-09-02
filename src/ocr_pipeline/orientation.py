@@ -25,6 +25,7 @@ ROTATIONS = {
     270: Image.Transpose.ROTATE_270,
 }
 CONFIDENCE_FLOOR = 0.5
+DIRECT_ORIENTATION_CONFIDENCE = 0.9
 MAX_SCORED_WORDS = 50
 MIN_SUPPORTING_WORDS = 10
 COVERAGE_RECOVERY_RATIO = 2.0
@@ -166,6 +167,7 @@ class OrientationReader:
             "selector": "evidence_fallback",
             "view_scores": {},
             "view_failures": {},
+            "nested_reader_reviews": {},
         }
         try:
             with Image.open(image_path) as source:
@@ -232,6 +234,7 @@ class OrientationReader:
             "orientation_evidence_fallback",
         }
         needs_review = needs_review or bool(assessment["view_failures"])
+        needs_review = needs_review or str(angle) in assessment["nested_reader_reviews"]
         assessment["status"] = (
             "review_recommended" if needs_review else "orientation_confirmed"
         )
@@ -365,6 +368,10 @@ class OrientationReader:
 
         angle = int(prediction["angle"])
         if angle == 0:
+            if float(prediction["confidence"]) < DIRECT_ORIENTATION_CONFIDENCE:
+                assessment["selector"] = "orientation_evidence_fallback"
+                assessment["osd_status"] = "skipped_uncertain_zero_prediction"
+                return list(ROTATIONS)
             assessment["selector"] = "orientation_classifier"
             assessment["osd_status"] = "skipped_zero_prediction"
             return [0]
@@ -445,6 +452,9 @@ class OrientationReader:
                     "message": str(error),
                 }
                 continue
+            nested_review = getattr(self.reader, "page_needs_review", None)
+            if callable(nested_review) and nested_review(page_number):
+                assessment["nested_reader_reviews"][str(angle)] = True
             if not regions:
                 assessment["view_failures"][str(angle)] = {
                     "code": "empty_output",
@@ -698,6 +708,8 @@ def _annotate_region(
         "osd_failure": assessment.get("osd_failure"),
         "view_failures": dict(assessment["view_failures"]),
     }
+    if assessment["nested_reader_reviews"]:
+        orientation["nested_reader_reviews"] = dict(assessment["nested_reader_reviews"])
     if "orientation_prediction" in assessment:
         orientation["orientation_prediction"] = assessment["orientation_prediction"]
     if "orientation_detector_failure" in assessment:
