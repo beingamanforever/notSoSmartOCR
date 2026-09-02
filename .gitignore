@@ -6,6 +6,9 @@ experiments/results/
 .DS_Store
 /.codex/
 /AGENTS.md
+/CLAUDE.md
+/llms-agents.txt
+/llms-hpc.txt
 /CLINICAL_OCR_RESEARCH_2_0.md
 /DS_QUESTION_BANK_REVIEW.md
 /HEALTH_SCORE_PAPER_REVIEW.md
