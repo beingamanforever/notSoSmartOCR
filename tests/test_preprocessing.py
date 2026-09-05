@@ -6,12 +6,15 @@ from PIL import Image, ImageDraw
 
 from ocr_pipeline.contracts import BoundingBox, TextRegion
 from ocr_pipeline.pipeline import process_document
+from ocr_pipeline.orientation import OrientationReader
 from ocr_pipeline.preprocessing import (
+    PageFrameReader,
     RoutedTesseractReader,
     TiledReader,
     WideBandFallbackReader,
     _assess_band_confirmation,
     locate_dark_frame,
+    locate_document_frame,
 )
 from ocr_pipeline.providers import ReaderError
 from ocr_pipeline.rendering import render_evidence
@@ -141,6 +144,89 @@ class ScriptedBandView:
         ]
 
 
+class RecordingStage:
+    name = "recording"
+
+    def __init__(self) -> None:
+        self.sizes: list[tuple[int, int]] = []
+
+    def apply(
+        self,
+        image_path: Path,
+        page_number: int,
+        regions: list[TextRegion],
+    ) -> list[TextRegion]:
+        with Image.open(image_path) as image:
+            self.sizes.append(image.size)
+        regions[0].structure = {
+            "role": "table",
+            "cells": [
+                {
+                    "bbox": {"left": 10, "top": 20, "right": 50, "bottom": 40},
+                    "span_bboxes": [{"left": 12, "top": 22, "right": 20, "bottom": 30}],
+                    "resolution": "resolved",
+                }
+            ],
+        }
+        return regions
+
+
+class ScriptedFrameView:
+    name = "scripted-frame-view"
+
+    def __init__(self, *, fail_full_page: bool = False) -> None:
+        self.fail_full_page = fail_full_page
+        self.sizes: list[tuple[int, int]] = []
+
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        with Image.open(image_path) as image:
+            size = image.size
+        self.sizes.append(size)
+        if size == (200, 100):
+            return [
+                TextRegion(
+                    id=f"p{page_number}-body",
+                    kind="text",
+                    text="High quality body",
+                    confidence=0.99,
+                    bounding_box=BoundingBox(10, 10, 110, 30),
+                    reading_order=1,
+                    provider=self.name,
+                    text_provenance={"method": "cropped-frame"},
+                )
+            ]
+        if self.fail_full_page:
+            raise ReaderError("full_page_failed", "controlled full-page failure")
+        values = [
+            ("header", "Header navigation", BoundingBox(10, 10, 150, 30), "resolved"),
+            ("body", "Lower quality body", BoundingBox(110, 110, 210, 130), "resolved"),
+            ("footer", "Bottom footer", BoundingBox(10, 250, 150, 270), "resolved"),
+            (
+                "footer-copy",
+                "Bottom footer",
+                BoundingBox(10, 250, 150, 270),
+                "resolved",
+            ),
+            ("empty", "", BoundingBox(10, 40, 30, 50), "resolved"),
+            ("uncertain", "Guess", BoundingBox(10, 50, 80, 65), "unreadable"),
+            ("outside-page", "Invalid", BoundingBox(390, 280, 410, 310), "resolved"),
+        ]
+        return [
+            TextRegion(
+                id=f"p{page_number}-{region_id}",
+                kind="text",
+                text=text,
+                confidence=0.9,
+                bounding_box=box,
+                reading_order=index,
+                provider=self.name,
+                text_provenance={"method": "full-page"},
+                resolution=resolution,
+            )
+            for index, (region_id, text, box, resolution) in enumerate(values, 1)
+        ]
+
+
 def test_dark_frame_locator_finds_document_canvas(tmp_path: Path) -> None:
     source = tmp_path / "screenshot.png"
     image = Image.new("RGB", (200, 120), "white")
@@ -159,6 +245,183 @@ def test_dark_frame_locator_leaves_full_page_documents_unchanged(
     Image.new("RGB", (200, 120), "white").save(source)
 
     assert locate_dark_frame(source) is None
+
+
+def test_document_frame_locator_ignores_browser_chrome_and_flags_partial_page(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "viewer.png"
+    image = Image.new("RGB", (600, 500), (135, 135, 135))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((0, 0, 599, 30), fill="white")
+    draw.rectangle((200, 60, 399, 359), fill="white")
+    draw.rectangle((200, 380, 399, 499), fill="white")
+    draw.text((240, 150), "Attention Is All You Need", fill="black")
+    image.save(source)
+
+    assert locate_document_frame(source) == BoundingBox(199, 58, 401, 361)
+    reader = PageFrameReader(ControlledView("page"))
+    reader.read(source, 1)
+    assessment = reader.coverage_assessment(1)
+    assert assessment["status"] == "review_recommended"
+    assert assessment["pages"][0]["partial_page_visible"] is True
+
+
+def test_page_frame_wraps_orientation_and_all_stages_then_restores_nested_boxes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "viewer.png"
+    Image.new("RGB", (300, 240), (130, 130, 130)).save(source)
+    crop = BoundingBox(40, 30, 240, 180)
+    controlled = ControlledView("Attention", 0.99)
+    oriented = OrientationReader(
+        controlled,
+        osd_detector=lambda _: {"angle": 90, "confidence": 20.0},
+        defer_restore=True,
+    )
+    reader = PageFrameReader(oriented, locator=lambda _: crop)
+    stage = RecordingStage()
+
+    result = process_document(source, reader, stages=[stage])
+
+    assert controlled.sizes == [
+        (150, 200),
+        (200, 150),
+        (240, 300),
+        (300, 240),
+    ]
+    assert stage.sizes == [(150, 200)]
+    page = result.pages[0]
+    assert (page.width, page.height) == (300, 240)
+    region = next(
+        item for item in page.regions if "source_crop" in item.text_provenance
+    )
+    assert region.bounding_box == BoundingBox(220, 31, 238, 80)
+    cell = region.structure["cells"][0]
+    assert cell["bbox"] == {"left": 200, "top": 40, "right": 220, "bottom": 80}
+    assert cell["span_bboxes"] == [{"left": 210, "top": 42, "right": 218, "bottom": 50}]
+    assert region.text_provenance["source_crop"] == {
+        "left": 40,
+        "top": 30,
+        "right": 240,
+        "bottom": 180,
+    }
+
+
+def test_page_frame_recovers_only_valid_outside_evidence_end_to_end(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "screenshot.png"
+    Image.new("RGB", (400, 300), "white").save(source)
+    crop = BoundingBox(100, 100, 300, 200)
+    scripted = ScriptedFrameView()
+    reader = PageFrameReader(scripted, locator=lambda _: crop)
+    stage = RecordingStage()
+
+    result = process_document(source, reader, stages=[stage])
+
+    page = result.pages[0]
+    assert page.route == "review"
+    assert page.text.value == "Header navigation High quality body Bottom footer"
+    assert [region.text for region in page.regions] == [
+        "Header navigation",
+        "High quality body",
+        "Bottom footer",
+    ]
+    assert [region.reading_order for region in page.regions] == [1, 2, 3]
+    assert scripted.sizes == [(200, 100), (400, 300)]
+    assert stage.sizes == [(200, 100)]
+
+    body = page.regions[1]
+    assert body.id == "p1-body"
+    assert body.confidence == 0.99
+    assert body.bounding_box == BoundingBox(110, 110, 210, 130)
+    assert body.text_provenance == {
+        "method": "cropped-frame",
+        "source_crop": {
+            "left": 100,
+            "top": 100,
+            "right": 300,
+            "bottom": 200,
+        },
+    }
+    assert body.structure["cells"][0]["bbox"] == {
+        "left": 110,
+        "top": 120,
+        "right": 150,
+        "bottom": 140,
+    }
+
+    header = page.regions[0]
+    assert header.id == "p1-frame-recovery-1"
+    assert header.text_provenance == {
+        "method": "full-page",
+        "page_frame_recovery": {
+            "method": "residual_full_original",
+            "source_region_id": "p1-header",
+            "source_reader": "scripted-frame-view",
+            "isolated_frame": {
+                "left": 100,
+                "top": 100,
+                "right": 300,
+                "bottom": 200,
+            },
+        },
+    }
+    assessment = reader.coverage_assessment(1)
+    assert assessment["status"] == "review_recommended"
+    recovered = assessment["pages"][0]
+    assert recovered["recovery_status"] == "recovered"
+    assert recovered["full_page_regions"] == 7
+    assert recovered["inside_frame_regions"] == 1
+    assert recovered["invalid_full_page_regions"] == 3
+    assert recovered["duplicate_full_page_regions"] == 1
+    assert recovered["recovered_regions"] == 2
+    assert recovered["preserved_canonical_regions"] == 1
+
+
+def test_page_frame_recovery_failure_keeps_cropped_canonical_evidence(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "screenshot.png"
+    Image.new("RGB", (400, 300), "white").save(source)
+    scripted = ScriptedFrameView(fail_full_page=True)
+    reader = PageFrameReader(
+        scripted,
+        locator=lambda _: BoundingBox(100, 100, 300, 200),
+    )
+
+    result = process_document(source, reader)
+
+    assert result.pages[0].route == "review"
+    assert result.pages[0].text.value == "High quality body"
+    assert result.pages[0].regions[0].bounding_box == BoundingBox(110, 110, 210, 130)
+    assert result.pages[0].failure_ids == ["failure-1"]
+    assert result.failures[0].code == "full_page_failed"
+    assessment = reader.coverage_assessment(1)["pages"][0]
+    assert assessment["recovery_status"] == "failed"
+    assert assessment["recovery_failure"] == {
+        "code": "full_page_failed",
+        "message": "controlled full-page failure",
+    }
+
+
+def test_page_frame_does_not_rerun_full_page_without_an_isolated_frame(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (400, 300), "white").save(source)
+    controlled = ControlledView("Full page")
+    reader = PageFrameReader(controlled, locator=lambda _: None)
+
+    result = process_document(source, reader)
+
+    assert controlled.sizes == [(400, 300)]
+    assert result.pages[0].text.value == "Full page"
+    assert result.pages[0].route == "accept_local"
+    assessment = reader.coverage_assessment(1)
+    assert assessment["status"] == "not_assessed"
+    assert assessment["pages"][0]["recovery_status"] == "not_routed"
 
 
 def test_routed_reader_selects_supported_enhanced_view_and_translates_boxes(
@@ -262,6 +525,10 @@ def test_tiled_reader_preserves_baseline_and_exposes_uncertain_evidence(
     assessment = reader.coverage_assessment(1)
     assert assessment["status"] == "review_recommended"
     page = assessment["pages"][0]
+    assert page["ran"] is True
+    assert page["tile_reader"] == "scripted-tile-view"
+    assert page["tile_views_run"] == 3
+    assert page["tiled_candidates"] == 3
     assert page["selected_view"] == "fused"
     assert page["baseline_regions"] == 2
     assert page["preserved_baseline_regions"] == 2
@@ -352,7 +619,11 @@ def test_tiled_reader_skips_normal_size_text(tmp_path: Path) -> None:
     assert regions[0].text.endswith("nine ten")
     assessment = reader.coverage_assessment(1)
     assert assessment["status"] == "not_assessed"
-    assert assessment["pages"][0]["status"] == "not_routed"
+    page = assessment["pages"][0]
+    assert page["status"] == "not_routed"
+    assert page["ran"] is True
+    assert page["tile_views_run"] == 0
+    assert page["tiled_candidates"] == 0
 
 
 def test_wide_band_reader_groups_only_adjacent_qualifying_bands_and_upscales(
@@ -655,6 +926,10 @@ def test_wide_band_reader_recovers_missing_text_end_to_end(tmp_path: Path) -> No
     assert len(result.pages[0].regions) == 152
     assert all(region.text != "---" for region in result.pages[0].regions)
     assessment = reader.coverage_assessment(1)["pages"][0]
+    assert assessment["ran"] is True
+    assert assessment["fallback_reader"] == "scripted-band-view"
+    assert assessment["fallback_reader_runs"] == 1
+    assert assessment["fallback_candidates"] == 69
     assert assessment["replaced_bands"] == 1
     band = assessment["bands"][0]
     assert band["selection_reason"] == "missing_text_recovery"
@@ -786,7 +1061,7 @@ def test_wide_band_reader_accepts_independently_confirmed_recovery(
     assert support.text_provenance["selected_view"] == "confirmation"
     assert support.text_provenance["confirmation_region_id"]
     band = reader.coverage_assessment(1)["pages"][0]["bands"][0]
-    assert band["selection_reason"] == "independent_view_confirmation"
+    assert band["selection_reason"] == "same_engine_view_confirmation"
     assert band["confirmation_status"] == "agreed"
     assert band["confirmation_fallback_recall"] == 1.0
     assert band["confirmation_token_recall"] == 1.0

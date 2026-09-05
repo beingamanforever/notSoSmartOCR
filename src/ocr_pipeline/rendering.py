@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from html import escape
 from typing import Any
 
 from .contracts import EvidenceText, TextRegion
+from .table_topology import TableTopology, TableTopologyError, validate_table_topology
 
 INLINE_MAX_GAP_HEIGHTS = 3
 
@@ -15,7 +17,7 @@ def render_evidence(regions: list[TextRegion]) -> EvidenceText:
         region
         for _, region in sorted(
             enumerate(regions),
-            key=lambda item: (item[1].reading_order, item[0]),
+            key=lambda item: (_text_region_order(item[1]), item[0]),
         )
     ]
     rendered = [
@@ -24,6 +26,7 @@ def render_evidence(regions: list[TextRegion]) -> EvidenceText:
         if region.resolution == "resolved"
         and region.kind != "checkbox"
         and (region.structure or {}).get("role") != "table_source"
+        and not (region.structure or {}).get("layout_owner_id")
     ]
     return EvidenceText(
         value=" ".join(region.text for region in rendered),
@@ -38,8 +41,12 @@ def render_page_markdown(
     fallback: str = "",
 ) -> str:
     """Render canonical evidence as readable Markdown for downloads."""
+    source_index = {_id(region): region for region in regions if _id(region)}
     rendered = _display_regions(regions, set(evidence_ids))
-    blocks = [_markdown_block(group) for group in _group_inline_regions(rendered)]
+    blocks = [
+        _markdown_block(group, source_index)
+        for group in _group_inline_regions(rendered)
+    ]
     blocks = [block for block in blocks if block]
     return "\n\n".join(blocks) or fallback
 
@@ -110,6 +117,11 @@ def _display_regions(
     regions: Sequence[dict[str, Any]],
     evidence_ids: set[str],
 ) -> list[dict[str, Any]]:
+    owner_ids = {
+        _id(region)
+        for region in regions
+        if _structure(region).get("role") == "layout_block"
+    }
     ordered = _ordered_regions(regions)
     included = [region for region in ordered if _renderable(region, evidence_ids)]
     linked_labels = {
@@ -118,7 +130,14 @@ def _display_regions(
         if _semantic_kind(region) == "control" and _text(region)
         for label_id in (_structure(region).get("label_evidence_ids") or [])
     }
-    return [region for region in included if _id(region) not in linked_labels]
+    return [
+        region
+        for region in included
+        if (
+            not _owned_by_layout(region, owner_ids) and _id(region) not in linked_labels
+        )
+        or _semantic_kind(region) in {"table", "figure", "control"}
+    ]
 
 
 def _renderable(region: dict[str, Any], evidence_ids: set[str]) -> bool:
@@ -135,9 +154,12 @@ def _renderable(region: dict[str, Any], evidence_ids: set[str]) -> bool:
     )
 
 
-def _markdown_block(region: dict[str, Any]) -> str:
+def _markdown_block(
+    region: dict[str, Any],
+    source_index: dict[str, dict[str, Any]],
+) -> str:
     kind = _semantic_kind(region)
-    text = _text(region).strip()
+    text = _canonical_layout_text(region, source_index).strip()
     resolution = _resolution(region)
     if kind == "table":
         block = _markdown_table(region) or text
@@ -146,89 +168,97 @@ def _markdown_block(region: dict[str, Any]) -> str:
     elif kind == "heading":
         block = f"#### {text}" if text else ""
     elif kind == "control":
-        block = f"- {text}" if text else ""
+        if resolution == "resolved":
+            block = f"- {text}" if text else ""
+        else:
+            label = str(_structure(region).get("label") or "").strip()
+            block = f"- {label}" if label else ""
     elif kind == "field":
         label = str(
             _structure(region).get("label")
             or _structure(region).get("field_name")
             or ""
         ).strip()
-        block = f"**{label}:** {text}" if label and text else text
+        value = text if resolution == "resolved" else ""
+        block = f"**{label}:** {value}" if label else value
     else:
-        block = text
-    if resolution == "resolved":
-        return block
-
-    review = [f"> **{resolution.title()} {kind.replace('_', ' ')} evidence**"]
-    if block:
-        review.append(f"> {block}")
-    alternatives = _alternatives(region)
-    review.extend(f"> Alternative evidence: {value}" for value in alternatives)
-    return "\n".join(review)
+        block = text if resolution == "resolved" else ""
+    return block
 
 
 def _markdown_table(region: dict[str, Any]) -> str:
     structure = _structure(region)
-    cells = structure.get("cells")
-    if not isinstance(cells, list) or not cells:
-        return ""
-    normalized = _normalized_cells(cells)
-    if not normalized:
-        return ""
-    row_count = max(
-        int(structure.get("row_count") or 0),
-        max(row for row, _, _ in normalized) + 1,
-    )
-    column_count = max(
-        int(structure.get("column_count") or 0),
-        max(column for _, column, _ in normalized) + 1,
-    )
-    grid = [["" for _ in range(column_count)] for _ in range(row_count)]
-    for row, column, cell in normalized:
-        if row >= row_count or column >= column_count:
-            continue
-        grid[row][column] = _escape_markdown_cell(str(cell.get("text", "")))
+    try:
+        topology = validate_table_topology(structure)
+    except TableTopologyError as error:
+        return _invalid_table(region, str(error))
 
-    lines = [_markdown_row(grid[0]), _markdown_row(["---"] * column_count)]
+    header_row_count = structure.get("header_row_count")
+    block = (
+        _html_table(topology)
+        if topology.has_spans or header_row_count == 0
+        else _simple_markdown_table(topology)
+    )
+    return block
+
+
+def _simple_markdown_table(topology: TableTopology) -> str:
+    grid = [
+        ["" for _ in range(topology.column_count)] for _ in range(topology.row_count)
+    ]
+    for cell in topology.cells:
+        grid[cell.row][cell.column] = _escape_markdown_cell(
+            _display_cell_text(cell.value)
+        )
+    lines = [_markdown_row(grid[0]), _markdown_row(["---"] * topology.column_count)]
     lines.extend(_markdown_row(row) for row in grid[1:])
-    for row, column, cell in normalized:
-        resolution = str(cell.get("resolution", "resolved"))
-        if resolution == "resolved":
-            continue
-        selected = str(cell.get("text", "")).strip()
-        location = f"row {row + 1}, column {column + 1}"
-        lines.extend(
-            ["", f"> **{resolution.title()} table cell evidence ({location})**"]
-        )
-        if selected:
-            lines.append(f"> {selected}")
-        lines.extend(
-            f"> Alternative evidence: {value}"
-            for value in _mapping_alternatives(cell.get("alternatives"), selected)
-        )
     return "\n".join(lines)
 
 
-def _normalized_cells(cells: list[Any]) -> list[tuple[int, int, dict[str, Any]]]:
-    raw: list[tuple[int, int, dict[str, Any]]] = []
-    indexed: list[tuple[int, int, dict[str, Any]]] = []
-    for cell in cells:
-        if not isinstance(cell, dict):
-            continue
-        rows = cell.get("row_nums")
-        columns = cell.get("column_nums")
-        if isinstance(rows, list) and rows and isinstance(columns, list) and columns:
-            raw.append((int(min(rows)), int(min(columns)), cell))
-            continue
-        row = cell.get("row_index")
-        column = cell.get("column_index")
-        if isinstance(row, int) and isinstance(column, int):
-            indexed.append((row, column, cell))
-    if indexed and min(row for row, _, _ in indexed) >= 1:
-        indexed = [(row - 1, column, cell) for row, column, cell in indexed]
-    if indexed and min(column for _, column, _ in indexed) >= 1:
-        indexed = [(row, column - 1, cell) for row, column, cell in indexed]
-    return raw + indexed
+def _html_table(topology: TableTopology) -> str:
+    anchors = {(cell.row, cell.column): cell for cell in topology.cells}
+    lines = ["<table>", "<tbody>"]
+    for row in range(topology.row_count):
+        lines.append("<tr>")
+        for column in range(topology.column_count):
+            cell = anchors.get((row, column))
+            if cell is None:
+                continue
+            tag = "th" if _header_cell(cell.value) else "td"
+            attributes = []
+            if len(cell.rows) > 1:
+                attributes.append(f' rowspan="{len(cell.rows)}"')
+            if len(cell.columns) > 1:
+                attributes.append(f' colspan="{len(cell.columns)}"')
+            text = escape(_display_cell_text(cell.value), quote=True)
+            lines.append(f"<{tag}{''.join(attributes)}>{text}</{tag}>")
+        lines.append("</tr>")
+    lines.extend(["</tbody>", "</table>"])
+    return "\n".join(lines)
+
+
+def _header_cell(cell: Any) -> bool:
+    return bool(cell.get("column_header") or cell.get("projected_row_header"))
+
+
+def _invalid_table(region: dict[str, Any], problem: str) -> str:
+    del problem
+    literal = _text(region)
+    return "\n".join(f"    {line}" for line in literal.splitlines()) if literal else ""
+
+
+def _display_cell_text(cell: dict[str, Any]) -> str:
+    if str(cell.get("resolution", "resolved")) != "resolved":
+        return ""
+    return str(cell.get("text", ""))
+
+
+def _control_label(text: str) -> str:
+    stripped = text.strip()
+    for prefix in ("[?]", "[x]", "[X]", "[ ]"):
+        if stripped.startswith(prefix):
+            return stripped.removeprefix(prefix).strip()
+    return stripped
 
 
 def _ordered_regions(
@@ -244,7 +274,11 @@ def _ordered_regions(
 
 
 def _semantic_kind(region: dict[str, Any]) -> str:
-    value = f"{_kind(region)} {_structure(region).get('role', '')}".casefold()
+    structure = _structure(region)
+    block_type = str(structure.get("block_type", "")).casefold()
+    if structure.get("role") == "layout_block" and block_type:
+        return block_type
+    value = f"{_kind(region)} {structure.get('role', '')}".casefold()
     if ("section" in value and "head" in value) or "heading" in value:
         return "heading"
     if "footer" in value:
@@ -266,6 +300,42 @@ def _semantic_kind(region: dict[str, Any]) -> str:
     if "handwrit" in value:
         return "handwriting"
     return "text"
+
+
+def _canonical_layout_text(
+    region: dict[str, Any],
+    source_index: dict[str, dict[str, Any]],
+) -> str:
+    structure = _structure(region)
+    if structure.get("role") != "layout_block":
+        return _text(region)
+    groups = (
+        structure.get("fields", structure.get("segments"))
+        if structure.get("block_type") == "form_row"
+        else structure.get("lines")
+    )
+    if not isinstance(groups, list):
+        return ""
+    rendered_lines = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        values = [
+            _text(source).strip()
+            for evidence_id in group.get("evidence_ids", [])
+            if isinstance(evidence_id, str)
+            and (source := source_index.get(evidence_id)) is not None
+            and _resolution(source) == "resolved"
+            and _text(source).strip()
+        ]
+        rendered_lines.append(" ".join(values))
+    separator = " | " if structure.get("block_type") == "form_row" else " "
+    return separator.join(rendered_lines)
+
+
+def _owned_by_layout(region: dict[str, Any], owner_ids: set[str]) -> bool:
+    owner_id = _structure(region).get("layout_owner_id")
+    return isinstance(owner_id, str) and owner_id in owner_ids
 
 
 def _markdown_row(values: Sequence[str]) -> str:
@@ -293,36 +363,22 @@ def _resolution(region: dict[str, Any]) -> str:
 
 
 def _reading_order(region: dict[str, Any]) -> int:
+    structure = _structure(region)
+    rank = structure.get("presentation_rank")
+    if isinstance(rank, int) and not isinstance(rank, bool):
+        return rank
     value = region.get("reading_order", 10**9)
     return value if isinstance(value, int) else 10**9
+
+
+def _text_region_order(region: TextRegion) -> int:
+    structure = region.structure if isinstance(region.structure, dict) else {}
+    rank = structure.get("presentation_rank")
+    if isinstance(rank, int) and not isinstance(rank, bool):
+        return rank
+    return region.reading_order
 
 
 def _structure(region: dict[str, Any]) -> dict[str, Any]:
     value = region.get("structure")
     return value if isinstance(value, dict) else {}
-
-
-def _alternatives(region: dict[str, Any]) -> list[str]:
-    values = region.get("alternatives", [])
-    result = []
-    for value in values:
-        if not isinstance(value, dict):
-            continue
-        text = value.get("text", "")
-        text = str(text).strip()
-        if text and text != _text(region).strip() and text not in result:
-            result.append(text)
-    return result
-
-
-def _mapping_alternatives(values: Any, selected: str) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    result = []
-    for value in values:
-        if not isinstance(value, dict):
-            continue
-        text = str(value.get("text", "")).strip()
-        if text and text != selected and text not in result:
-            result.append(text)
-    return result

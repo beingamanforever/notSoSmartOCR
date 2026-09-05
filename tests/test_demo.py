@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -16,9 +17,11 @@ from PIL import Image
 import pytest
 
 import ocr_pipeline.demo as demo_module
-from ocr_pipeline.contracts import BoundingBox, TextAlternative, TextRegion
+from ocr_pipeline.contracts import BoundingBox, PageResult, TextAlternative, TextRegion
 from ocr_pipeline.demo import create_app
+from ocr_pipeline.evidence_layout import EvidenceLayoutStage
 from ocr_pipeline.orientation import OrientationReader
+from ocr_pipeline.preprocessing import PageFrameReader
 from ocr_pipeline.providers import ReaderError
 from ocr_pipeline.rendering import INLINE_MAX_GAP_HEIGHTS, render_page_markdown
 from ocr_pipeline.tables import TableCell, TablePrediction, TatrTableStage
@@ -136,6 +139,26 @@ class ReviewEvidenceReader(ControlledReader):
                     "reasons": ["small_text_evidence", "low_mean_confidence"],
                 },
             ),
+        ]
+
+
+class PresentationReader:
+    name = "local-page-presenter"
+
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        with Image.open(image_path) as image:
+            width, height = image.size
+        return [
+            TextRegion(
+                id=f"page-{page_number}-presentation",
+                kind="page_text",
+                text="# Visit summary\n\n| Field | Value |\n| --- | --- |\n| Name | Ana |",
+                confidence=None,
+                bounding_box=BoundingBox(0, 0, width, height),
+                reading_order=1,
+                provider=self.name,
+                text_provenance={"model": {"id": "local-test-model"}},
+            )
         ]
 
 
@@ -340,6 +363,38 @@ class DemoMarkupParser(HTMLParser):
         self.elements.append((tag, dict(attrs)))
 
 
+def test_default_demo_identifies_reduced_tesseract_workbench() -> None:
+    app = create_app()
+
+    with TestClient(app) as client:
+        index = client.get("/")
+        composition = client.get("/api/composition").json()
+
+    assert "Reduced Tesseract workbench" in index.text
+    assert composition["id"] == "reduced-tesseract-workbench"
+    assert composition["scope"] == "reduced"
+    assert composition["primary_ocr"] == "tesseract-routed"
+    assert composition["orientation"] == "not configured"
+    assert composition["tesseract_roles"] == ["primary OCR"]
+
+
+def test_workbench_reports_orientation_from_wrapped_reader() -> None:
+    reader = PageFrameReader(
+        OrientationReader(
+            ControlledReader(),
+            osd_detector=lambda _: {"angle": 0, "confidence": 0.0},
+        )
+    )
+    app = create_app(reader)
+
+    with TestClient(app) as client:
+        composition = client.get("/api/composition").json()
+
+    assert composition["id"] == "custom-local-workbench"
+    assert composition["orientation"] == "configured via OrientationReader"
+    assert composition["tesseract_roles"] == []
+
+
 def test_demo_processes_multi_page_tiff_and_clears_session() -> None:
     app = create_app(ControlledReader())
 
@@ -355,6 +410,27 @@ def test_demo_processes_multi_page_tiff_and_clears_session() -> None:
         assert 'id="panel-layout"' in index.text
         assert 'id="panel-processed"' in index.text
         assert 'id="panel-raw"' in index.text
+        assert 'id="composition-banner"' in index.text
+        assert 'aria-live="polite"' in index.text
+        assert "Custom local workbench" in index.text
+        assert "__OCR_COMPOSITION_JSON__" not in index.text
+
+        composition = client.get("/api/composition")
+        assert composition.status_code == 200
+        assert composition.json() == {
+            "id": "custom-local-workbench",
+            "label": "Custom local workbench",
+            "scope": "custom",
+            "primary_ocr": "controlled-reader",
+            "orientation": "not configured",
+            "tesseract_roles": [],
+            "stages": [],
+            "handwriting": "not configured",
+            "note": (
+                "Configuration only. This is not the full verified GPU pipeline; "
+                "readiness and execution are reported only after processing."
+            ),
+        }
 
         processed = client.post(
             "/api/process",
@@ -369,7 +445,13 @@ def test_demo_processes_multi_page_tiff_and_clears_session() -> None:
         assert payload["filename"] == "visit.tiff"
         assert payload["backend"] == "controlled-reader"
         assert payload["backend_version"] == "test-1"
+        assert payload["composition"] == composition.json()
         assert payload["pipeline_stages"] == []
+        assert payload["stage_execution"] == []
+        assert [run["page_number"] for run in payload["page_execution"]] == [1, 2]
+        assert all(run["execution_seconds"] >= 0 for run in payload["page_execution"])
+        assert all(run["queue_seconds"] >= 0 for run in payload["page_execution"])
+        assert all(run["batched_reader"] is False for run in payload["page_execution"])
         assert payload["elapsed_seconds"] >= 0
         assert set(payload["timing"]) == {
             "receive_seconds",
@@ -492,6 +574,20 @@ def test_demo_processes_multi_page_tiff_and_clears_session() -> None:
         assert example.status_code == 200
         assert example.headers["content-type"] == "application/pdf"
         assert example.content.startswith(b"%PDF")
+        assert example.headers["content-disposition"].startswith("inline;")
+        for example_name in (
+            "handwriting",
+            "academic-paper",
+            "code",
+            "photographed-table",
+            "multi-column-page",
+        ):
+            gallery_image = client.get(f"/api/examples/{example_name}")
+            assert gallery_image.status_code == 200
+            assert gallery_image.headers["content-type"] == "image/png"
+            assert gallery_image.headers["content-disposition"].startswith("inline;")
+            with Image.open(io.BytesIO(gallery_image.content)) as image:
+                image.verify()
         assert client.get("/api/examples/../../AGENTS.md").status_code == 404
         assert client.get("/api/examples/private-case").status_code == 404
 
@@ -511,8 +607,14 @@ def test_demo_processes_multi_page_tiff_and_clears_session() -> None:
         assert 'id="timing-card"' in index.text
         assert "function renderUncertainty()" in index.text
         assert "function renderCategories()" in index.text
-        assert "function renderTiming(timing)" in index.text
+        assert (
+            "function renderTiming(timing, pageExecution = [], stageExecution = [])"
+            in index.text
+        )
+        assert 'state.hiddenKinds.add("text")' in index.text
         assert 'state.hiddenKinds.add("table_candidate")' in index.text
+        assert "function normalPreviewRegion(region)" in index.text
+        assert '["table_candidate", "coverage_risk", "layout_block"]' in index.text
         assert 'textContent = "Loading page preview..."' in index.text
         assert (
             'setStatus(`${error.message}${cleanupFailed ? cleanupWarning : ""}`, true);'
@@ -579,9 +681,17 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     assert response.status_code == 200
     html = response.text
     assert html.count('class="tab" role="tab"') == 6
+    assert ">Readable draft</button>" not in html
     assert html.count("Not So Smart OCR") == 2
     assert "!SoSmartOCR" not in html
-    assert 'data-example="clinical-table">Clinical table</button>' in html
+    assert html.count('class="example-button" type="button" data-example=') == 6
+    assert 'data-example="clinical-table"' in html
+    assert 'data-example="handwriting"' in html
+    assert 'data-example="academic-paper"' in html
+    assert 'data-example="code"' in html
+    assert 'data-example="photographed-table"' in html
+    assert 'data-example="multi-column-page"' in html
+    assert html.count('class="example-preview"') == 6
     assert "Table-cell comparison" not in html
 
     assert 'id="client-timer" data-state="idle"' in html
@@ -595,15 +705,24 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
         'fetch("/api/process", { method: "POST", body })'
     )
     assert "stopClientTimer(timerOutcome);" in html
-    assert "Backend stage timing" in html
+    assert "Pipeline execution" in html
     assert '"Backend pipeline"' in html
     assert '["Preview queue", timing.preview_queue_seconds]' in html
     assert '["Preview processing", timing.preview_seconds]' in html
     assert '["OCR queue", timing.queue_seconds]' in html
     assert '["OCR pipeline", timing.pipeline_seconds]' in html
+    assert (
+        "function renderTiming(timing, pageExecution = [], stageExecution = [])" in html
+    )
+    assert "`Page ${run.page_number} total`" in html
+    assert "function stageExecutionDetail(run)" in html
+    assert ">Regions</button>" in html
 
     assert 'id="copy-json" type="button" data-copy-state="idle"' in html
+    assert "Copy API response JSON" in html
+    assert "Download result JSON" in html
     assert 'id="copy-status" role="status" aria-live="polite"' in html
+    assert html.count("JSON.stringify(state.response, null, 2)") == 2
     assert "navigator.clipboard.writeText(content)" in html
     assert "function copyTextWithTextarea(content)" in html
     assert 'document.execCommand("copy")' in html
@@ -637,6 +756,36 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     assert "function activateTab(tab)" in html
     assert "panel.hidden = !active" in html
     assert 'id="panel-layout" aria-labelledby="tab-layout" hidden' in html
+    assert (
+        "Canonical and review-relevant semantic regions are shown by default." in html
+    )
+    assert "Show all evidence regions" in html
+    assert (
+        "state.showAllRegions ? orderedRegions(page.regions) : displayRegions(page)"
+        in html
+    )
+    assert '["table", "figure", "control"].includes(semanticKind(region))' in html
+    assert (
+        'id="panel-raw" aria-labelledby="tab-raw" aria-describedby="raw-scope"' in html
+    )
+    assert ">Region JSON</button>" in html
+    assert "Final post-stage region JSON" in html
+    assert "This view contains page-numbered regions after all pipeline stages." in html
+    assert 'state.hiddenKinds.add("text")' in html
+    assert 'state.hiddenKinds.add("table_cell")' in html
+    assert 'state.hiddenKinds.add("table")' in html
+    assert 'if (kind === "table_cell") return kind;' in html
+    assert 'if (kind === "table") return "table bounds";' in html
+    assert 'if (kind === "table_cell") return "table cell bounds";' in html
+    assert "if (structural && index !== state.selectedOverlay) return;" in html
+    assert "if (!structural) {" in html
+    assert "Execution failures" in html
+    assert "Unresolved evidence and review flags" in html
+    assert "function reviewFlagSummary(page)" in html
+    assert (
+        'byId("download-json").href = '
+        "`/api/sessions/${payload.session_id}/result.json`;" in html
+    )
 
     assert "Evidence diagnostics" in html
     assert "Provider-reported" in html
@@ -645,6 +794,8 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     assert 'region?.structure?.role || ""' in html
     assert "block.dataset.sourceKind = group.sourceKind" in html
     assert 'region.text_provenance?.merge_level === "word"' in html
+    assert "function renderedLiteral(value, resolution)" in html
+    assert "appendEvidenceState" not in html
 
 
 def test_generated_table_example_runs_through_table_pipeline() -> None:
@@ -681,6 +832,8 @@ def test_generated_table_example_runs_through_table_pipeline() -> None:
         if region["kind"] == "table"
     ]
     assert payload["pipeline_stages"] == ["tables"]
+    assert payload["stage_execution"][0]["stage"] == "tables"
+    assert payload["stage_execution"][0]["status"] == "productive"
     assert len(tables) == 1
     assert tables[0]["structure"]["row_count"] == 5
     assert tables[0]["structure"]["column_count"] == 4
@@ -784,6 +937,21 @@ def test_demo_markup_links_controls_tabs_and_output_panels() -> None:
     assert ".workspace { grid-template-columns: 1fr; }" in response.text
 
 
+def test_demo_keeps_uncertainty_styling_out_of_rendered_controls() -> None:
+    app = create_app(ControlledReader())
+
+    with TestClient(app) as client:
+        html = client.get("/").text
+
+    assert ".semantic-block.control {" in html
+    assert "border-left: 3px solid var(--line-strong)" in html
+    assert '.semantic-block.control[data-resolution="unreadable"],' not in html
+    assert '.semantic-block.control[data-resolution="conflicting"] {' not in html
+    assert "box-shadow: inset 3px 0 var(--accent);" not in html
+    assert ".evidence-state" not in html
+    assert ".semantic-block.control, .semantic-block.handwriting" not in html
+
+
 def test_demo_prepares_each_page_once_for_ocr_and_preview(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -825,20 +993,84 @@ def test_demo_renders_structured_evidence_and_downloads_the_same_order() -> None
     assert markdown.index("| Name | Value |") < markdown.index("- [x] Fall risk")
     assert "flattened fallback" not in markdown
     assert markdown.count("Fall risk") == 1
-    assert "| Pulse | 72 |" in markdown
-    assert "**Conflicting table cell evidence (row 2, column 2)**" in markdown
-    assert "> Alternative evidence: 77" in markdown
-    assert "**Conflicting handwriting evidence**" in markdown
-    assert "> Alternative evidence: Return in 3 weeks" in markdown
+    assert "| Pulse |  |" in markdown
+    assert "Conflicting" not in markdown
+    assert "Alternative evidence" not in markdown
+    assert "Return in 2 weeks" not in markdown
+    handwriting = next(
+        region
+        for region in payload["result"]["pages"][0]["regions"]
+        if region["id"] == "handwriting"
+    )
+    assert handwriting["text"] == "Return in 2 weeks"
+    assert handwriting["alternatives"][0]["text"] == "Return in 3 weeks"
 
     assert "function displayRegions(page)" in html
     assert 'document.createElement("table")' in html
     assert 'table.className = "document-table"' in html
     assert "element.rowSpan = rowSpan" in html
     assert "element.colSpan = columnSpan" in html
-    assert "appendEvidenceState(element, resolution, cell.alternatives)" in html
-    assert 'block.dataset.resolution = group.region.resolution || "resolved"' in html
+    assert "appendEvidenceState" not in html
+    assert 'unreadable: "no reading recovered"' not in html
+    assert 'conflicting: "conflicting readings"' not in html
+    assert (
+        'block.dataset.resolution = group.region.resolution || "resolved"' not in html
+    )
     assert "function sameTextLine(first, second)" in html
+
+
+def test_rendered_markdown_keeps_selected_literals_and_blanks_empty_uncertainty() -> (
+    None
+):
+    regions = [
+        {
+            "id": "field",
+            "kind": "form_field",
+            "text": "state uncertain",
+            "reading_order": 1,
+            "resolution": "unreadable",
+            "structure": {"role": "field", "label": "Name"},
+        },
+        {
+            "id": "table",
+            "kind": "table",
+            "text": "fallback",
+            "reading_order": 2,
+            "resolution": "resolved",
+            "structure": {
+                "role": "table",
+                "row_count": 1,
+                "column_count": 2,
+                "cells": [
+                    {
+                        "id": "selected",
+                        "text": "72",
+                        "row_nums": [0],
+                        "column_nums": [0],
+                        "resolution": "conflicting",
+                        "alternatives": [{"text": "77"}],
+                    },
+                    {
+                        "id": "empty",
+                        "text": "unreadable evidence",
+                        "row_nums": [0],
+                        "column_nums": [1],
+                        "resolution": "unreadable",
+                    },
+                ],
+            },
+        },
+    ]
+
+    cleaned = demo_module._clean_render_regions(regions)
+    markdown = render_page_markdown(cleaned, ["field", "table"])
+
+    assert "72" not in markdown
+    assert "77" not in markdown
+    assert "uncertain" not in markdown.casefold()
+    assert "unreadable" not in markdown.casefold()
+    assert cleaned[0]["text"] == ""
+    assert cleaned[1]["structure"]["cells"][1]["text"] == ""
 
 
 def test_markdown_preserves_physical_rows_and_literal_table_characters() -> None:
@@ -855,13 +1087,16 @@ def test_markdown_preserves_physical_rows_and_literal_table_characters() -> None
                 "column_count": 2,
                 "cells": [
                     {"text": r"A\|B", "row_nums": [0], "column_nums": [0]},
+                    {"text": "", "row_nums": [0], "column_nums": [1]},
                     {"text": "first", "row_nums": [1], "column_nums": [0]},
+                    {"text": "", "row_nums": [1], "column_nums": [1]},
                     {
                         "text": "Subsection",
                         "row_nums": [2],
                         "column_nums": [0],
                         "projected_row_header": True,
                     },
+                    {"text": "", "row_nums": [2], "column_nums": [1]},
                 ],
             },
         }
@@ -1059,6 +1294,1944 @@ def test_demo_reports_evidence_uncertainty_without_changing_result_schema() -> N
         }
 
 
+def test_demo_adds_review_only_local_page_presentation_without_replacing_evidence() -> (
+    None
+):
+    app = create_app(
+        ReviewEvidenceReader(),
+        presentation_reader=PresentationReader(),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+        html = client.get("/").text
+
+    page = payload["result"]["pages"][0]
+    assert page["text"]["value"] == "Primary text Value | Value |\n| --- |\n| 42 |"
+    assert "presentation" not in page
+    assert payload["presentation"] == {
+        "schema_version": 2,
+        "pages": [
+            {
+                "page_number": 1,
+                "status": "review_draft",
+                "provider": "local-page-presenter",
+                "blocks": [
+                    {
+                        "id": "page-1-presentation",
+                        "reading_order": 1,
+                        "category": "plain",
+                        "bbox": {
+                            "left": 0,
+                            "top": 0,
+                            "right": 120,
+                            "bottom": 80,
+                        },
+                        "raw_text": (
+                            "# Visit summary\n\n| Field | Value |\n"
+                            "| --- | --- |\n| Name | Ana |"
+                        ),
+                        "provider": "local-page-presenter",
+                        "provenance": {"model": {"id": "local-test-model"}},
+                        "rendering": {
+                            "status": "canonical_fallback",
+                            "reason": "missing_source_region",
+                        },
+                        "validation": {
+                            "status": "passed",
+                            "failures": [],
+                            "termination_observed": False,
+                        },
+                    }
+                ],
+                "validation": {
+                    "status": "passed",
+                    "failures": [],
+                    "termination_observed": False,
+                },
+                "canonical_unchanged": True,
+            }
+        ],
+    }
+    assert payload["timing"]["pipeline_steps"]["stage.presentation"] >= 0
+    assert "Primary text" in markdown
+    assert "# Visit summary" not in markdown
+    assert 'id="tab-presentation"' not in html
+    assert 'id="panel-presentation"' not in html
+    assert "function renderRendered(pages, presentations)" in html
+    assert "function renderPresentationMarkdown(markdown)" in html
+    assert "Structured presentation" in html
+
+
+def test_demo_does_not_run_page_presenter_on_clear_page() -> None:
+    class UnexpectedPresentationReader(PresentationReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            raise AssertionError(
+                "clear pages must not be sent to the presentation model"
+            )
+
+    app = create_app(
+        ControlledReader(),
+        presentation_reader=UnexpectedPresentationReader(),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("clear.png", _page_png(), "image/png")},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    page = payload["result"]["pages"][0]
+    assert "presentation" not in page
+    assert payload["presentation"] == {"schema_version": 2, "pages": []}
+
+
+def test_demo_preserves_and_validates_category_routed_presentation_blocks() -> None:
+    class ResolvedReviewEvidenceReader(ReviewEvidenceReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            regions = super().read(image_path, page_number)
+            handwriting = next(
+                region for region in regions if region.id == "handwriting"
+            )
+            handwriting.resolution = "resolved"
+            handwriting.text = "a / b"
+            table = next(region for region in regions if region.id == "table")
+            table.structure["cells"] = []  # type: ignore[index]
+            return regions
+
+    class StructuredPresentationReader:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            return [
+                TextRegion(
+                    id="formula",
+                    kind="page_text",
+                    text=r"\frac{a}{b}",
+                    confidence=None,
+                    bounding_box=BoundingBox(5, 45, 115, 75),
+                    reading_order=3,
+                    provider=self.name,
+                    text_provenance={
+                        "generation": {"category": "formula"},
+                        "model": {"id": "tiiuae/Falcon-OCR"},
+                        "source_region_id": "handwriting",
+                    },
+                ),
+                TextRegion(
+                    id="title",
+                    kind="page_text",
+                    text="Primary text",
+                    confidence=None,
+                    bounding_box=BoundingBox(5, 2, 115, 15),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "title"},
+                    text_provenance={"source_region_id": "paragraph"},
+                ),
+                TextRegion(
+                    id="table",
+                    kind="page_text",
+                    text=(
+                        "<table><thead><tr><th>Value</th></tr></thead>"
+                        "<tbody><tr><td>■ 42</td></tr></tbody></table>"
+                    ),
+                    confidence=None,
+                    bounding_box=BoundingBox(5, 16, 115, 44),
+                    reading_order=2,
+                    provider=self.name,
+                    structure={"category": "table"},
+                    text_provenance={"source_region_id": "table"},
+                ),
+            ]
+
+    app = create_app(
+        ResolvedReviewEvidenceReader(),
+        presentation_reader=StructuredPresentationReader(),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        html = client.get("/").text
+        markdown = client.get(
+            f"/api/sessions/{response.json()['session_id']}/result.md"
+        ).text
+
+    assert response.status_code == 200
+    payload = response.json()
+    page = payload["result"]["pages"][0]
+    presentation = payload["presentation"]["pages"][0]
+    assert payload["presentation"]["schema_version"] == 2
+    assert "presentation" not in page
+    assert page["text"]["value"] == (
+        "Primary text Value a / b | Value |\n| --- |\n| 42 |"
+    )
+    assert presentation["canonical_unchanged"] is True
+    assert presentation["validation"] == {
+        "status": "passed",
+        "failures": [],
+        "termination_observed": False,
+    }
+    assert [block["id"] for block in presentation["blocks"]] == [
+        "title",
+        "table",
+        "formula",
+    ]
+    assert [block["category"] for block in presentation["blocks"]] == [
+        "title",
+        "table",
+        "formula",
+    ]
+    assert presentation["blocks"][1]["raw_text"].startswith("<table>")
+    assert presentation["blocks"][2]["raw_text"] == r"\frac{a}{b}"
+    assert [block["rendering"]["status"] for block in presentation["blocks"]] == [
+        "selected",
+        "selected",
+        "selected",
+    ]
+    assert all(
+        block["validation"]["termination_observed"] is False
+        for block in presentation["blocks"]
+    )
+    assert "function renderSafePresentationTable(rawText)" in html
+    assert 'new DOMParser().parseFromString(rawText, "text/html")' in html
+    assert "clone.append(document.createTextNode(child.textContent))" in html
+    assert "window.katex.render(rawText, formula" in html
+    assert "Local KaTeX is unavailable" in html
+    assert "function usablePresentation(presentation)" in html
+    assert "usableFalconPresentation" not in html
+    assert "function renderStructuredPresentation(page, presentation)" in html
+    assert "function renderPresentationFallback(regions)" in html
+    assert "Presentation validation failed:" not in html
+    assert "Rendered with validated Falcon-OCR review blocks" not in markdown
+    assert markdown.count("Primary text") == 1
+    assert "Primary text" in markdown
+    assert r"\frac{a}{b}" in markdown
+    assert "<td>■ 42</td>" in markdown
+    assert "innerHTML" not in html
+
+
+def test_demo_rejects_unrelated_structured_presentation_content() -> None:
+    class ResolvedStructuredReader(ReviewEvidenceReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            regions = super().read(image_path, page_number)
+            next(
+                region for region in regions if region.id == "paragraph"
+            ).confidence = 0.8
+            table = next(region for region in regions if region.id == "table")
+            table.confidence = None
+            table.structure["cells"] = []  # type: ignore[index]
+            return regions
+
+    class UnrelatedStructuredPresenter:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="table-output",
+                    kind="page_text",
+                    text="<table><tr><td>Ana</td></tr></table>",
+                    confidence=None,
+                    bounding_box=BoundingBox(52, 0, 110, 46),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "table"},
+                    text_provenance={"source_region_id": "table"},
+                ),
+                TextRegion(
+                    id="formula-output",
+                    kind="page_text",
+                    text=r"\frac{x}{y}",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 50, 10),
+                    reading_order=2,
+                    provider=self.name,
+                    structure={"category": "formula"},
+                    text_provenance={"source_region_id": "paragraph"},
+                ),
+            ]
+
+    app = create_app(
+        ResolvedStructuredReader(),
+        presentation_reader=UnrelatedStructuredPresenter(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    blocks = payload["presentation"]["pages"][0]["blocks"]
+    assert all(block["rendering"]["reason"] == "validation_failed" for block in blocks)
+    assert all(
+        block["validation"]["failures"][0]["code"] == "source_evidence_omitted"
+        for block in blocks
+    )
+    assert "Ana" not in markdown
+    assert r"\frac{x}{y}" not in markdown
+
+
+def test_demo_rejects_additive_structured_presentation_content() -> None:
+    class ResolvedStructuredReader(ReviewEvidenceReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            regions = super().read(image_path, page_number)
+            formula = next(region for region in regions if region.id == "handwriting")
+            formula.text = "a / b"
+            formula.resolution = "resolved"
+            table = next(region for region in regions if region.id == "table")
+            table.structure["cells"] = []  # type: ignore[index]
+            return regions
+
+    class AdditiveStructuredPresenter:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="table-output",
+                    kind="page_text",
+                    text=(
+                        "<table><tr><th>Value</th></tr><tr><td>42</td></tr>"
+                        "<tr><td>Diagnosis</td><td>Flu</td></tr></table>"
+                    ),
+                    confidence=None,
+                    bounding_box=BoundingBox(52, 0, 110, 46),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "table"},
+                    text_provenance={"source_region_id": "table"},
+                ),
+                TextRegion(
+                    id="formula-output",
+                    kind="page_text",
+                    text=r"\frac{a}{b} + \frac{x}{y}",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 24, 50, 34),
+                    reading_order=2,
+                    provider=self.name,
+                    structure={"category": "formula"},
+                    text_provenance={"source_region_id": "handwriting"},
+                ),
+            ]
+
+    app = create_app(
+        ResolvedStructuredReader(),
+        presentation_reader=AdditiveStructuredPresenter(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    blocks = payload["presentation"]["pages"][0]["blocks"]
+    assert all(block["rendering"]["reason"] == "validation_failed" for block in blocks)
+    assert all(
+        any(
+            failure["code"] == "unsupported_generated_content"
+            for failure in block["validation"]["failures"]
+        )
+        for block in blocks
+    )
+    assert "Diagnosis" not in markdown
+    assert "Flu" not in markdown
+    assert r"\frac{x}{y}" not in markdown
+
+
+def test_demo_rejects_generated_content_for_empty_structured_evidence() -> None:
+    class EmptyStructuredReader(ControlledReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="empty-table",
+                    kind="table",
+                    text="",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 110, 46),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"role": "table", "cells": []},
+                )
+            ]
+
+    class FabricatedTablePresenter:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="table-output",
+                    kind="page_text",
+                    text=("<table><tr><td>Diagnosis</td><td>Flu</td></tr></table>"),
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 110, 46),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "table"},
+                    text_provenance={"source_region_id": "empty-table"},
+                )
+            ]
+
+    app = create_app(
+        EmptyStructuredReader(),
+        presentation_reader=FabricatedTablePresenter(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    block = payload["presentation"]["pages"][0]["blocks"][0]
+    assert block["rendering"] == {
+        "status": "canonical_fallback",
+        "reason": "validation_failed",
+        "source_region_id": "empty-table",
+    }
+    assert any(
+        failure["code"] == "unsupported_generated_content"
+        for failure in block["validation"]["failures"]
+    )
+    assert "Diagnosis" not in markdown
+    assert "Flu" not in markdown
+
+
+def test_demo_rejects_partial_structured_presentation_content() -> None:
+    class StructuredReader(ControlledReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="table",
+                    kind="table",
+                    text="Name Ada Allergy Penicillin Active",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 110, 46),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"role": "table", "cells": []},
+                ),
+                TextRegion(
+                    id="formula",
+                    kind="formula",
+                    text="a b c d e",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 48, 110, 70),
+                    reading_order=2,
+                    provider=self.name,
+                ),
+                TextRegion(
+                    id="risk",
+                    kind="coverage_risk",
+                    text="",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 120, 80),
+                    reading_order=3,
+                    provider="deterministic-evidence-risk",
+                    resolution="unreadable",
+                    structure={
+                        "role": "coverage_risk",
+                        "reasons": ["low_mean_confidence"],
+                    },
+                ),
+            ]
+
+    class PartialStructuredPresenter:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="table-output",
+                    kind="page_text",
+                    text=(
+                        "<table><tr><td>Name</td><td>Ada</td></tr>"
+                        "<tr><td>Allergy</td><td>Active</td></tr></table>"
+                    ),
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 110, 46),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "table"},
+                    text_provenance={"source_region_id": "table"},
+                ),
+                TextRegion(
+                    id="formula-output",
+                    kind="page_text",
+                    text="a+b+c+d",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 48, 110, 70),
+                    reading_order=2,
+                    provider=self.name,
+                    structure={"category": "formula"},
+                    text_provenance={"source_region_id": "formula"},
+                ),
+            ]
+
+    app = create_app(
+        StructuredReader(),
+        presentation_reader=PartialStructuredPresenter(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    blocks = payload["presentation"]["pages"][0]["blocks"]
+    assert all(block["rendering"]["reason"] == "validation_failed" for block in blocks)
+    assert all(
+        any(
+            failure["code"] == "source_evidence_omitted"
+            for failure in block["validation"]["failures"]
+        )
+        for block in blocks
+    )
+    assert "Name Ada Allergy Penicillin Active" in markdown
+    assert "a b c d e" in markdown
+
+
+@pytest.mark.parametrize(
+    ("generated_table", "expected_status"),
+    [
+        (
+            "<table><tr><td>Name</td><td>Ada</td></tr>"
+            "<tr><td>Diagnosis</td><td>Flu</td></tr></table>",
+            "selected",
+        ),
+        (
+            "<table><tr><td>Name</td><td>Flu</td></tr>"
+            "<tr><td>Diagnosis</td><td>Ada</td></tr></table>",
+            "canonical_fallback",
+        ),
+    ],
+)
+def test_demo_preserves_table_field_associations(
+    generated_table: str, expected_status: str
+) -> None:
+    class TableReader(ReviewEvidenceReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            regions = super().read(image_path, page_number)
+            table = next(region for region in regions if region.id == "table")
+            table.text = "Name Ada Diagnosis Flu"
+            table.structure["cells"] = []  # type: ignore[index]
+            return regions
+
+    class TablePresenter:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="table-output",
+                    kind="page_text",
+                    text=generated_table,
+                    confidence=None,
+                    bounding_box=BoundingBox(52, 0, 110, 46),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "table"},
+                    text_provenance={"source_region_id": "table"},
+                )
+            ]
+
+    app = create_app(
+        TableReader(),
+        presentation_reader=TablePresenter(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    block = payload["presentation"]["pages"][0]["blocks"][0]
+    assert block["rendering"]["status"] == expected_status
+    if expected_status == "selected":
+        assert "table_structure_changed" not in {
+            failure["code"] for failure in block["validation"]["failures"]
+        }
+        assert "<td>Ada</td>" in markdown
+        return
+    assert any(
+        failure["code"] == "table_structure_changed"
+        for failure in block["validation"]["failures"]
+    )
+    assert "Name Ada Diagnosis Flu" in markdown
+
+
+@pytest.mark.parametrize(
+    "generated_formula", ["a * b", "a + b", "a - b", "b / a", "a / (b+c)"]
+)
+def test_demo_rejects_formula_semantic_changes(generated_formula: str) -> None:
+    class ResolvedFormulaReader(ReviewEvidenceReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            regions = super().read(image_path, page_number)
+            formula = next(region for region in regions if region.id == "handwriting")
+            formula.text = "a / b"
+            formula.resolution = "resolved"
+            return regions
+
+    class ChangedFormulaPresenter:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="formula-output",
+                    kind="page_text",
+                    text=generated_formula,
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 24, 50, 34),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "formula"},
+                    text_provenance={"source_region_id": "handwriting"},
+                )
+            ]
+
+    app = create_app(
+        ResolvedFormulaReader(),
+        presentation_reader=ChangedFormulaPresenter(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    block = payload["presentation"]["pages"][0]["blocks"][0]
+    assert block["rendering"]["reason"] == "validation_failed"
+    assert any(
+        failure["code"] == "formula_semantics_changed"
+        for failure in block["validation"]["failures"]
+    )
+    assert f"$$\n{generated_formula}\n$$" not in markdown
+
+
+def test_demo_accepts_equivalent_fraction_presentation() -> None:
+    class ResolvedFormulaReader(ReviewEvidenceReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            regions = super().read(image_path, page_number)
+            formula = next(region for region in regions if region.id == "handwriting")
+            formula.text = "a / b"
+            formula.resolution = "resolved"
+            return regions
+
+    class EquivalentFormulaPresenter:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="formula-output",
+                    kind="page_text",
+                    text=r"\frac{a}{b}",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 24, 50, 34),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "formula"},
+                    text_provenance={"source_region_id": "handwriting"},
+                )
+            ]
+
+    app = create_app(
+        ResolvedFormulaReader(),
+        presentation_reader=EquivalentFormulaPresenter(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    block = payload["presentation"]["pages"][0]["blocks"][0]
+    assert block["rendering"]["status"] == "selected"
+    assert "formula_semantics_changed" not in {
+        failure["code"] for failure in block["validation"]["failures"]
+    }
+    assert r"\frac{a}{b}" in markdown
+
+
+@pytest.mark.parametrize("generated_formula", ["a / (b", "a / [b"])
+def test_demo_rejects_unclosed_formula_groups(generated_formula: str) -> None:
+    class ResolvedFormulaReader(ReviewEvidenceReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            regions = super().read(image_path, page_number)
+            formula = next(region for region in regions if region.id == "handwriting")
+            formula.text = "a / (b)"
+            formula.resolution = "resolved"
+            return regions
+
+    class MalformedFormulaPresenter:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="formula-output",
+                    kind="page_text",
+                    text=generated_formula,
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 24, 50, 34),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "formula"},
+                    text_provenance={"source_region_id": "handwriting"},
+                )
+            ]
+
+    app = create_app(
+        ResolvedFormulaReader(),
+        presentation_reader=MalformedFormulaPresenter(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    block = payload["presentation"]["pages"][0]["blocks"][0]
+    assert block["rendering"]["reason"] == "validation_failed"
+    assert any(
+        failure["code"] == "unbalanced_formula_groups"
+        for failure in block["validation"]["failures"]
+    )
+    assert f"$$\n{generated_formula}\n$$" not in markdown
+
+
+def test_demo_rejected_alternative_cannot_authorize_a_changed_dosage() -> None:
+    class DosageReader(ControlledReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="dosage",
+                    kind="paragraph",
+                    text="Take 10 mg daily with food for seven days",
+                    confidence=0.99,
+                    bounding_box=BoundingBox(0, 0, 110, 20),
+                    reading_order=1,
+                    provider=self.name,
+                    alternatives=[
+                        TextAlternative("Take 100 mg daily", 0.8, "challenger")
+                    ],
+                )
+            ]
+
+    class DosagePresenter:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="dosage-output",
+                    kind="page_text",
+                    text="Take 100 mg daily with food for seven days",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 110, 20),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "text"},
+                    text_provenance={"source_region_id": "dosage"},
+                )
+            ]
+
+    app = create_app(DosageReader(), presentation_reader=DosagePresenter())
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("dose.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    [block] = payload["presentation"]["pages"][0]["blocks"]
+    assert block["rendering"]["reason"] == "validation_failed"
+    assert block["validation"]["failures"][0]["code"] == ("unsupported_critical_token")
+    assert "Take 10 mg" in markdown
+    assert "Take 100 mg" not in markdown
+
+
+def test_demo_presentation_cannot_synthesize_checkbox_state() -> None:
+    class ProseReader(ControlledReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="allergy",
+                    kind="paragraph",
+                    text="Allergy aspirin",
+                    confidence=0.99,
+                    bounding_box=BoundingBox(0, 0, 110, 20),
+                    reading_order=1,
+                    provider=self.name,
+                ),
+                TextRegion(
+                    id="risk",
+                    kind="coverage_risk",
+                    text="",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 120, 80),
+                    reading_order=2,
+                    provider="deterministic-evidence-risk",
+                    resolution="unreadable",
+                    structure={"role": "coverage_risk"},
+                ),
+            ]
+
+    class ChecklistPresenter:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="allergy-output",
+                    kind="page_text",
+                    text="- [x] Allergy aspirin",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 110, 20),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "text"},
+                    text_provenance={"source_region_id": "allergy"},
+                )
+            ]
+
+    app = create_app(ProseReader(), presentation_reader=ChecklistPresenter())
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("allergy.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+        html = client.get("/").text
+
+    [block] = payload["presentation"]["pages"][0]["blocks"]
+    assert block["rendering"]["reason"] == "validation_failed"
+    assert block["validation"]["failures"][0]["code"] == ("unsupported_control_syntax")
+    assert "[x]" not in markdown
+    assert "☑" not in markdown
+    assert "const control = line.match(/^-" not in html
+
+
+def test_demo_keeps_generated_text_out_of_unresolved_evidence() -> None:
+    class UnresolvedPresentationReader:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="generated-handwriting",
+                    kind="page_text",
+                    text="Metformin 500 mg",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 24, 50, 34),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "text"},
+                    text_provenance={"source_region_id": "handwriting"},
+                ),
+                TextRegion(
+                    id="generated-table",
+                    kind="page_text",
+                    text="<table><tr><td>43</td></tr></table>",
+                    confidence=None,
+                    bounding_box=BoundingBox(52, 0, 110, 46),
+                    reading_order=2,
+                    provider=self.name,
+                    structure={"category": "table"},
+                    text_provenance={"source_region_id": "table"},
+                ),
+            ]
+
+    app = create_app(
+        ReviewEvidenceReader(),
+        presentation_reader=UnresolvedPresentationReader(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    assert response.status_code == 200
+    assert [
+        block["rendering"] for block in payload["presentation"]["pages"][0]["blocks"]
+    ] == [
+        {
+            "status": "canonical_fallback",
+            "reason": "source_evidence_unresolved",
+            "source_region_id": "handwriting",
+        },
+        {
+            "status": "canonical_fallback",
+            "reason": "source_evidence_unresolved",
+            "source_region_id": "table",
+        },
+    ]
+    assert "Metformin 500 mg" not in markdown
+    assert "<td>43</td>" not in markdown
+    assert payload["presentation"]["pages"][0]["blocks"][0]["raw_text"] == (
+        "Metformin 500 mg"
+    )
+
+
+def test_demo_selects_verified_image_grounded_table_recovery() -> None:
+    class VerifiedFalconPresenter:
+        name = "falcon-presentation"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="generated-table",
+                    kind="table",
+                    text=(
+                        "<table><thead><tr><th>Value</th></tr></thead>"
+                        "<tbody><tr><td>42</td></tr></tbody></table>"
+                    ),
+                    confidence=None,
+                    bounding_box=BoundingBox(52, 0, 110, 46),
+                    reading_order=2,
+                    provider=self.name,
+                    structure={"category": "table"},
+                    text_provenance={
+                        "method": "falcon_core_category_crop_generation",
+                        "source_region_id": "table",
+                        "model": {
+                            "id": "tiiuae/Falcon-OCR",
+                            "loaded_from": "/models/falcon-ocr",
+                            "revision": ("42ec56b72a23984ac059e7c8a6d397a8529423fe"),
+                            "origin": "TII, UAE",
+                            "license": "Apache-2.0",
+                            "identity_verified": True,
+                            "local_files_only": True,
+                        },
+                    },
+                )
+            ]
+
+    app = create_app(
+        ReviewEvidenceReader(),
+        presentation_reader=VerifiedFalconPresenter(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    [block] = payload["presentation"]["pages"][0]["blocks"]
+    assert block["rendering"] == {
+        "status": "selected",
+        "source_region_id": "table",
+    }
+    assert "<td>42</td>" in markdown
+
+
+@pytest.mark.parametrize(
+    ("generated_table", "expected_status", "expected_failure"),
+    [
+        (
+            "<table><tr><th>Organization Name</th><th>Year</th></tr>"
+            "<tr><td>Alpha Medical Center</td><td>2024</td></tr></table>",
+            "selected",
+            None,
+        ),
+        (
+            "<table><tr><th>Organization Name</th><th>Year</th></tr></table>",
+            "canonical_fallback",
+            "table_topology_mismatch",
+        ),
+        (
+            "<table><tr><th>Organization Name</th></tr>"
+            "<tr><td>Alpha Medical Center</td></tr></table>",
+            "canonical_fallback",
+            "table_topology_mismatch",
+        ),
+        (
+            "<table><tr><th>Organization Name</th><th>Year</th></tr>"
+            "<tr><td>Alpha Medical Center</td><td>2025</td></tr></table>",
+            "canonical_fallback",
+            "unsupported_critical_token",
+        ),
+        (
+            "<table><tr><th>Organization Name</th><th>Year</th></tr>"
+            "<tr><td>Alpha</td><td>2024</td></tr></table>",
+            "canonical_fallback",
+            "source_evidence_omitted",
+        ),
+        (
+            "<table><tr><th>Organization Name</th><th>Year</th></tr>"
+            "<tr><td>2024</td><td>Alpha Medical Center</td></tr></table>",
+            "canonical_fallback",
+            "table_cell_association_changed",
+        ),
+    ],
+)
+def test_demo_arbitrates_verified_falcon_tables_against_canonical_structure(
+    generated_table: str,
+    expected_status: str,
+    expected_failure: str | None,
+) -> None:
+    class CanonicalTableReader:
+        name = "canonical-table-reader"
+        version = "test-1"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            cells = [
+                {
+                    "text": "Organization Name",
+                    "row_nums": [0],
+                    "column_nums": [0],
+                    "column_header": True,
+                    "resolution": "resolved",
+                },
+                {
+                    "text": "Year",
+                    "row_nums": [0],
+                    "column_nums": [1],
+                    "column_header": True,
+                    "resolution": "resolved",
+                },
+                {
+                    "text": "Alpha Medical Center",
+                    "row_nums": [1],
+                    "column_nums": [0],
+                    "resolution": "conflicting",
+                },
+                {
+                    "text": "2024",
+                    "row_nums": [1],
+                    "column_nums": [1],
+                    "resolution": "resolved",
+                },
+            ]
+            return [
+                TextRegion(
+                    id="table",
+                    kind="table",
+                    text=(
+                        "| Organization Name | Year |\n| --- | --- |\n"
+                        "| Alpha Medical Center | 2024 |"
+                    ),
+                    confidence=0.91,
+                    bounding_box=BoundingBox(0, 0, 120, 60),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={
+                        "role": "table",
+                        "row_count": 2,
+                        "column_count": 2,
+                        "cells": cells,
+                    },
+                ),
+                TextRegion(
+                    id="risk",
+                    kind="coverage_risk",
+                    text="",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 120, 80),
+                    reading_order=2,
+                    provider="deterministic-evidence-risk",
+                    resolution="unreadable",
+                    structure={
+                        "role": "coverage_risk",
+                        "reasons": ["table_cell_conflict"],
+                    },
+                ),
+            ]
+
+    class VerifiedFalconPresenter:
+        name = "falcon-presentation"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="generated-table",
+                    kind="table",
+                    text=generated_table,
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 120, 60),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "table"},
+                    text_provenance={
+                        "method": "falcon_core_category_crop_generation",
+                        "source_region_id": "table",
+                        "model": {
+                            "id": "tiiuae/Falcon-OCR",
+                            "loaded_from": "/models/falcon-ocr",
+                            "revision": ("42ec56b72a23984ac059e7c8a6d397a8529423fe"),
+                            "origin": "TII, UAE",
+                            "license": "Apache-2.0",
+                            "identity_verified": True,
+                            "local_files_only": True,
+                        },
+                    },
+                )
+            ]
+
+    app = create_app(
+        CanonicalTableReader(),
+        presentation_reader=VerifiedFalconPresenter(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("table.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    [block] = payload["presentation"]["pages"][0]["blocks"]
+    assert block["raw_text"] == generated_table
+    assert block["rendering"]["status"] == expected_status
+    failure_codes = {failure["code"] for failure in block["validation"]["failures"]}
+    if expected_failure is None:
+        assert failure_codes == set()
+        assert "<td>Alpha Medical Center</td>" in markdown
+    else:
+        assert expected_failure in failure_codes
+        assert generated_table not in markdown
+
+
+def test_presentation_canonical_table_text_uses_each_cell_once() -> None:
+    source = TextRegion(
+        id="table",
+        kind="table",
+        text="| Name | Year |\n| --- | --- |\n| Alpha | 2024 |",
+        confidence=0.9,
+        bounding_box=BoundingBox(0, 0, 120, 60),
+        reading_order=1,
+        provider="table-reader",
+        structure={
+            "role": "table",
+            "row_count": 2,
+            "column_count": 2,
+            "child_evidence_ids": ["name", "year", "alpha", "2024"],
+            "cells": [
+                {"text": "Name", "row_nums": [0], "column_nums": [0]},
+                {"text": "Year", "row_nums": [0], "column_nums": [1]},
+                {"text": "Alpha", "row_nums": [1], "column_nums": [0]},
+                {"text": "2024", "row_nums": [1], "column_nums": [1]},
+            ],
+        },
+    )
+    evidence = [
+        TextRegion(
+            id=region_id,
+            kind="table_cell",
+            text=text,
+            confidence=0.9,
+            bounding_box=BoundingBox(index * 10, 0, index * 10 + 9, 10),
+            reading_order=index,
+            provider="table-reader",
+        )
+        for index, (region_id, text) in enumerate(
+            (("name", "Name"), ("year", "Year"), ("alpha", "Alpha"), ("2024", "2024")),
+            start=1,
+        )
+    ]
+
+    assert demo_module._presentation_canonical_text(source, evidence) == (
+        "Name Year Alpha 2024"
+    )
+
+
+def test_demo_rejects_unsupported_control_from_verified_table_recovery() -> None:
+    class VerifiedFalconPresenter:
+        name = "falcon-presentation"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="generated-table",
+                    kind="table",
+                    text="<table><tr><td>☑ Value</td></tr></table>",
+                    confidence=None,
+                    bounding_box=BoundingBox(52, 0, 110, 46),
+                    reading_order=2,
+                    provider=self.name,
+                    structure={"category": "table"},
+                    text_provenance={
+                        "method": "falcon_core_category_crop_generation",
+                        "source_region_id": "table",
+                        "model": {
+                            "id": "tiiuae/Falcon-OCR",
+                            "loaded_from": "/models/falcon-ocr",
+                            "revision": ("42ec56b72a23984ac059e7c8a6d397a8529423fe"),
+                            "origin": "TII, UAE",
+                            "license": "Apache-2.0",
+                            "identity_verified": True,
+                            "local_files_only": True,
+                        },
+                    },
+                )
+            ]
+
+    app = create_app(
+        ReviewEvidenceReader(),
+        presentation_reader=VerifiedFalconPresenter(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    [block] = payload["presentation"]["pages"][0]["blocks"]
+    assert block["rendering"]["reason"] == "validation_failed"
+    assert {failure["code"] for failure in block["validation"]["failures"]} == {
+        "unsupported_control_glyph"
+    }
+    assert "☑ Value" not in markdown
+
+
+def test_demo_composes_only_top_level_layout_evidence() -> None:
+    class LayoutReader:
+        name = "layout-reader"
+
+        def __init__(self, *, unresolved_child: bool = False) -> None:
+            self.unresolved_child = unresolved_child
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            words = [
+                ("a", "Clinical", (10, 10, 45, 20)),
+                ("b", "summary", (50, 10, 90, 20)),
+                ("c", "continues", (10, 24, 55, 34)),
+                ("d", "here.", (60, 24, 90, 34)),
+            ]
+            return [
+                TextRegion(
+                    id=identifier,
+                    kind="word",
+                    text=text,
+                    confidence=0.9,
+                    bounding_box=BoundingBox(*box),
+                    reading_order=order,
+                    provider=self.name,
+                    resolution=(
+                        "conflicting"
+                        if self.unresolved_child and identifier == "b"
+                        else "resolved"
+                    ),
+                    alternatives=(
+                        [TextAlternative("alternate", 0.8, "challenger")]
+                        if identifier == "a"
+                        else []
+                    ),
+                )
+                for order, (identifier, text, box) in enumerate(words, start=1)
+            ]
+
+    class LayoutPresentationReader:
+        name = "falcon-review"
+
+        def __init__(self, *, use_child: bool = False) -> None:
+            self.use_child = use_child
+
+        def read_page(
+            self,
+            image_path: Path,
+            page: PageResult,
+        ) -> list[TextRegion]:
+            del image_path
+            owner = next(
+                region
+                for region in page.regions
+                if (region.structure or {}).get("role") == "layout_block"
+            )
+            source_id = "b" if self.use_child else owner.id
+            return [
+                TextRegion(
+                    id="presentation",
+                    kind="page_text",
+                    text="# Clinical summary continues here.",
+                    confidence=None,
+                    bounding_box=owner.bounding_box,
+                    reading_order=owner.reading_order,
+                    provider=self.name,
+                    structure={"category": "text"},
+                    text_provenance={"source_region_id": source_id},
+                )
+            ]
+
+    selected_app = create_app(
+        LayoutReader(),
+        stages=(EvidenceLayoutStage(),),
+        presentation_reader=LayoutPresentationReader(),
+    )
+    with TestClient(selected_app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("layout.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    [selected] = payload["presentation"]["pages"][0]["blocks"]
+    assert selected["rendering"]["status"] == "selected"
+    assert markdown.count("Clinical summary continues here.") == 1
+    assert all(
+        markdown.count(word) == 1
+        for word in ("Clinical", "summary", "continues", "here.")
+    )
+
+    for reader, reason in (
+        (LayoutReader(unresolved_child=True), "source_evidence_unresolved"),
+        (LayoutReader(), "source_is_owned_by_layout"),
+    ):
+        use_child = reason == "source_is_owned_by_layout"
+        app = create_app(
+            reader,
+            stages=(EvidenceLayoutStage(),),
+            presentation_reader=LayoutPresentationReader(use_child=use_child),
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/process",
+                files={"file": ("layout.png", _page_png(), "image/png")},
+            )
+            payload = response.json()
+            markdown = client.get(
+                f"/api/sessions/{payload['session_id']}/result.md"
+            ).text
+
+        [block] = payload["presentation"]["pages"][0]["blocks"]
+        assert block["rendering"]["status"] == "canonical_fallback"
+        assert block["rendering"]["reason"] == reason
+        assert "# Clinical summary continues here." not in markdown
+
+
+def test_demo_passes_canonical_page_to_category_routed_presenter() -> None:
+    class CategoryRoutedReader:
+        name = "falcon-review"
+
+        def read_page(
+            self,
+            image_path: Path,
+            page: PageResult,
+        ) -> list[TextRegion]:
+            assert image_path.name == "preview-1.png"
+            assert page.route == "review"
+            return [
+                TextRegion(
+                    id="title",
+                    kind="page_text",
+                    text="Visit summary",
+                    confidence=None,
+                    bounding_box=BoundingBox(5, 2, 115, 15),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "title"},
+                )
+            ]
+
+    app = create_app(
+        ReviewEvidenceReader(),
+        presentation_reader=CategoryRoutedReader(),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+
+    assert response.status_code == 200
+    presentation = response.json()["presentation"]["pages"][0]
+    assert presentation["status"] == "review_draft"
+    assert presentation["blocks"][0]["raw_text"] == "Visit summary"
+
+
+def test_demo_rejects_orphan_and_linked_control_label_presentation_blocks() -> None:
+    class OrphanPresentationReader:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            return [
+                TextRegion(
+                    id="orphan",
+                    kind="page_text",
+                    text="Orphan model text",
+                    confidence=None,
+                    bounding_box=BoundingBox(115, 70, 120, 80),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "title"},
+                    text_provenance={
+                        "model": {"id": "tiiuae/Falcon-OCR"},
+                        "source_region_id": "missing-region",
+                    },
+                )
+            ]
+
+    class LinkedLabelPresentationReader:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            return [
+                TextRegion(
+                    id="linked-label",
+                    kind="page_text",
+                    text="Duplicated model label",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 50, 30, 60),
+                    reading_order=3,
+                    provider=self.name,
+                    structure={"category": "text"},
+                    text_provenance={
+                        "model": {"id": "tiiuae/Falcon-OCR"},
+                        "source_region_id": "label",
+                    },
+                )
+            ]
+
+    for reader, excluded in (
+        (OrphanPresentationReader(), "Orphan model text"),
+        (LinkedLabelPresentationReader(), "Duplicated model label"),
+    ):
+        app = create_app(
+            StructuredDocumentReader(),
+            presentation_reader=reader,
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/process",
+                files={"file": ("review.png", _page_png(), "image/png")},
+            )
+            markdown = client.get(
+                f"/api/sessions/{response.json()['session_id']}/result.md"
+            ).text
+
+        assert response.status_code == 200
+        assert excluded not in markdown
+        assert markdown.count("Fall risk") == 1
+
+    html = TestClient(create_app(ControlledReader())).get("/").text
+    assert 'if (block.rendering?.status !== "selected") return;' in html
+    assert "if (!source || claimedIds.has(sourceId)) return;" in html
+
+
+def test_demo_reports_no_eligible_presentation_regions_as_skipped() -> None:
+    class EmptyCategoryRoutedReader:
+        name = "falcon-review"
+
+        def read_page(
+            self,
+            image_path: Path,
+            page: PageResult,
+        ) -> list[TextRegion]:
+            return []
+
+    app = create_app(
+        ReviewEvidenceReader(),
+        presentation_reader=EmptyCategoryRoutedReader(),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+
+    assert response.status_code == 200
+    presentation = response.json()["presentation"]["pages"][0]
+    assert presentation == {
+        "page_number": 1,
+        "status": "skipped",
+        "provider": "falcon-review",
+        "message": "No eligible positioned regions for presentation",
+        "canonical_unchanged": True,
+    }
+    run = response.json()["stage_execution"][0]
+    assert run == {
+        "page_number": 1,
+        "stage": "presentation",
+        "status": "skipped",
+        "input_regions": 6,
+        "output_regions": 6,
+        "added_regions": 0,
+        "removed_regions": 0,
+        "modified_regions": 0,
+        "elapsed_seconds": run["elapsed_seconds"],
+        "skip_reason": "No eligible positioned regions for presentation",
+    }
+
+
+def test_demo_surfaces_presentation_service_failure_and_page_limit() -> None:
+    class OfflinePresentationReader:
+        name = "falcon-review"
+
+        def read_page(
+            self,
+            image_path: Path,
+            page: PageResult,
+        ) -> list[TextRegion]:
+            raise ReaderError("service_unavailable", "Falcon service is offline")
+
+    offline_app = create_app(
+        ReviewEvidenceReader(),
+        presentation_reader=OfflinePresentationReader(),
+    )
+    with TestClient(offline_app) as client:
+        offline_response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        html = client.get("/").text
+
+    offline_payload = offline_response.json()
+    assert offline_payload["presentation"]["pages"][0]["failure"] == {
+        "code": "service_unavailable",
+        "message": "Falcon service is offline",
+    }
+    assert offline_payload["stage_execution"][0]["status"] == "failed"
+    assert offline_payload["stage_execution"][0]["failure_code"] == (
+        "service_unavailable"
+    )
+
+    limited_app = create_app(
+        ReviewEvidenceReader(),
+        presentation_reader=PresentationReader(),
+        max_presentation_pages=1,
+    )
+    with TestClient(limited_app) as client:
+        limited_response = client.post(
+            "/api/process",
+            files={"file": ("review.tif", _two_page_tiff(), "image/tiff")},
+        )
+
+    limited_payload = limited_response.json()
+    assert [page["status"] for page in limited_payload["presentation"]["pages"]] == [
+        "review_draft",
+        "skipped",
+    ]
+    assert [run["status"] for run in limited_payload["stage_execution"]] == [
+        "productive",
+        "skipped",
+    ]
+    assert limited_payload["stage_execution"][1]["skip_reason"] == (
+        "Review draft page limit reached"
+    )
+    assert (
+        "function renderFailures(failures, previewFailure, presentations = [])" in html
+    )
+    assert 'presentationHeading.textContent = "Presentation status"' in html
+    assert 'page.validation?.status === "failed"' in html
+
+
+def test_demo_fails_closed_on_disallowed_table_html_and_bad_formula() -> None:
+    class UnsafePresentationReader:
+        name = "falcon-unsafe-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            return [
+                TextRegion(
+                    id="unsafe-table",
+                    kind="page_text",
+                    text='<table onclick="steal()"><tr><td>A</td><script>x</script></tr></table>',
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 120, 40),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "table"},
+                    text_provenance={"source_region_id": "table"},
+                ),
+                TextRegion(
+                    id="bad-formula",
+                    kind="page_text",
+                    text=r"\frac{a}{b",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 40, 120, 80),
+                    reading_order=2,
+                    provider=self.name,
+                    structure={"category": "formula"},
+                    text_provenance={"source_region_id": "handwriting"},
+                ),
+            ]
+
+    app = create_app(
+        ReviewEvidenceReader(),
+        presentation_reader=UnsafePresentationReader(),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        markdown = client.get(
+            f"/api/sessions/{response.json()['session_id']}/result.md"
+        ).text
+
+    assert response.status_code == 200
+    presentation = response.json()["presentation"]["pages"][0]
+    assert presentation["status"] == "review_draft"
+    assert presentation["validation"]["status"] == "failed"
+    table, formula = presentation["blocks"]
+    assert table["raw_text"] == (
+        '<table onclick="steal()"><tr><td>A</td><script>x</script></tr></table>'
+    )
+    assert {failure["code"] for failure in table["validation"]["failures"]} >= {
+        "disallowed_html_attribute",
+        "disallowed_html_element",
+    }
+    assert formula["raw_text"] == r"\frac{a}{b"
+    assert formula["validation"]["failures"] == [
+        {
+            "code": "unbalanced_latex_braces",
+            "message": "Formula output has unbalanced braces",
+        }
+    ]
+    assert "Primary text" in markdown
+    assert "onclick" not in markdown
+    assert r"\frac{a}{b" not in markdown
+
+
+def test_presentation_table_accepts_safe_semantic_scripts() -> None:
+    table = (
+        "<table><thead><tr><th>Metric<sup>1</sup></th></tr></thead>"
+        "<tbody><tr><td>CO<sub>2</sub></td></tr></tbody></table>"
+    )
+
+    assert demo_module._validate_presentation_table(table) == []
+
+
+def test_browser_table_allowlist_keeps_safe_semantic_scripts() -> None:
+    html = Path(demo_module.__file__).with_name("demo.html").read_text(encoding="utf-8")
+
+    assert '"SUP", "SUB"' in html
+    assert '["TH", "TD"].includes(parent)' in html
+
+
+def test_demo_rejects_implausibly_expanded_crop_output() -> None:
+    class RunawayPresentationReader:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="runaway",
+                    kind="page_text",
+                    text="generated " * 80,
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 50, 10),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "text"},
+                    text_provenance={
+                        "model": {"id": "tiiuae/Falcon-OCR"},
+                        "source_region_id": "paragraph",
+                    },
+                )
+            ]
+
+    app = create_app(
+        ReviewEvidenceReader(),
+        presentation_reader=RunawayPresentationReader(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    [block] = payload["presentation"]["pages"][0]["blocks"]
+    assert block["rendering"] == {
+        "status": "canonical_fallback",
+        "reason": "validation_failed",
+        "source_region_id": "paragraph",
+    }
+    assert block["validation"]["failures"] == [
+        {
+            "code": "implausible_output_expansion",
+            "message": (
+                "Generated text is implausibly long for its evidence-owned crop"
+            ),
+        }
+    ]
+    assert "Primary text" in markdown
+    assert "generated generated" not in markdown
+
+
+def test_demo_keeps_structured_rows_canonical_and_rejects_unsupported_claims() -> None:
+    class EvidenceReader:
+        name = "evidence-reader"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            children = [
+                TextRegion(
+                    id="patient-label",
+                    kind="word",
+                    text="Patient Name:",
+                    confidence=0.96,
+                    bounding_box=BoundingBox(0, 0, 25, 10),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"layout_owner_id": "form-row"},
+                ),
+                TextRegion(
+                    id="patient-value",
+                    kind="word",
+                    text="Ada",
+                    confidence=0.96,
+                    bounding_box=BoundingBox(26, 0, 45, 10),
+                    reading_order=2,
+                    provider=self.name,
+                    structure={"layout_owner_id": "form-row"},
+                ),
+                TextRegion(
+                    id="plan-label",
+                    kind="word",
+                    text="Plan Name:",
+                    confidence=0.96,
+                    bounding_box=BoundingBox(60, 0, 82, 10),
+                    reading_order=3,
+                    provider=self.name,
+                    structure={"layout_owner_id": "form-row"},
+                ),
+                TextRegion(
+                    id="plan-value",
+                    kind="word",
+                    text="Care Plus",
+                    confidence=0.96,
+                    bounding_box=BoundingBox(83, 0, 115, 10),
+                    reading_order=4,
+                    provider=self.name,
+                    structure={"layout_owner_id": "form-row"},
+                ),
+            ]
+            owners = [
+                TextRegion(
+                    id="form-row",
+                    kind="layout_block",
+                    text="Patient Name: Ada | Plan Name: Care Plus",
+                    confidence=0.96,
+                    bounding_box=BoundingBox(0, 0, 115, 10),
+                    reading_order=1,
+                    provider="evidence-spatial-layout",
+                    structure={
+                        "role": "layout_block",
+                        "block_type": "form_row",
+                        "child_evidence_ids": [region.id for region in children],
+                        "segments": [
+                            {"evidence_ids": ["patient-label", "patient-value"]},
+                            {"evidence_ids": ["plan-label", "plan-value"]},
+                        ],
+                    },
+                ),
+                TextRegion(
+                    id="date-line",
+                    kind="paragraph",
+                    text="Date of service: 3/18/2025",
+                    confidence=0.96,
+                    bounding_box=BoundingBox(0, 20, 115, 30),
+                    reading_order=5,
+                    provider=self.name,
+                ),
+                TextRegion(
+                    id="empty-fields",
+                    kind="paragraph",
+                    text="Alcohol: Drug:",
+                    confidence=0.96,
+                    bounding_box=BoundingBox(0, 40, 115, 50),
+                    reading_order=6,
+                    provider=self.name,
+                ),
+                TextRegion(
+                    id="long-line",
+                    kind="paragraph",
+                    text="Recommendations for medical services remain in the patient chart",
+                    confidence=0.96,
+                    bounding_box=BoundingBox(0, 55, 115, 65),
+                    reading_order=7,
+                    provider=self.name,
+                ),
+                TextRegion(
+                    id="risk",
+                    kind="coverage_risk",
+                    text="",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 120, 80),
+                    reading_order=8,
+                    provider="deterministic-evidence-risk",
+                    resolution="unreadable",
+                    structure={
+                        "role": "coverage_risk",
+                        "reasons": ["small_text_evidence"],
+                    },
+                ),
+            ]
+            return [*children, *owners]
+
+    class UnsafePresenter:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="generated-form",
+                    kind="page_text",
+                    text="Patient Name: Ada Patient Name: Care Plus",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 115, 10),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "text"},
+                    text_provenance={"source_region_id": "form-row"},
+                ),
+                TextRegion(
+                    id="generated-date",
+                    kind="page_text",
+                    text="Date of service: 3/18/2015",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 20, 115, 30),
+                    reading_order=5,
+                    provider=self.name,
+                    structure={"category": "text"},
+                    text_provenance={"source_region_id": "date-line"},
+                ),
+                TextRegion(
+                    id="generated-marks",
+                    kind="page_text",
+                    text="Alcohol: ♡ Drug: ♡",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 40, 115, 50),
+                    reading_order=6,
+                    provider=self.name,
+                    structure={"category": "text"},
+                    text_provenance={"source_region_id": "empty-fields"},
+                ),
+                TextRegion(
+                    id="generated-truncated",
+                    kind="page_text",
+                    text="Recommendations",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 55, 115, 65),
+                    reading_order=7,
+                    provider=self.name,
+                    structure={"category": "text"},
+                    text_provenance={"source_region_id": "long-line"},
+                ),
+            ]
+
+    app = create_app(EvidenceReader(), presentation_reader=UnsafePresenter())
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("form.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+        html = client.get("/").text
+
+    blocks = payload["presentation"]["pages"][0]["blocks"]
+    assert blocks[0]["rendering"]["reason"] == "structured_source_is_authoritative"
+    assert blocks[1]["rendering"]["reason"] == "validation_failed"
+    assert blocks[1]["validation"]["failures"][0]["code"] == (
+        "unsupported_critical_token"
+    )
+    assert blocks[2]["rendering"]["reason"] == "validation_failed"
+    assert blocks[2]["validation"]["failures"][0]["code"] == (
+        "unsupported_control_glyph"
+    )
+    assert blocks[3]["rendering"]["reason"] == "validation_failed"
+    assert blocks[3]["validation"]["failures"][0]["code"] == ("source_evidence_omitted")
+    assert "Plan Name: Care Plus" in markdown
+    assert "3/18/2025" in markdown
+    assert "3/18/2015" not in markdown
+    assert "♡" not in markdown
+    assert '["plain", "text"].includes(block.category)' in html
+    assert "function appendPresentationInline(element, text)" in html
+    assert 'document.createElement("strong")' in html
+
+
+def test_demo_serves_only_explicit_local_katex_assets(tmp_path: Path) -> None:
+    assets = tmp_path / "katex"
+    fonts = assets / "fonts"
+    fonts.mkdir(parents=True)
+    (assets / "katex.js").write_text("window.katex = {};", encoding="utf-8")
+    (assets / "katex.css").write_text(".katex {}", encoding="utf-8")
+    (fonts / "KaTeX_Main-Regular.woff2").write_bytes(b"font")
+    (assets / "secret.txt").write_text("secret", encoding="utf-8")
+    app = create_app(ControlledReader(), katex_asset_root=assets)
+
+    with TestClient(app) as client:
+        index = client.get("/")
+        javascript = client.get("/assets/katex/katex.js")
+        stylesheet = client.get("/assets/katex/katex.css")
+        font = client.get("/assets/katex/fonts/KaTeX_Main-Regular.woff2")
+        secret = client.get("/assets/katex/fonts/../secret.txt")
+
+    assert index.status_code == 200
+    assert '<link rel="stylesheet" href="/assets/katex/katex.css">' in index.text
+    assert '<script defer src="/assets/katex/katex.js"></script>' in index.text
+    assert javascript.text == "window.katex = {};"
+    assert stylesheet.text == ".katex {}"
+    assert font.content == b"font"
+    assert secret.status_code == 404
+
+
 def test_demo_exposes_rejected_table_candidate_as_review_evidence() -> None:
     app = create_app(RejectedTableReader())
 
@@ -1131,10 +3304,190 @@ def test_demo_runs_injected_specialist_stages() -> None:
         assert response.status_code == 200
         payload = response.json()
         assert payload["pipeline_stages"] == ["table-structure"]
+        assert payload["stage_execution"][0]["stage"] == "table-structure"
+        assert payload["stage_execution"][0]["status"] == "productive"
         assert payload["result"]["pages"][0]["text"]["value"] == (
             "Controlled page 1 with table"
         )
         assert "stage.table-structure" in payload["timing"]["pipeline_steps"]
+
+
+def test_demo_reports_manual_handwriting_reread_execution() -> None:
+    class ManualRereadStage:
+        name = "handwriting"
+
+        def apply(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            return regions
+
+        def review_region(
+            self,
+            image_path: Path,
+            page_number: int,
+            region: TextRegion,
+        ) -> TextRegion:
+            return replace(region, text="Corrected handwritten text")
+
+    app = create_app(
+        ControlledReader(),
+        handwriting_stage=ManualRereadStage(),
+    )
+
+    with TestClient(app) as client:
+        processed = client.post(
+            "/api/process",
+            files={"file": ("page.png", _page_png(), "image/png")},
+        )
+        initial = processed.json()
+        assert initial["composition"]["handwriting"] == "configured"
+        assert initial["stage_execution"] == []
+        reread = client.post(
+            f"/api/sessions/{initial['session_id']}/handwriting",
+            json={"page_number": 1, "region_id": "page-1-region-1"},
+        )
+
+    assert reread.status_code == 200
+    payload = reread.json()
+    assert payload["result"]["pages"][0]["text"]["value"] == (
+        "Corrected handwritten text"
+    )
+    assert payload["pipeline_stages"] == []
+    manual_run = payload["stage_execution"][0]
+    assert manual_run == {
+        "page_number": 1,
+        "stage": "handwriting.manual-reread",
+        "status": "productive",
+        "input_regions": 1,
+        "output_regions": 1,
+        "added_regions": 0,
+        "removed_regions": 0,
+        "modified_regions": 1,
+        "elapsed_seconds": manual_run["elapsed_seconds"],
+    }
+    assert manual_run["elapsed_seconds"] >= 0
+    assert (
+        payload["timing"]["pipeline_steps"]["stage.handwriting.manual-reread"]
+        == manual_run["elapsed_seconds"]
+    )
+    assert payload["timing"]["manual_reread_seconds"] == manual_run["elapsed_seconds"]
+
+
+def test_manual_reread_refreshes_the_page_presentation() -> None:
+    class ManualRereadStage:
+        name = "handwriting"
+
+        def apply(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            return regions
+
+        def review_region(
+            self,
+            image_path: Path,
+            page_number: int,
+            region: TextRegion,
+        ) -> TextRegion:
+            return replace(region, text="Corrected handwritten text")
+
+    class RefreshingPresentationReader:
+        name = "falcon-review"
+
+        def read_page(
+            self,
+            image_path: Path,
+            page: PageResult,
+        ) -> list[TextRegion]:
+            source = page.regions[0]
+            return [
+                TextRegion(
+                    id="refreshed-presentation",
+                    kind="page_text",
+                    text=f"Rendered: {source.text}",
+                    confidence=None,
+                    bounding_box=source.bounding_box,
+                    reading_order=source.reading_order,
+                    provider=self.name,
+                    structure={"category": "text"},
+                    text_provenance={
+                        "model": {"id": "tiiuae/Falcon-OCR"},
+                        "source_region_id": source.id,
+                    },
+                )
+            ]
+
+    app = create_app(
+        ControlledReader(),
+        handwriting_stage=ManualRereadStage(),
+        presentation_reader=RefreshingPresentationReader(),
+    )
+    with TestClient(app) as client:
+        initial = client.post(
+            "/api/process",
+            files={"file": ("page.png", _page_png(), "image/png")},
+        ).json()
+        assert initial["presentation"]["pages"] == []
+        reread = client.post(
+            f"/api/sessions/{initial['session_id']}/handwriting",
+            json={"page_number": 1, "region_id": "page-1-region-1"},
+        )
+
+    payload = reread.json()
+    block = payload["presentation"]["pages"][0]["blocks"][0]
+    assert block["raw_text"] == "Rendered: Corrected handwritten text"
+    assert "Controlled page 1" not in block["raw_text"]
+    assert [run["stage"] for run in payload["stage_execution"]] == [
+        "handwriting.manual-reread",
+        "presentation",
+    ]
+
+
+def test_failed_manual_reread_cannot_mutate_live_session_evidence() -> None:
+    class MutatingFailureStage:
+        name = "handwriting"
+
+        def apply(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            return regions
+
+        def review_region(
+            self,
+            image_path: Path,
+            page_number: int,
+            region: TextRegion,
+        ) -> TextRegion:
+            region.text = "corrupted before failure"
+            raise ReaderError("controlled_failure", "reread failed")
+
+    app = create_app(
+        ControlledReader(),
+        handwriting_stage=MutatingFailureStage(),
+    )
+
+    with TestClient(app) as client:
+        initial = client.post(
+            "/api/process",
+            files={"file": ("page.png", _page_png(), "image/png")},
+        ).json()
+        session_id = initial["session_id"]
+        failed = client.post(
+            f"/api/sessions/{session_id}/handwriting",
+            json={"page_number": 1, "region_id": "page-1-region-1"},
+        )
+        stored = client.get(f"/api/sessions/{session_id}/result.json").json()
+
+    assert failed.status_code == 422
+    assert stored["pages"][0]["regions"][0]["text"] == "Controlled page 1"
 
 
 def test_demo_bounds_preparation_and_serializes_shared_reader_requests(

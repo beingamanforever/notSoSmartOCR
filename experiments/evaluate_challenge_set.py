@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 import json
 import math
 from pathlib import Path
@@ -115,8 +115,9 @@ CONTROL_STATES = {
     "unselected": "unselected",
 }
 CONTROL_ANNOTATION_SCOPES = frozenset({"exhaustive", "selected_only"})
-CONTROL_IOU_THRESHOLD = 0.5
-HANDWRITING_IOU_THRESHOLD = 0.1
+BOX_IOU_THRESHOLDS = (0.5, 0.7)
+CONTROL_IOU_THRESHOLD = BOX_IOU_THRESHOLDS[0]
+HANDWRITING_IOU_THRESHOLD = BOX_IOU_THRESHOLDS[0]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -243,6 +244,10 @@ def _transcription_metrics(
     word_edits = 0
     reference_characters = 0
     reference_words = 0
+    reference_tokens = 0
+    prediction_tokens = 0
+    found_tokens = 0
+    added_tokens = 0
     distances: list[float] = []
     excluded = Counter()
     scored = 0
@@ -266,6 +271,8 @@ def _transcription_metrics(
 
         reference = _normalize_text(reference_value)
         prediction = _normalize_text(_prediction_text(output))
+        reference_counts = Counter(reference.split())
+        prediction_counts = Counter(prediction.split())
         character_counts = edit_counts(prediction, reference)
         word_counts = edit_counts(prediction.split(), reference.split())
         character_insertions += character_counts.insertions
@@ -274,6 +281,10 @@ def _transcription_metrics(
         word_edits += word_counts.edits
         reference_characters += len(reference)
         reference_words += len(reference.split())
+        reference_tokens += reference_counts.total()
+        prediction_tokens += prediction_counts.total()
+        found_tokens += (reference_counts & prediction_counts).total()
+        added_tokens += (prediction_counts - reference_counts).total()
         distances.append(normalized_edit_distance(prediction, reference))
         scored += 1
 
@@ -302,6 +313,15 @@ def _transcription_metrics(
         "normalized_edit_distance_mean": _mean(distances),
         "missed_text_rate": _rate(character_deletions, reference_characters),
         "hallucinated_text_rate": _rate(character_insertions, reference_characters),
+        "token_multiset": {
+            "policy": "normalized_whitespace_token_multiset",
+            "reference_tokens": reference_tokens,
+            "prediction_tokens": prediction_tokens,
+            "found_tokens": found_tokens,
+            "added_tokens": added_tokens,
+            "tokens_found": _rate(found_tokens, reference_tokens),
+            "tokens_added": _rate(added_tokens, prediction_tokens),
+        },
     }
 
 
@@ -357,8 +377,11 @@ def _table_metrics(
 ) -> dict[str, Any]:
     true_positive = false_positive = false_negative = true_negative = 0
     annotated_tables = predicted_tables = 0
-    descriptor_pairs = row_eligible = row_correct = 0
-    column_eligible = column_correct = 0
+    descriptor_pairs = missed_tables = extra_tables = 0
+    row_eligible = row_pair_eligible = row_correct = 0
+    column_eligible = column_pair_eligible = column_correct = 0
+    row_errors: list[float] = []
+    column_errors: list[float] = []
 
     for annotation, output in pairs:
         if annotation is None:
@@ -380,18 +403,24 @@ def _table_metrics(
             row_eligible += isinstance(expected.get("row_count"), int)
             column_eligible += isinstance(expected.get("column_count"), int)
 
-        if len(reference) != len(prediction):
-            continue
-        for expected, actual in zip(reference, prediction, strict=True):
-            descriptor_pairs += 1
+        descriptor_pairs += min(len(reference), len(prediction))
+        missed_tables += max(0, len(reference) - len(prediction))
+        extra_tables += max(0, len(prediction) - len(reference))
+        for expected, actual in zip(reference, prediction):
             row = expected.get("row_count")
             predicted_row = actual.get("row_count")
             if isinstance(row, int):
+                row_pair_eligible += 1
                 row_correct += predicted_row == row
+                if isinstance(predicted_row, int):
+                    row_errors.append(abs(predicted_row - row))
             column = expected.get("column_count")
             predicted_column = actual.get("column_count")
             if isinstance(column, int):
+                column_pair_eligible += 1
                 column_correct += predicted_column == column
+                if isinstance(predicted_column, int):
+                    column_errors.append(abs(predicted_column - column))
 
     return {
         "annotated_count": annotated_tables,
@@ -406,12 +435,30 @@ def _table_metrics(
             "f1": _f1(true_positive, false_positive, false_negative),
         },
         "descriptors": {
-            "pairing": "equal-count-reading-order",
+            "pairing": "annotation-and-prediction-reading-order",
+            "spatial_matching_supported": False,
+            "pairing_limitation": (
+                "reference table boxes are unavailable; declared annotation and "
+                "prediction reading order is used"
+            ),
+            "count_semantics": "annotation-declared-not-geometric",
             "paired_tables": descriptor_pairs,
+            "missed_reference_tables": missed_tables,
+            "extra_predicted_tables": extra_tables,
             "row_count_eligible": row_eligible,
             "row_count_accuracy": _rate(row_correct, row_eligible),
+            "row_count_eligible_on_pairs": row_pair_eligible,
+            "row_count_accuracy_on_pairs": _rate(row_correct, row_pair_eligible),
+            "row_count_numeric_pairs": len(row_errors),
+            "row_count_mae_on_numeric_pairs": _mean(row_errors),
             "column_count_eligible": column_eligible,
             "column_count_accuracy": _rate(column_correct, column_eligible),
+            "column_count_eligible_on_pairs": column_pair_eligible,
+            "column_count_accuracy_on_pairs": _rate(
+                column_correct, column_pair_eligible
+            ),
+            "column_count_numeric_pairs": len(column_errors),
+            "column_count_mae_on_numeric_pairs": _mean(column_errors),
         },
     }
 
@@ -457,6 +504,21 @@ def _control_metrics(
 def _control_bbox_metrics(
     pairs: Sequence[tuple[dict[str, Any] | None, dict[str, Any] | None]],
 ) -> dict[str, Any]:
+    primary = _control_bbox_metrics_at_threshold(pairs, CONTROL_IOU_THRESHOLD)
+    strict = _control_bbox_metrics_at_threshold(pairs, BOX_IOU_THRESHOLDS[1])
+    return {
+        "matching_policy": "hungarian_one_to_one_max_cardinality_then_iou",
+        "iou_threshold": CONTROL_IOU_THRESHOLD,
+        "iou_thresholds": list(BOX_IOU_THRESHOLDS),
+        **primary,
+        "iou_0_7": strict,
+    }
+
+
+def _control_bbox_metrics_at_threshold(
+    pairs: Sequence[tuple[dict[str, Any] | None, dict[str, Any] | None]],
+    iou_threshold: float,
+) -> dict[str, Any]:
     exhaustive_pages = exhaustive_reference = exhaustive_prediction = 0
     bbox_matches = checked_matches = unchecked_matches = 0
     checked_reference = checked_prediction = unchecked_reference = 0
@@ -488,7 +550,7 @@ def _control_bbox_metrics(
             for item in localized_prediction
             if _control_state(item.get("state")) == "selected"
         ]
-        checked_pairs = _match_controls(checked_refs, checked_preds)
+        checked_pairs = _match_controls(checked_refs, checked_preds, iou_threshold)
 
         if scope == "selected_only":
             selected_only_pages += 1
@@ -516,9 +578,15 @@ def _control_bbox_metrics(
             if _control_state(item.get("state")) == "unselected"
         ]
         unchecked_reference += len(unchecked_refs)
-        unchecked_matches += len(_match_controls(unchecked_refs, unchecked_preds))
+        unchecked_matches += len(
+            _match_controls(unchecked_refs, unchecked_preds, iou_threshold)
+        )
 
-        matches = _match_controls(localized_reference, localized_prediction)
+        matches = _match_controls(
+            localized_reference,
+            localized_prediction,
+            iou_threshold,
+        )
         bbox_matches += len(matches)
         for reference_index, prediction_index in matches:
             expected = _control_state(localized_reference[reference_index].get("state"))
@@ -533,10 +601,16 @@ def _control_bbox_metrics(
     checked_false_positive = checked_prediction - checked_matches
     checked_false_negative = checked_reference - checked_matches
     return {
-        "iou_threshold": CONTROL_IOU_THRESHOLD,
         "missing_bounding_box": {
             "reference": missing_reference_bbox,
             "prediction": missing_prediction_bbox,
+        },
+        "length_penalty": {
+            "policy": "negative_absolute_count_difference_over_reference",
+            "value": _length_penalty(
+                exhaustive_reference,
+                exhaustive_prediction,
+            ),
         },
         "exhaustive": {
             "pages": exhaustive_pages,
@@ -587,7 +661,7 @@ def _handwriting_metrics(
 ) -> dict[str, Any]:
     counts: Counter[str] = Counter()
     localized_eligible: Counter[str] = Counter()
-    localized_recovered: Counter[str] = Counter()
+    localized_recovered = {threshold: Counter() for threshold in BOX_IOU_THRESHOLDS}
     presence_eligible: Counter[str] = Counter()
     presence_recovered: Counter[str] = Counter()
     for annotation, output in pairs:
@@ -596,7 +670,7 @@ def _handwriting_metrics(
         prediction = _normalize_text(_prediction_text(output))
         used_spans: list[tuple[int, int]] = []
         regions = _handwriting_regions(output)
-        used_regions: set[str] = set()
+        localized_reference = []
         for raw_item in _as_list(annotation.get("handwriting")):
             item = _as_dict(raw_item)
             level = item.get("legibility")
@@ -618,34 +692,64 @@ def _handwriting_metrics(
             if expected_box is None:
                 continue
             localized_eligible[level] += 1
-            match = _localized_handwriting_match(
-                phrase,
-                expected_box,
+            localized_reference.append((level, phrase, expected_box))
+
+        for threshold in BOX_IOU_THRESHOLDS:
+            for reference_index, _ in _match_handwriting(
+                localized_reference,
                 regions,
-                used_regions,
-            )
-            if match is not None:
-                used_regions.add(match)
-                localized_recovered[level] += 1
+                threshold,
+            ):
+                level = localized_reference[reference_index][0]
+                localized_recovered[threshold][level] += 1
+
+    primary_recovery = localized_recovered[HANDWRITING_IOU_THRESHOLD]
+    strict_recovery = localized_recovered[BOX_IOU_THRESHOLDS[1]]
     return {
         "annotation_counts": {
             level: counts.get(level, 0) for level in HANDWRITING_LEVELS
         },
         "legible_exact_recovery": {
             "eligible": localized_eligible.get("legible", 0),
-            "recovered": localized_recovered.get("legible", 0),
+            "recovered": primary_recovery.get("legible", 0),
             "rate": _rate(
-                localized_recovered.get("legible", 0),
+                primary_recovery.get("legible", 0),
                 localized_eligible.get("legible", 0),
             ),
         },
         "partial_exact_recovery": {
             "eligible": localized_eligible.get("partial", 0),
-            "recovered": localized_recovered.get("partial", 0),
+            "recovered": primary_recovery.get("partial", 0),
             "rate": _rate(
-                localized_recovered.get("partial", 0),
+                primary_recovery.get("partial", 0),
                 localized_eligible.get("partial", 0),
             ),
+        },
+        "localized_exact_recovery": {
+            "iou_0_5": {
+                "legible": _recovery_counts(
+                    localized_eligible,
+                    primary_recovery,
+                    "legible",
+                ),
+                "partial": _recovery_counts(
+                    localized_eligible,
+                    primary_recovery,
+                    "partial",
+                ),
+            },
+            "iou_0_7": {
+                "legible": _recovery_counts(
+                    localized_eligible,
+                    strict_recovery,
+                    "legible",
+                ),
+                "partial": _recovery_counts(
+                    localized_eligible,
+                    strict_recovery,
+                    "partial",
+                ),
+            },
         },
         "page_presence": {
             "legible": {
@@ -667,27 +771,34 @@ def _handwriting_metrics(
         },
         "unlocalized_scorable": sum(presence_eligible.values())
         - sum(localized_eligible.values()),
-        "matching_policy": "exact_text_and_bbox_iou",
+        "matching_policy": ("hungarian_one_to_one_exact_text_max_cardinality_then_iou"),
+        "iou_thresholds": list(BOX_IOU_THRESHOLDS),
+        "length_penalty_supported": False,
+        "length_penalty_limitation": (
+            "the output schema does not identify every predicted handwriting region"
+        ),
         "localized_edit_metrics_supported": False,
     }
 
 
-def _localized_handwriting_match(
-    phrase: str,
-    expected_box: tuple[float, float, float, float],
+def _match_handwriting(
+    reference: Sequence[tuple[str, str, tuple[float, float, float, float]]],
     regions: Sequence[tuple[str, str, tuple[float, float, float, float]]],
-    used_regions: set[str],
-) -> str | None:
-    matches = []
-    for region_id, text, actual_box in regions:
-        if region_id in used_regions:
-            continue
+    iou_threshold: float,
+) -> list[tuple[int, int]]:
+    def score(reference_index: int, prediction_index: int) -> float:
+        _, phrase, expected_box = reference[reference_index]
+        _, text, actual_box = regions[prediction_index]
         if _unused_phrase_span(text, phrase, []) is None:
-            continue
-        iou = _box_iou(expected_box, actual_box)
-        if iou >= HANDWRITING_IOU_THRESHOLD:
-            matches.append((iou, region_id))
-    return max(matches)[1] if matches else None
+            return 0.0
+        return _box_iou(expected_box, actual_box)
+
+    return _optimal_matches(
+        len(reference),
+        len(regions),
+        score,
+        iou_threshold,
+    )
 
 
 def _handwriting_regions(
@@ -895,29 +1006,144 @@ def _predicted_controls(output: dict[str, Any] | None) -> list[dict[str, Any]]:
 def _match_controls(
     reference: Sequence[dict[str, Any]],
     prediction: Sequence[dict[str, Any]],
+    iou_threshold: float,
 ) -> list[tuple[int, int]]:
-    candidates = []
-    for reference_index, expected in enumerate(reference):
+    def score(reference_index: int, prediction_index: int) -> float:
+        expected = reference[reference_index]
+        actual = prediction[prediction_index]
         expected_kind = expected.get("kind")
-        for prediction_index, actual in enumerate(prediction):
-            if expected_kind != actual.get("kind"):
-                continue
-            iou = _control_iou(expected, actual)
-            if iou >= CONTROL_IOU_THRESHOLD:
-                candidates.append((iou, reference_index, prediction_index))
+        if expected_kind != actual.get("kind"):
+            return 0.0
+        return _control_iou(expected, actual)
 
-    matched_reference: set[int] = set()
-    matched_prediction: set[int] = set()
-    matches = []
-    for _, reference_index, prediction_index in sorted(candidates, reverse=True):
-        if reference_index in matched_reference:
-            continue
-        if prediction_index in matched_prediction:
-            continue
-        matched_reference.add(reference_index)
-        matched_prediction.add(prediction_index)
-        matches.append((reference_index, prediction_index))
-    return matches
+    return _optimal_matches(
+        len(reference),
+        len(prediction),
+        score,
+        iou_threshold,
+    )
+
+
+def _optimal_matches(
+    reference_count: int,
+    prediction_count: int,
+    score: Callable[[int, int], float],
+    threshold: float,
+) -> list[tuple[int, int]]:
+    if not reference_count or not prediction_count:
+        return []
+
+    raw_scores = [
+        [
+            score(reference_index, prediction_index)
+            for prediction_index in range(prediction_count)
+        ]
+        for reference_index in range(reference_count)
+    ]
+    match_bonus = min(reference_count, prediction_count) + 1.0
+    assignment_scores = [
+        [value + match_bonus if value >= threshold else 0.0 for value in row]
+        for row in raw_scores
+    ]
+    assignment = _maximum_weight_assignment(assignment_scores)
+    return [
+        (reference_index, prediction_index)
+        for reference_index, prediction_index in assignment
+        if raw_scores[reference_index][prediction_index] >= threshold
+    ]
+
+
+def _maximum_weight_assignment(
+    scores: Sequence[Sequence[float]],
+) -> list[tuple[int, int]]:
+    row_count = len(scores)
+    column_count = len(scores[0])
+    transposed = row_count > column_count
+    costs = (
+        [
+            [-scores[row][column] for row in range(row_count)]
+            for column in range(column_count)
+        ]
+        if transposed
+        else [[-value for value in row] for row in scores]
+    )
+
+    matched_column = [0] * (len(costs[0]) + 1)
+    previous_column = [0] * (len(costs[0]) + 1)
+    row_potential = [0.0] * (len(costs) + 1)
+    column_potential = [0.0] * (len(costs[0]) + 1)
+
+    for row in range(1, len(costs) + 1):
+        matched_column[0] = row
+        minimum_cost = [math.inf] * (len(costs[0]) + 1)
+        used_column = [False] * (len(costs[0]) + 1)
+        column = 0
+        while True:
+            used_column[column] = True
+            matched_row = matched_column[column]
+            next_column = 0
+            delta = math.inf
+            for candidate in range(1, len(costs[0]) + 1):
+                if used_column[candidate]:
+                    continue
+                reduced_cost = (
+                    costs[matched_row - 1][candidate - 1]
+                    - row_potential[matched_row]
+                    - column_potential[candidate]
+                )
+                if reduced_cost < minimum_cost[candidate]:
+                    minimum_cost[candidate] = reduced_cost
+                    previous_column[candidate] = column
+                if minimum_cost[candidate] < delta:
+                    delta = minimum_cost[candidate]
+                    next_column = candidate
+            for candidate in range(len(costs[0]) + 1):
+                if used_column[candidate]:
+                    row_potential[matched_column[candidate]] += delta
+                    column_potential[candidate] -= delta
+                else:
+                    minimum_cost[candidate] -= delta
+            column = next_column
+            if matched_column[column] == 0:
+                break
+
+        while True:
+            previous = previous_column[column]
+            matched_column[column] = matched_column[previous]
+            column = previous
+            if column == 0:
+                break
+
+    assignment = [
+        (matched_row - 1, column - 1)
+        for column, matched_row in enumerate(matched_column[1:], start=1)
+        if matched_row
+    ]
+    if transposed:
+        assignment = [(column, row) for row, column in assignment]
+    return sorted(assignment)
+
+
+def _recovery_counts(
+    eligible: Counter[str],
+    recovered: Counter[str],
+    level: str,
+) -> dict[str, int | float | None]:
+    eligible_count = eligible.get(level, 0)
+    recovered_count = recovered.get(level, 0)
+    return {
+        "eligible": eligible_count,
+        "recovered": recovered_count,
+        "rate": _rate(recovered_count, eligible_count),
+    }
+
+
+def _length_penalty(reference_count: int, prediction_count: int) -> float | None:
+    if reference_count:
+        return round(-abs(reference_count - prediction_count) / reference_count, 6)
+    if prediction_count:
+        return -1.0
+    return None
 
 
 def _control_iou(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> float:

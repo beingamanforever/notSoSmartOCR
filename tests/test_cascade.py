@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from ocr_pipeline.cascade import (
+    add_runtime_risk_evidence,
     apply_region_patches,
     build_patch_request,
     identify_risky_regions,
@@ -92,6 +93,77 @@ def test_normal_prose_single_word_and_table_repetition_are_not_risky() -> None:
     table.reading_order = 3
 
     assert identify_risky_regions(document) == {}
+
+
+def test_tail_repetition_is_flagged_without_changing_literal_text() -> None:
+    document = _document()
+    text = "stable prefix " + "AB12|" * 8
+    document.pages[0].regions[0].text = text
+
+    risks = identify_risky_regions(document)
+
+    assert "tail_repetition" in risks["stable"]
+    assert document.pages[0].regions[0].text == text
+
+
+def test_tail_repetition_requires_eight_nonblank_units() -> None:
+    document = _document()
+    document.pages[0].regions[0].text = "stable prefix " + "AB12|" * 7
+
+    assert "tail_repetition" not in identify_risky_regions(document).get("stable", [])
+
+
+def test_long_repeated_suffix_is_flagged_without_changing_literal_text() -> None:
+    document = _document()
+    suffix = "Medication dosage remains unchanged."
+    text = f"stable prefix {suffix}{suffix.upper()}"
+    document.pages[0].regions[0].text = text
+
+    risks = identify_risky_regions(document)
+
+    assert "repeated_suffix" in risks["stable"]
+    assert "tail_repetition" not in risks["stable"]
+    assert document.pages[0].regions[0].text == text
+
+
+def test_short_or_nonadjacent_suffix_is_not_flagged() -> None:
+    document = _document()
+    document.pages[0].regions[0].text = "prefix short suffix short suffix"
+
+    assert "repeated_suffix" not in identify_risky_regions(document).get("stable", [])
+
+
+@pytest.mark.parametrize("orders", [(7,), (1, 1)])
+def test_offline_order_diagnostics_do_not_drive_runtime_review(
+    orders: tuple[int, ...],
+) -> None:
+    regions = [
+        TextRegion(
+            id=f"region-{index}",
+            kind="text",
+            text=f"literal {index}",
+            confidence=0.9,
+            bounding_box=BoundingBox(index * 10, 0, (index + 1) * 10, 10),
+            reading_order=order,
+            provider="local",
+        )
+        for index, order in enumerate(orders)
+    ]
+    document = _document(*regions)
+    before = len(document.pages[0].regions)
+
+    offline_reasons = {
+        reason
+        for reasons in identify_risky_regions(document).values()
+        for reason in reasons
+    }
+
+    assert offline_reasons & {
+        "duplicate_reading_order",
+        "out_of_range_reading_order",
+    }
+    assert add_runtime_risk_evidence(document) == set()
+    assert len(document.pages[0].regions) == before
 
 
 def test_risk_reasons_cover_geometry_order_and_malformed_tables() -> None:

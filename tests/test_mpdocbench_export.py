@@ -274,6 +274,18 @@ def test_official_420_document_controls_keep_all_3135_pages(tmp_path: Path) -> N
     assert empty["metrics"]["merged_text_block"]["continuation_accuracy"]["all"] == 0.0
     assert oracle["metrics"]["merged_table"]["TEDS"]["all"] == 1.0
     assert empty["metrics"]["merged_table"]["TEDS"]["all"] == 0.0
+    assert oracle["metrics"]["merged_table"]["TEDS-100"] == {
+        "all": 1.0,
+        "perfect": 1,
+        "instances": 1,
+        "definition": "fraction of table instances with TEDS equal to 1",
+    }
+    assert empty["metrics"]["merged_table"]["TEDS-100"] == {
+        "all": 0.0,
+        "perfect": 0,
+        "instances": 1,
+        "definition": "fraction of table instances with TEDS equal to 1",
+    }
     assert oracle["metrics"]["merged_table"]["continuation_accuracy"] == {
         "all": 1.0,
         "cross_page": 1.0,

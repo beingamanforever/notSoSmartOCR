@@ -8,6 +8,7 @@ import tempfile
 import threading
 from collections.abc import Callable
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -30,6 +31,19 @@ MAX_SCORED_WORDS = 50
 MIN_SUPPORTING_WORDS = 10
 COVERAGE_RECOVERY_RATIO = 2.0
 COVERAGE_CONFIDENCE_TOLERANCE = 0.03
+GEOMETRY_CONFIDENCE_TOLERANCE = 0.03
+MIN_GEOMETRY_WORDS = 10
+HORIZONTAL_WORD_FRACTION = 0.65
+VERTICAL_WORD_FRACTION = 0.35
+ADAPTIVE_UPRIGHT_MEAN_CONFIDENCE = 0.8
+ADAPTIVE_UPRIGHT_HIGH_CONFIDENCE_FRACTION = 0.65
+ADAPTIVE_UPRIGHT_MIN_CHARACTERS = 40
+ADAPTIVE_UPRIGHT_MAX_REPETITION = 0.02
+VERTICAL_RESIDUAL_CONFIDENCE = 0.85
+VERTICAL_RESIDUAL_ASPECT_RATIO = 2.0
+VERTICAL_RESIDUAL_MARGIN_FRACTION = 0.2
+VERTICAL_RESIDUAL_MAX_OVERLAP = 0.2
+VERTICAL_RESIDUAL_MIN_CHARACTERS = 8
 DOCTR_ARCH = "mobilenet_v3_small_page_orientation"
 DOCTR_MODEL = {
     "library": "python-doctr",
@@ -168,6 +182,7 @@ class OrientationReader:
             "view_scores": {},
             "view_failures": {},
             "nested_reader_reviews": {},
+            "view_reader_execution": {},
         }
         try:
             with Image.open(image_path) as source:
@@ -191,7 +206,10 @@ class OrientationReader:
             root = Path(directory)
             normalized_path = root / "page-osd.png"
             normalized.save(normalized_path, format="PNG")
-            angles = self._candidate_angles(normalized_path, assessment)
+            angles, deferred_angles = self._candidate_angles(
+                normalized_path,
+                assessment,
+            )
 
             views = self._read_views(
                 normalized,
@@ -200,6 +218,25 @@ class OrientationReader:
                 angles,
                 assessment,
             )
+            if deferred_angles:
+                initial_score = views[0][2] if len(views) == 1 else None
+                accepted = _accept_upright_evidence(initial_score)
+                assessment["adaptive_orientation"] = {
+                    "status": "accepted_upright" if accepted else "expanded",
+                    "initial_angles": angles,
+                    "deferred_angles": deferred_angles,
+                    "evidence": initial_score,
+                }
+                if not accepted:
+                    views.extend(
+                        self._read_views(
+                            normalized,
+                            root,
+                            page_number,
+                            deferred_angles,
+                            assessment,
+                        )
+                    )
 
         if not views:
             failures = assessment["view_failures"]
@@ -223,18 +260,35 @@ class OrientationReader:
                 "score_margin_metric": (
                     "character_coverage"
                     if selection_reason == "coverage_recovery"
-                    else str(score["selection_metric"])
+                    else (
+                        "horizontal_word_fraction"
+                        if selection_reason == "word_box_geometry"
+                        else str(score["selection_metric"])
+                    )
                 ),
                 "score_margin": _score_margin(ranked, selection_reason),
                 "rotated_size": list(view_size),
             }
         )
-        needs_review = angle != 0 or assessment["selector"] in {
-            "evidence_fallback",
-            "orientation_evidence_fallback",
-        }
-        needs_review = needs_review or bool(assessment["view_failures"])
-        needs_review = needs_review or str(angle) in assessment["nested_reader_reviews"]
+        review_reasons = [
+            reason
+            for present, reason in (
+                (angle != 0, "rotated_view_selected"),
+                (
+                    assessment["selector"]
+                    in {"evidence_fallback", "orientation_evidence_fallback"},
+                    str(assessment["selector"]),
+                ),
+                (bool(assessment["view_failures"]), "orientation_view_failed"),
+                (
+                    str(angle) in assessment["nested_reader_reviews"],
+                    "selected_reader_requires_review",
+                ),
+            )
+            if present
+        ]
+        assessment["review_reasons"] = review_reasons
+        needs_review = bool(review_reasons)
         assessment["status"] = (
             "review_recommended" if needs_review else "orientation_confirmed"
         )
@@ -251,9 +305,35 @@ class OrientationReader:
                 )
                 for region in regions
             ]
+            residuals = _recover_vertical_residuals(
+                views,
+                selected_angle=angle,
+                selected_regions=restored,
+                original_size=original_size,
+                target_size=view_size if self.defer_restore else original_size,
+                target_angle=angle if self.defer_restore else 0,
+                page_number=page_number,
+                assessment=assessment,
+            )
         except ReaderError as error:
             self._fail(assessment, error.code, str(error))
             raise
+        restored.extend(residuals)
+        assessment["vertical_residual_recovery"] = {
+            "method": "orthogonal_margin_residual",
+            "recovered_regions": len(residuals),
+            "source_view_angles": sorted(
+                {
+                    int(
+                        region.text_provenance["orientation_residual"][
+                            "source_view_angle"
+                        ]
+                    )
+                    for region in residuals
+                    if region.text_provenance is not None
+                }
+            ),
+        }
         self._save_assessment(page_number, assessment)
         return restored
 
@@ -357,32 +437,36 @@ class OrientationReader:
         self,
         image_path: Path,
         assessment: dict[str, Any],
-    ) -> list[int]:
+    ) -> tuple[list[int], list[int]]:
         prediction = self._detect_orientation(image_path, assessment)
         if prediction is None:
             osd = self._detect_osd(image_path, assessment)
             if osd and float(osd["confidence"]) >= self.osd_min_confidence:
+                angle = int(osd["angle"])
                 assessment["selector"] = "tesseract_osd"
-                return [int(osd["angle"])]
-            return list(ROTATIONS)
+                if angle == 0:
+                    return [0], []
+                assessment["selector"] = "tesseract_osd_evidence_check"
+                return [angle, 0], []
+            return list(ROTATIONS), []
 
         angle = int(prediction["angle"])
         if angle == 0:
             if float(prediction["confidence"]) < DIRECT_ORIENTATION_CONFIDENCE:
                 assessment["selector"] = "orientation_evidence_fallback"
                 assessment["osd_status"] = "skipped_uncertain_zero_prediction"
-                return list(ROTATIONS)
+                return [0], [90, 180, 270]
             assessment["selector"] = "orientation_classifier"
             assessment["osd_status"] = "skipped_zero_prediction"
-            return [0]
+            return [0], []
 
         osd = self._detect_osd(image_path, assessment)
         if osd and int(osd["angle"]) == angle:
             assessment["selector"] = "orientation_agreement"
-            return [angle]
+            return [angle], []
         assessment["selector"] = "orientation_evidence_fallback"
         alternate = int(osd["angle"]) if osd else 0
-        return list(dict.fromkeys((angle, alternate)))
+        return list(dict.fromkeys((angle, alternate))), []
 
     def _detect_orientation(
         self,
@@ -447,11 +531,17 @@ class OrientationReader:
             try:
                 regions = self.reader.read(path, page_number)
             except ReaderError as error:
+                nested_execution = self._nested_reader_execution(page_number)
+                if nested_execution is not None:
+                    assessment["view_reader_execution"][str(angle)] = nested_execution
                 assessment["view_failures"][str(angle)] = {
                     "code": error.code,
                     "message": str(error),
                 }
                 continue
+            nested_execution = self._nested_reader_execution(page_number)
+            if nested_execution is not None:
+                assessment["view_reader_execution"][str(angle)] = nested_execution
             nested_review = getattr(self.reader, "page_needs_review", None)
             if callable(nested_review) and nested_review(page_number):
                 assessment["nested_reader_reviews"][str(angle)] = True
@@ -465,6 +555,42 @@ class OrientationReader:
             assessment["view_scores"][str(angle)] = score
             views.append((angle, image.size, score, regions))
         return views
+
+    def _nested_reader_execution(
+        self,
+        page_number: int,
+    ) -> dict[str, object] | None:
+        coverage = getattr(self.reader, "coverage_assessment", None)
+        if not callable(coverage):
+            return None
+        assessment = coverage(page_number)
+        if not isinstance(assessment, dict):
+            return None
+        pages = assessment.get("pages")
+        if not isinstance(pages, list) or len(pages) < page_number:
+            return None
+        page = pages[page_number - 1]
+        if not isinstance(page, dict):
+            return None
+        keys = (
+            "ran",
+            "status",
+            "selected_view",
+            "fallback_reader",
+            "fallback_reader_runs",
+            "fallback_candidates",
+            "confirmation_reader",
+            "confirmation_reader_runs",
+            "qualifying_regions",
+            "band_count",
+            "replaced_bands",
+            "review_reasons",
+            "nested_reader",
+        )
+        return {
+            "reader": self.reader.name,
+            **{key: deepcopy(page[key]) for key in keys if key in page},
+        }
 
     def _fail(
         self,
@@ -555,6 +681,8 @@ def _orientation_score(regions: list[TextRegion]) -> dict[str, object]:
     high_confidence_characters = 0
     repeated_characters = 0
     confidences = []
+    horizontal_words = 0
+    geometry_words = 0
     for region in regions:
         characters = len("".join(region.text.split()))
         confidence = region.confidence if region.confidence is not None else 0.0
@@ -569,6 +697,12 @@ def _orientation_score(regions: list[TextRegion]) -> dict[str, object]:
         if characters:
             confidences.append(confidence)
         repeated_characters += repeated
+        if characters:
+            width = region.bounding_box.right - region.bounding_box.left
+            height = region.bounding_box.bottom - region.bounding_box.top
+            if width > 0 and height > 0:
+                geometry_words += 1
+                horizontal_words += int(width >= height)
 
     strongest = sorted(confidences, reverse=True)[:MAX_SCORED_WORDS]
     confidence_evidence = sum(
@@ -581,6 +715,9 @@ def _orientation_score(regions: list[TextRegion]) -> dict[str, object]:
     )
     repetition_fraction = (
         repeated_characters / character_count if character_count else 1.0
+    )
+    horizontal_word_fraction = (
+        horizontal_words / geometry_words if geometry_words else 0.0
     )
     sufficient_support = supporting_words >= MIN_SUPPORTING_WORDS
     selection_value = mean_confidence if sufficient_support else confidence_evidence
@@ -599,10 +736,27 @@ def _orientation_score(regions: list[TextRegion]) -> dict[str, object]:
         "mean_confidence": round(mean_confidence, 6),
         "high_confidence_fraction": round(high_confidence_fraction, 6),
         "repetition_fraction": round(repetition_fraction, 6),
+        "horizontal_word_fraction": round(horizontal_word_fraction, 6),
+        "geometry_words": geometry_words,
         "characters": character_count,
         "words": len(confidences),
         "supporting_words": supporting_words,
     }
+
+
+def _accept_upright_evidence(score: dict[str, object] | None) -> bool:
+    if score is None:
+        return False
+    return (
+        int(score["supporting_words"]) >= MIN_SUPPORTING_WORDS
+        and int(score["geometry_words"]) >= MIN_GEOMETRY_WORDS
+        and int(score["characters"]) >= ADAPTIVE_UPRIGHT_MIN_CHARACTERS
+        and float(score["horizontal_word_fraction"]) >= HORIZONTAL_WORD_FRACTION
+        and float(score["mean_confidence"]) >= ADAPTIVE_UPRIGHT_MEAN_CONFIDENCE
+        and float(score["high_confidence_fraction"])
+        >= ADAPTIVE_UPRIGHT_HIGH_CONFIDENCE_FRACTION
+        and float(score["repetition_fraction"]) <= ADAPTIVE_UPRIGHT_MAX_REPETITION
+    )
 
 
 def _rank_views(
@@ -640,6 +794,27 @@ def _rank_views(
         return [broadest, *(item for item in ranked if item != broadest)], (
             "coverage_recovery"
         )
+
+    horizontal_views = [
+        view
+        for view in ranked
+        if int(view[2]["geometry_words"]) >= MIN_GEOMETRY_WORDS
+        and float(view[2]["horizontal_word_fraction"]) >= HORIZONTAL_WORD_FRACTION
+    ]
+    if (
+        int(strongest_score["geometry_words"]) >= MIN_GEOMETRY_WORDS
+        and float(strongest_score["horizontal_word_fraction"]) <= VERTICAL_WORD_FRACTION
+        and horizontal_views
+    ):
+        horizontal = horizontal_views[0]
+        horizontal_score = horizontal[2]
+        confidence_is_close = float(
+            horizontal_score["mean_confidence"]
+        ) + GEOMETRY_CONFIDENCE_TOLERANCE >= float(strongest_score["mean_confidence"])
+        if horizontal != strongest and confidence_is_close:
+            return [horizontal, *(item for item in ranked if item != horizontal)], (
+                "word_box_geometry"
+            )
     return ranked, "confidence_evidence"
 
 
@@ -658,6 +833,12 @@ def _score_margin(
             (best_characters - second_characters) / max(best_characters, 1.0),
             6,
         )
+    if selection_reason == "word_box_geometry":
+        return round(
+            float(best["horizontal_word_fraction"])
+            - float(second["horizontal_word_fraction"]),
+            6,
+        )
     second_value = (
         float(second["selection_value"])
         if second["selection_metric"] == best["selection_metric"]
@@ -665,6 +846,212 @@ def _score_margin(
     )
     best_value = float(best["selection_value"])
     return round((best_value - second_value) / max(best_value, 1e-9), 6)
+
+
+def _recover_vertical_residuals(
+    views: list[tuple[int, tuple[int, int], dict[str, object], list[TextRegion]]],
+    *,
+    selected_angle: int,
+    selected_regions: list[TextRegion],
+    original_size: tuple[int, int],
+    target_size: tuple[int, int],
+    target_angle: int,
+    page_number: int,
+    assessment: dict[str, Any],
+) -> list[TextRegion]:
+    candidates: list[tuple[TextRegion, int, BoundingBox]] = []
+    selected_text = {_normalized_text(region.text) for region in selected_regions}
+    for angle, view_size, _, regions in views:
+        if (angle - selected_angle) % 180 != 90:
+            continue
+        for region in regions:
+            if not _is_vertical_residual_source(region):
+                continue
+            restored_box = _restore_box(
+                region.bounding_box,
+                angle,
+                original_size,
+                view_size,
+            )
+            if not _is_vertical_margin_box(restored_box, original_size):
+                continue
+            target_box = (
+                restored_box
+                if target_angle == 0
+                else _rotate_box(
+                    restored_box,
+                    target_angle,
+                    original_size,
+                    target_size,
+                )
+            )
+            if not _is_vertical_margin_box(target_box, target_size):
+                continue
+            if _normalized_text(region.text) in selected_text:
+                continue
+            if any(
+                _box_overlap(target_box, selected.bounding_box)
+                > VERTICAL_RESIDUAL_MAX_OVERLAP
+                for selected in selected_regions
+            ):
+                continue
+            candidates.append((region, angle, target_box))
+
+    supported = [
+        candidate
+        for candidate in candidates
+        if _has_vertical_support(candidate, candidates)
+    ]
+    accepted: list[tuple[TextRegion, int, BoundingBox]] = []
+    for candidate in sorted(
+        supported,
+        key=lambda item: (
+            -_box_area(item[2]),
+            -(item[0].confidence or 0.0),
+            item[1],
+            item[0].reading_order,
+        ),
+    ):
+        if any(_box_overlap(candidate[2], existing[2]) >= 0.5 for existing in accepted):
+            continue
+        accepted.append(candidate)
+
+    existing_ids = {region.id for region in selected_regions}
+    next_order = max((region.reading_order for region in selected_regions), default=0)
+    recovered = []
+    for source, angle, box in sorted(
+        accepted,
+        key=lambda item: (item[1], item[0].reading_order, item[2].top, item[2].left),
+    ):
+        identifier = len(recovered) + 1
+        region_id = f"p{page_number}-orientation-residual-{identifier}"
+        while region_id in existing_ids:
+            identifier += 1
+            region_id = f"p{page_number}-orientation-residual-{identifier}"
+        existing_ids.add(region_id)
+        provenance = dict(source.text_provenance or {})
+        provenance["orientation_residual"] = {
+            "method": "orthogonal_margin_residual",
+            "source_view_angle": angle,
+            "selected_view_angle": selected_angle,
+            "original_provider": source.provider,
+        }
+        recovered.append(
+            _annotate_region(
+                replace(
+                    source,
+                    id=region_id,
+                    bounding_box=box,
+                    reading_order=next_order + len(recovered) + 1,
+                    text_provenance=provenance,
+                    alternatives=list(source.alternatives),
+                ),
+                assessment,
+            )
+        )
+    return recovered
+
+
+def _is_vertical_residual_source(region: TextRegion) -> bool:
+    if region.kind not in {"text", "word"} or region.resolution != "resolved":
+        return False
+    if (
+        not region.text.strip()
+        or (region.confidence or 0.0) < VERTICAL_RESIDUAL_CONFIDENCE
+    ):
+        return False
+    width = region.bounding_box.right - region.bounding_box.left
+    height = region.bounding_box.bottom - region.bounding_box.top
+    return width >= height * VERTICAL_RESIDUAL_ASPECT_RATIO
+
+
+def _is_vertical_margin_box(
+    box: BoundingBox,
+    page_size: tuple[int, int],
+) -> bool:
+    width = box.right - box.left
+    height = box.bottom - box.top
+    page_width, _ = page_size
+    center = (box.left + box.right) / 2
+    in_side_margin = center <= page_width * VERTICAL_RESIDUAL_MARGIN_FRACTION or (
+        center >= page_width * (1 - VERTICAL_RESIDUAL_MARGIN_FRACTION)
+    )
+    return height >= width * VERTICAL_RESIDUAL_ASPECT_RATIO and in_side_margin
+
+
+def _has_vertical_support(
+    candidate: tuple[TextRegion, int, BoundingBox],
+    candidates: list[tuple[TextRegion, int, BoundingBox]],
+) -> bool:
+    region, angle, box = candidate
+    if len(_normalized_text(region.text)) >= VERTICAL_RESIDUAL_MIN_CHARACTERS:
+        return True
+    aligned_characters = sum(
+        len(_normalized_text(other.text))
+        for other, other_angle, other_box in candidates
+        if other_angle == angle and _horizontal_overlap(box, other_box) >= 0.5
+    )
+    return aligned_characters >= VERTICAL_RESIDUAL_MIN_CHARACTERS
+
+
+def _normalized_text(text: str) -> str:
+    return "".join(character for character in text.casefold() if character.isalnum())
+
+
+def _box_area(box: BoundingBox) -> int:
+    return (box.right - box.left) * (box.bottom - box.top)
+
+
+def _box_overlap(first: BoundingBox, second: BoundingBox) -> float:
+    width = max(0, min(first.right, second.right) - max(first.left, second.left))
+    height = max(0, min(first.bottom, second.bottom) - max(first.top, second.top))
+    intersection = width * height
+    return intersection / max(min(_box_area(first), _box_area(second)), 1)
+
+
+def _horizontal_overlap(first: BoundingBox, second: BoundingBox) -> float:
+    overlap = max(0, min(first.right, second.right) - max(first.left, second.left))
+    narrower = min(first.right - first.left, second.right - second.left)
+    return overlap / max(narrower, 1)
+
+
+def _rotate_box(
+    box: BoundingBox,
+    angle: int,
+    original_size: tuple[int, int],
+    view_size: tuple[int, int],
+) -> BoundingBox:
+    width, height = original_size
+    if angle == 0:
+        rotated = BoundingBox(box.left, box.top, box.right, box.bottom)
+    elif angle == 90:
+        rotated = BoundingBox(box.top, width - box.right, box.bottom, width - box.left)
+    elif angle == 180:
+        rotated = BoundingBox(
+            width - box.right,
+            height - box.bottom,
+            width - box.left,
+            height - box.top,
+        )
+    elif angle == 270:
+        rotated = BoundingBox(
+            height - box.bottom,
+            box.left,
+            height - box.top,
+            box.right,
+        )
+    else:  # pragma: no cover - caller supplies one of ROTATIONS
+        raise ReaderError("invalid_orientation_angle", f"Unsupported angle: {angle}")
+    view_width, view_height = view_size
+    if not (
+        0 <= rotated.left < rotated.right <= view_width
+        and 0 <= rotated.top < rotated.bottom <= view_height
+    ):
+        raise ReaderError(
+            "invalid_orientation_box",
+            f"Rotated box falls outside the {view_width}x{view_height} target view",
+        )
+    return rotated
 
 
 def _restore_region(
@@ -710,6 +1097,11 @@ def _annotate_region(
     }
     if assessment["nested_reader_reviews"]:
         orientation["nested_reader_reviews"] = dict(assessment["nested_reader_reviews"])
+    selected_execution = assessment["view_reader_execution"].get(
+        str(assessment["angle"])
+    )
+    if selected_execution is not None:
+        orientation["reader_execution"] = deepcopy(selected_execution)
     if "orientation_prediction" in assessment:
         orientation["orientation_prediction"] = assessment["orientation_prediction"]
     if "orientation_detector_failure" in assessment:

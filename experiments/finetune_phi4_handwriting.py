@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from collections.abc import Collection
 from dataclasses import dataclass
 from io import BytesIO
@@ -35,6 +36,7 @@ TARGET_STATES = frozenset({"resolved", "absent", "unreadable"})
 ABSTENTION_SUBTYPES = frozenset(
     {"absent", "blank", "printed_only", "stray_mark", "unreadable"}
 )
+HARD_STRATA = ("resolved", "blank", "printed_only", "stray_mark", "unreadable")
 AUGMENTATION_POLICY = {
     "crop_views": {"tight": 0.5, "context": 0.5},
     "outcomes": {
@@ -75,12 +77,15 @@ class CropRecord:
     target_state: str = "resolved"
     abstention_subtype: str | None = None
     reviewer_ids: tuple[str, ...] = ()
+    split_group_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.tight_crop_path is None:
             object.__setattr__(self, "tight_crop_path", self.crop_path)
         if self.padded_crop_path is None:
             object.__setattr__(self, "padded_crop_path", self.crop_path)
+        if self.split_group_id is None:
+            object.__setattr__(self, "split_group_id", self.family_id)
 
 
 class CropDataset:
@@ -117,7 +122,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             review_decisions=args.review_decision,
         )
         if args.validate_only:
-            print(json.dumps(dataset_summary(train, dev, args.mode), sort_keys=True))
+            scheduled_train = materialize_training_schedule(
+                train,
+                hard_replay_ratio=args.hard_replay_ratio,
+                hard_stratum_weights=args.hard_stratum_weights,
+                epochs=args.epochs,
+                seed=args.seed,
+            )
+            summary = dataset_summary(train, dev, args.mode)
+            if (
+                args.hard_replay_ratio is not None
+                and args.hard_stratum_weights is not None
+            ):
+                summary["training_schedule"] = training_schedule_summary(
+                    scheduled_train,
+                    hard_replay_ratio=args.hard_replay_ratio,
+                    hard_stratum_weights=args.hard_stratum_weights,
+                )
+            print(json.dumps(summary, sort_keys=True))
             return 0
         run_canary(
             train,
@@ -131,6 +153,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             mode=args.mode,
             seed=args.seed,
             local_files_only=not args.allow_download,
+            hard_replay_ratio=args.hard_replay_ratio,
+            hard_stratum_weights=args.hard_stratum_weights,
         )
     except (ImportError, OSError, RuntimeError, ValueError) as error:
         parser.error(str(error))
@@ -150,6 +174,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--epochs", type=_positive_int, default=3)
     parser.add_argument("--learning-rate", type=_positive_float, default=5e-5)
     parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument("--hard-replay-ratio", type=_ratio)
+    parser.add_argument("--hard-stratum-weights", type=_hard_weights)
     parser.add_argument("--allow-download", action="store_true")
     parser.add_argument(
         "--review-decision",
@@ -182,6 +208,7 @@ def load_splits(
     overlap = {row.family_id for row in train} & {row.family_id for row in dev}
     if overlap:
         raise ValueError("train and dev contain overlapping document families")
+    _validate_split_groups(train + dev)
     if review_decisions:
         accepted = reviewed_field_ids(root, train + dev, review_decisions)
         train = [row for row in train if row.field_id in accepted]
@@ -256,6 +283,192 @@ def dataset_summary(
     }
 
 
+def materialize_training_schedule(
+    records: list[CropRecord],
+    *,
+    hard_replay_ratio: tuple[int, int] | None = None,
+    hard_stratum_weights: dict[str, int] | None = None,
+    epochs: int = 1,
+    seed: int = 17,
+) -> list[CropRecord]:
+    if hard_replay_ratio is None and hard_stratum_weights is None:
+        return records
+    if hard_replay_ratio is None or hard_stratum_weights is None:
+        raise ValueError(
+            "hard replay ratio and hard stratum weights must be supplied together"
+        )
+    if not records:
+        raise ValueError("cannot schedule an empty training split")
+    if epochs <= 0:
+        raise ValueError("training schedule epochs must be positive")
+    if set(hard_stratum_weights) != set(HARD_STRATA):
+        raise ValueError("hard stratum weights must name exactly the supported strata")
+    if any(
+        weight <= 0 for weight in (*hard_replay_ratio, *hard_stratum_weights.values())
+    ):
+        raise ValueError("training schedule weights must be positive")
+    _validate_split_groups(records)
+
+    hard = [row for row in records if row.data_origin not in PUBLIC_OR_SYNTHETIC]
+    replay = [row for row in records if row.data_origin in PUBLIC_OR_SYNTHETIC]
+    source_weights = {
+        name: weight
+        for name, weight, pool in (
+            ("hard", hard_replay_ratio[0], hard),
+            ("replay", hard_replay_ratio[1], replay),
+        )
+        if pool
+    }
+    schedule_length = len(records) * epochs
+    source_counts = _weighted_counts(
+        schedule_length,
+        source_weights,
+        {"hard": len(hard), "replay": len(replay)},
+    )
+    rng = random.Random(seed)
+    scheduled = {
+        "hard": _hard_schedule(
+            hard, source_counts.get("hard", 0), hard_stratum_weights, rng
+        ),
+        "replay": _count_balanced_schedule(replay, source_counts.get("replay", 0), rng),
+    }
+    # Trainer randomizes dataset indices, so the schedule controls counts, not batches.
+    return scheduled["hard"] + scheduled["replay"]
+
+
+def training_schedule_summary(
+    records: list[CropRecord],
+    *,
+    hard_replay_ratio: tuple[int, int],
+    hard_stratum_weights: dict[str, int],
+) -> dict[str, Any]:
+    hard = [row for row in records if row.data_origin not in PUBLIC_OR_SYNTHETIC]
+    return {
+        "fields": len(records),
+        "unique_fields": len({row.field_id for row in records}),
+        "hard_fields": len(hard),
+        "replay_fields": len(records) - len(hard),
+        "hard_replay_ratio": {
+            "hard": hard_replay_ratio[0],
+            "replay": hard_replay_ratio[1],
+        },
+        "hard_stratum_weights": dict(sorted(hard_stratum_weights.items())),
+        "hard_strata": dict(
+            sorted(Counter(_hard_stratum(row) for row in hard).items())
+        ),
+    }
+
+
+def _hard_schedule(
+    records: list[CropRecord],
+    count: int,
+    weights: dict[str, int],
+    rng: random.Random,
+) -> list[CropRecord]:
+    by_stratum = {
+        stratum: [row for row in records if _hard_stratum(row) == stratum]
+        for stratum in HARD_STRATA
+    }
+    available_weights = {
+        stratum: weights[stratum] for stratum in HARD_STRATA if by_stratum[stratum]
+    }
+    counts = _weighted_counts(
+        count,
+        available_weights,
+        {stratum: len(rows) for stratum, rows in by_stratum.items() if rows},
+    )
+    result = [
+        record
+        for stratum, amount in counts.items()
+        for record in _count_balanced_schedule(by_stratum[stratum], amount, rng)
+    ]
+    return result
+
+
+def _hard_stratum(record: CropRecord) -> str:
+    if record.target_state == "resolved":
+        return "resolved"
+    if record.target_state == "unreadable":
+        return "unreadable"
+    if record.target_state == "absent" and record.abstention_subtype in HARD_STRATA:
+        return str(record.abstention_subtype)
+    if record.target_state == "absent":
+        raise ValueError(
+            "scheduled absent row must specify blank, printed_only, or stray_mark: "
+            f"{record.field_id}"
+        )
+    raise ValueError(f"hard row has no supported stratum: {record.field_id}")
+
+
+def _count_balanced_schedule(
+    records: list[CropRecord], count: int, rng: random.Random
+) -> list[CropRecord]:
+    if not count:
+        return []
+    if count < len(records):
+        raise ValueError("schedule cannot cover every accepted field")
+    rows_by_family_group: dict[str, dict[str, list[CropRecord]]] = {}
+    for row in records:
+        family_groups = rows_by_family_group.setdefault(row.family_id, {})
+        family_groups.setdefault(str(row.split_group_id), []).append(row)
+    families = sorted(rows_by_family_group)
+    rng.shuffle(families)
+    groups_by_family = {
+        family: sorted(rows_by_family_group[family]) for family in families
+    }
+    for groups in groups_by_family.values():
+        rng.shuffle(groups)
+    for family_groups in rows_by_family_group.values():
+        for rows in family_groups.values():
+            rng.shuffle(rows)
+
+    result = list(records)
+    family_counts = Counter(row.family_id for row in result)
+    group_counts = Counter(str(row.split_group_id) for row in result)
+    row_counts = Counter(row.field_id for row in result)
+    for _ in range(count - len(records)):
+        family = min(families, key=family_counts.__getitem__)
+        group = min(groups_by_family[family], key=group_counts.__getitem__)
+        row = min(
+            rows_by_family_group[family][group],
+            key=lambda item: row_counts[item.field_id],
+        )
+        result.append(row)
+        family_counts[family] += 1
+        group_counts[group] += 1
+        row_counts[row.field_id] += 1
+    return result
+
+
+def _weighted_counts(
+    total: int,
+    weights: dict[str, int],
+    minimums: dict[str, int],
+) -> dict[str, int]:
+    if not weights:
+        return {}
+    weight_sum = sum(weights.values())
+    counts = {name: total * weight // weight_sum for name, weight in weights.items()}
+    remainder = total - sum(counts.values())
+    priority = sorted(
+        weights,
+        key=lambda name: (-(total * weights[name] % weight_sum), name),
+    )
+    for name in priority[:remainder]:
+        counts[name] += 1
+    unavailable = [
+        name
+        for name, minimum in minimums.items()
+        if minimum and counts.get(name, 0) < minimum
+    ]
+    if unavailable:
+        raise ValueError(
+            "configured run cannot cover every accepted field within one-record "
+            "rounding tolerance"
+        )
+    return counts
+
+
 def run_canary(
     train: list[CropRecord],
     dev: list[CropRecord],
@@ -269,6 +482,8 @@ def run_canary(
     mode: str = "canary",
     seed: int = 17,
     local_files_only: bool = True,
+    hard_replay_ratio: tuple[int, int] | None = None,
+    hard_stratum_weights: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     validate_runtime_choice(model_name, device)
     if output.exists():
@@ -279,6 +494,14 @@ def run_canary(
         row.data_origin in PUBLIC_OR_SYNTHETIC for row in train + dev
     ):
         raise ValueError("infrastructure mode accepts only public or synthetic rows")
+
+    scheduled_train = materialize_training_schedule(
+        train,
+        hard_replay_ratio=hard_replay_ratio,
+        hard_stratum_weights=hard_stratum_weights,
+        epochs=epochs,
+        seed=seed,
+    )
 
     torch, processor, model, trainer_types = load_runtime(
         model_name,
@@ -298,7 +521,7 @@ def run_canary(
         per_device_train_batch_size=MICROBATCH,
         per_device_eval_batch_size=MICROBATCH,
         gradient_accumulation_steps=gradient_steps,
-        num_train_epochs=epochs,
+        num_train_epochs=1 if hard_replay_ratio is not None else epochs,
         max_steps=2 if mode == "infrastructure" else -1,
         learning_rate=learning_rate,
         warmup_ratio=0.03,
@@ -321,7 +544,7 @@ def run_canary(
     trainer = trainer_types[0](
         model=model,
         args=training_args,
-        train_dataset=CropDataset(train, processor, training=True, seed=seed),
+        train_dataset=CropDataset(scheduled_train, processor, training=True, seed=seed),
         data_collator=lambda batch: collate(batch, processor.tokenizer.pad_token_id),
     )
     trainer.train()
@@ -332,7 +555,7 @@ def run_canary(
         model,
         adapter_path,
         torch,
-        training_family_ids={record.family_id for record in train},
+        training_family_ids={record.family_id for record in scheduled_train},
     )
     del trainer
     del model
@@ -378,6 +601,8 @@ def run_canary(
             "gradient_accumulation_steps": gradient_steps,
             "mode": mode,
             "seed": seed,
+            "epochs": epochs,
+            "trainer_epochs": 1 if hard_replay_ratio is not None else epochs,
             "max_steps": 2 if mode == "infrastructure" else None,
         },
         "dataset": dataset_summary(train, dev, mode),
@@ -390,6 +615,12 @@ def run_canary(
         "cases": safe_case_metadata(dev, before, after),
         "reload_prediction_parity": True,
     }
+    if hard_replay_ratio is not None and hard_stratum_weights is not None:
+        result["training_schedule"] = training_schedule_summary(
+            scheduled_train,
+            hard_replay_ratio=hard_replay_ratio,
+            hard_stratum_weights=hard_stratum_weights,
+        )
     (output / "result.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -830,6 +1061,18 @@ def _load_split(root: Path, split: str, mode: str) -> list[CropRecord]:
     return rows
 
 
+def _validate_split_groups(records: list[CropRecord]) -> None:
+    group_lineage: dict[str, tuple[str, str]] = {}
+    for record in records:
+        group = str(record.split_group_id)
+        lineage = (record.family_id, record.split)
+        previous = group_lineage.setdefault(group, lineage)
+        if previous[0] != lineage[0]:
+            raise ValueError("split group belongs to multiple document families")
+        if previous[1] != lineage[1]:
+            raise ValueError("split group belongs to multiple splits")
+
+
 def _record(
     value: object,
     root: Path,
@@ -845,7 +1088,12 @@ def _record(
         isinstance(value.get(key), str) and value[key].strip() for key in required
     ):
         raise ValueError(f"row is missing required text at {path}:{line_number}")
-    identifiers = [value[key] for key in ("field_id", "case_id", "family_id")]
+    split_group_id = value.get("split_group_id", value["family_id"])
+    if not isinstance(split_group_id, str) or not split_group_id.strip():
+        raise ValueError(f"row has an invalid split group at {path}:{line_number}")
+    identifiers = [value[key] for key in ("field_id", "case_id", "family_id")] + [
+        split_group_id
+    ]
     category = value.get("category_id")
     if (isinstance(category, str) and category.upper() == "C14") or any(
         identifier.upper() == "C14" or identifier.upper().startswith("C14-")
@@ -913,6 +1161,7 @@ def _record(
         target_state=target_state,
         abstention_subtype=abstention_subtype,
         reviewer_ids=reviewer_ids,
+        split_group_id=split_group_id,
     )
 
 
@@ -1191,6 +1440,40 @@ def _positive_float(value: str) -> float:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be positive")
     return parsed
+
+
+def _ratio(value: str) -> tuple[int, int]:
+    parts = value.split(":")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("must be HARD:REPLAY")
+    try:
+        hard, replay = (int(part) for part in parts)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be HARD:REPLAY integers") from error
+    if hard <= 0 or replay <= 0:
+        raise argparse.ArgumentTypeError("ratio values must be positive")
+    return hard, replay
+
+
+def _hard_weights(value: str) -> dict[str, int]:
+    weights: dict[str, int] = {}
+    try:
+        for item in value.split(","):
+            name, weight = item.split("=", 1)
+            if name in weights:
+                raise ValueError
+            weights[name] = int(weight)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "must be comma-separated STRATUM=WEIGHT integers"
+        ) from error
+    if set(weights) != set(HARD_STRATA):
+        raise argparse.ArgumentTypeError(
+            "must name exactly resolved, blank, printed_only, stray_mark, unreadable"
+        )
+    if any(weight <= 0 for weight in weights.values()):
+        raise argparse.ArgumentTypeError("stratum weights must be positive")
+    return weights
 
 
 if __name__ == "__main__":

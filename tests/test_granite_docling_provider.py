@@ -77,6 +77,13 @@ def test_granite_reader_processes_structured_page(tmp_path: Path) -> None:
     assert region.kind == "page_text"
     assert region.bounding_box.right == 200
     assert region.bounding_box.bottom == 100
+    assert region.text_provenance["text_authority"] == "structure_challenger_only"
+    assert region.text_provenance["generation"] == {
+        "max_new_tokens": 256,
+        "generated_tokens": 2,
+        "finish_reason": "before_token_limit",
+        "raw_doctags": "<text>Exact text</text>",
+    }
 
 
 def test_granite_reader_reports_predict_and_output_failures(tmp_path: Path) -> None:
@@ -107,6 +114,34 @@ def test_granite_reader_reports_predict_and_output_failures(tmp_path: Path) -> N
 
     assert predict_result.failures[0].code == "granite_predict_failed"
     assert output_result.failures[0].code == "granite_output_failed"
+
+
+def test_granite_reader_rejects_token_limit_truncation(tmp_path: Path) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (10, 10), "white").save(image_path)
+
+    class TruncatedModel(FakeModel):
+        def generate(self, **inputs: object) -> list[list[int]]:
+            return [[1, 2, 3, 101, 102]]
+
+    result = process_document(
+        image_path,
+        GraniteDoclingReader(
+            max_new_tokens=2,
+            processor=FakeProcessor(),
+            model=TruncatedModel(),
+            converter=lambda doctags, image: "must not be accepted",
+        ),
+    )
+
+    assert result.failures[0].code == "granite_output_truncated"
+
+
+def test_granite_reader_requires_positive_local_generation() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        GraniteDoclingReader(max_new_tokens=0)
+    with pytest.raises(ValueError, match="local_files_only"):
+        GraniteDoclingReader(local_files_only=False)
 
 
 def test_docling_converter_exports_visible_text_and_markdown(monkeypatch) -> None:

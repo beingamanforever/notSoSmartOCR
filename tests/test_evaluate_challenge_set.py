@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 from experiments.evaluate_challenge_set import evaluate_challenge_set, main
 
@@ -182,6 +184,44 @@ def test_evaluator_is_failure_inclusive_and_never_exports_private_content(
         assert private_value not in serialized
 
 
+def test_evaluator_runs_without_scipy(tmp_path: Path) -> None:
+    annotations = tmp_path / "annotations"
+    outputs = tmp_path / "outputs"
+    report_path = tmp_path / "report.json"
+    _write(annotations / "case.json", _annotation("C01-D001-P001", "Text"))
+    _write(outputs / "case.json", _output("C01-D001-P001.png", "Text"))
+    script = f"""
+import builtins
+
+original_import = builtins.__import__
+
+def block_scipy(name, *args, **kwargs):
+    if name == "scipy" or name.startswith("scipy."):
+        raise ModuleNotFoundError("SciPy is unavailable")
+    return original_import(name, *args, **kwargs)
+
+builtins.__import__ = block_scipy
+from experiments.evaluate_challenge_set import main
+
+raise SystemExit(main([
+    {str(annotations)!r},
+    {str(outputs)!r},
+    {str(report_path)!r},
+]))
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(report_path.read_text(encoding="utf-8"))["cases"]["paired"] == 1
+
+
 def test_evaluator_reports_table_control_and_handwriting_metrics(
     tmp_path: Path,
 ) -> None:
@@ -317,6 +357,35 @@ def test_transcription_scores_selected_table_cells_without_markdown_markup(
     assert transcription["cer"] == 0.0
     assert transcription["wer"] == 0.0
     assert transcription["hallucinated_text_rate"] == 0.0
+
+
+def test_transcription_reports_token_multiset_omissions_and_additions(
+    tmp_path: Path,
+) -> None:
+    annotations = tmp_path / "annotations"
+    outputs = tmp_path / "outputs"
+    _write(
+        annotations / "case.json",
+        _annotation("C02-D003-P001", "Q1 100K Q2 200K"),
+    )
+    _write(
+        outputs / "case.json",
+        _output("C02-D003-P001.png", "Q1 Q2 100K 300K 100K"),
+    )
+
+    token_metrics = evaluate_challenge_set(annotations, outputs)["transcription"][
+        "token_multiset"
+    ]
+
+    assert token_metrics == {
+        "policy": "normalized_whitespace_token_multiset",
+        "reference_tokens": 4,
+        "prediction_tokens": 5,
+        "found_tokens": 3,
+        "added_tokens": 2,
+        "tokens_found": 0.75,
+        "tokens_added": 0.4,
+    }
 
 
 def test_evaluator_buckets_private_aggregate_labels(tmp_path: Path) -> None:
@@ -691,7 +760,69 @@ def test_control_bbox_metrics_report_optional_missing_boxes(tmp_path: Path) -> N
     assert bbox["exhaustive"]["recall"] == 1.0
 
 
-def test_table_descriptor_denominators_include_unpaired_reference_tables(
+def test_control_bbox_metrics_use_optimal_one_to_one_assignment(tmp_path: Path) -> None:
+    annotations = tmp_path / "annotations"
+    outputs = tmp_path / "outputs"
+    _write(
+        annotations / "case.json",
+        _annotation(
+            "C05-D006-P001",
+            "Controls",
+            control_annotation_scope="exhaustive",
+            controls=[
+                {
+                    "kind": "checkbox",
+                    "label": "A",
+                    "state": "checked",
+                    "bounding_box": {"left": 0, "top": 0, "right": 10, "bottom": 30},
+                },
+                {
+                    "kind": "checkbox",
+                    "label": "B",
+                    "state": "checked",
+                    "bounding_box": {"left": 0, "top": 0, "right": 10, "bottom": 20},
+                },
+            ],
+        ),
+    )
+    _write(
+        outputs / "case.json",
+        _output(
+            "C05-D006-P001.png",
+            "Controls",
+            regions=[
+                {
+                    "kind": "checkbox",
+                    "bounding_box": {"left": 0, "top": 0, "right": 10, "bottom": 30},
+                    "structure": {
+                        "control_type": "checkbox",
+                        "label": "X",
+                        "state": "selected",
+                    },
+                },
+                {
+                    "kind": "checkbox",
+                    "bounding_box": {"left": 0, "top": 0, "right": 10, "bottom": 50},
+                    "structure": {
+                        "control_type": "checkbox",
+                        "label": "Y",
+                        "state": "selected",
+                    },
+                },
+            ],
+        ),
+    )
+
+    bbox = evaluate_challenge_set(annotations, outputs)["controls"]["bbox"]
+
+    assert bbox["matching_policy"] == ("hungarian_one_to_one_max_cardinality_then_iou")
+    assert bbox["iou_thresholds"] == [0.5, 0.7]
+    assert bbox["exhaustive"]["matched"] == 2
+    assert bbox["iou_0_7"]["exhaustive"]["matched"] == 1
+    assert bbox["length_penalty"]["value"] == 0.0
+
+
+def test_table_descriptors_keep_valid_pairs_when_counts_differ(
     tmp_path: Path,
 ) -> None:
     annotations = tmp_path / "annotations"
@@ -732,11 +863,64 @@ def test_table_descriptor_denominators_include_unpaired_reference_tables(
 
     descriptors = evaluate_challenge_set(annotations, outputs)["tables"]["descriptors"]
 
-    assert descriptors["paired_tables"] == 0
+    assert descriptors["pairing"] == "annotation-and-prediction-reading-order"
+    assert descriptors["spatial_matching_supported"] is False
+    assert descriptors["pairing_limitation"] == (
+        "reference table boxes are unavailable; declared annotation and prediction "
+        "reading order is used"
+    )
+    assert descriptors["count_semantics"] == "annotation-declared-not-geometric"
+    assert descriptors["paired_tables"] == 1
+    assert descriptors["missed_reference_tables"] == 2
+    assert descriptors["extra_predicted_tables"] == 0
     assert descriptors["row_count_eligible"] == 3
-    assert descriptors["row_count_accuracy"] == 0.0
+    assert descriptors["row_count_accuracy"] == 0.333333
+    assert descriptors["row_count_accuracy_on_pairs"] == 1.0
+    assert descriptors["row_count_mae_on_numeric_pairs"] == 0.0
     assert descriptors["column_count_eligible"] == 3
-    assert descriptors["column_count_accuracy"] == 0.0
+    assert descriptors["column_count_accuracy"] == 0.333333
+    assert descriptors["column_count_accuracy_on_pairs"] == 1.0
+    assert descriptors["column_count_mae_on_numeric_pairs"] == 0.0
+
+
+def test_table_descriptors_report_extra_predictions(tmp_path: Path) -> None:
+    annotations = tmp_path / "annotations"
+    outputs = tmp_path / "outputs"
+    _write(
+        annotations / "case.json",
+        _annotation(
+            "C06-D003-P001",
+            "Extra table output",
+            tables=[{"row_count": 3, "column_count": 4}],
+        ),
+    )
+    _write(
+        outputs / "case.json",
+        _output(
+            "C06-D003-P001.png",
+            "Extra table output",
+            regions=[
+                {
+                    "kind": "table",
+                    "reading_order": 1,
+                    "structure": {"row_count": 3, "column_count": 4},
+                },
+                {
+                    "kind": "table",
+                    "reading_order": 2,
+                    "structure": {"row_count": 8, "column_count": 9},
+                },
+            ],
+        ),
+    )
+
+    descriptors = evaluate_challenge_set(annotations, outputs)["tables"]["descriptors"]
+
+    assert descriptors["paired_tables"] == 1
+    assert descriptors["missed_reference_tables"] == 0
+    assert descriptors["extra_predicted_tables"] == 1
+    assert descriptors["row_count_accuracy"] == 1.0
+    assert descriptors["column_count_accuracy"] == 1.0
 
 
 def test_handwriting_recovery_uses_token_boundaries_and_unique_mentions(
@@ -843,6 +1027,61 @@ def test_handwriting_recovery_rejects_matching_text_outside_annotated_box(
         "eligible": 2,
         "recovered": 2,
         "rate": 1.0,
+    }
+
+
+def test_handwriting_bbox_metrics_use_optimal_one_to_one_assignment(
+    tmp_path: Path,
+) -> None:
+    annotations = tmp_path / "annotations"
+    outputs = tmp_path / "outputs"
+    _write(
+        annotations / "case.json",
+        _annotation(
+            "C07-D003-P001",
+            "dose dose",
+            handwriting=[
+                {"text": "dose", "legibility": "legible", "bbox": [0, 0, 10, 30]},
+                {"text": "dose", "legibility": "legible", "bbox": [0, 0, 10, 20]},
+            ],
+        ),
+    )
+    _write(
+        outputs / "case.json",
+        _output(
+            "C07-D003-P001.png",
+            "dose dose",
+            regions=[
+                {
+                    "id": "x",
+                    "kind": "text",
+                    "text": "dose",
+                    "bounding_box": {"left": 0, "top": 0, "right": 10, "bottom": 30},
+                },
+                {
+                    "id": "y",
+                    "kind": "text",
+                    "text": "dose",
+                    "bounding_box": {"left": 0, "top": 0, "right": 10, "bottom": 50},
+                },
+            ],
+        ),
+    )
+
+    handwriting = evaluate_challenge_set(annotations, outputs)["handwriting"]
+
+    assert handwriting["matching_policy"] == (
+        "hungarian_one_to_one_exact_text_max_cardinality_then_iou"
+    )
+    assert handwriting["legible_exact_recovery"] == {
+        "eligible": 2,
+        "recovered": 2,
+        "rate": 1.0,
+    }
+    assert handwriting["localized_exact_recovery"]["iou_0_7"]["legible"] == {
+        "eligible": 2,
+        "recovered": 1,
+        "rate": 0.5,
     }
 
 

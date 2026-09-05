@@ -61,6 +61,46 @@ def test_nemotron_reader_preserves_regions_confidence_and_order(
     assert second.reading_order == 2
 
 
+def test_nemotron_readers_can_share_one_execution_lock(tmp_path: Path) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (120, 100), "white").save(image_path)
+
+    class RecordingLock:
+        def __init__(self) -> None:
+            self.entries = 0
+            self.active = False
+
+        def __enter__(self) -> None:
+            assert self.active is False
+            self.active = True
+            self.entries += 1
+
+        def __exit__(self, *args: object) -> None:
+            self.active = False
+
+    lock = RecordingLock()
+
+    class LockedPipeline(FakePipeline):
+        def __call__(
+            self,
+            image_path: str,
+            *,
+            merge_level: str,
+        ) -> list[dict[str, object]]:
+            assert lock.active is True
+            return super().__call__(image_path, merge_level=merge_level)
+
+    pipeline = LockedPipeline()
+    first = NemotronOCRV2Reader(pipeline=pipeline, execution_lock=lock)
+    second = NemotronOCRV2Reader(pipeline=pipeline, execution_lock=lock)
+
+    first.read(image_path, 1)
+    second.read(image_path, 2)
+
+    assert lock.entries == 2
+    assert first._lock is second._lock
+
+
 def test_nemotron_reader_uses_native_batch_and_preserves_page_geometry(
     tmp_path: Path,
 ) -> None:
@@ -334,42 +374,82 @@ def test_nemotron_reader_rejects_out_of_range_confidence(tmp_path: Path) -> None
         assert result.failures[0].code == "invalid_reader_output"
 
 
-def test_nemotron_reader_clips_small_detector_spill_but_rejects_large_spill(
+def test_nemotron_reader_clips_image_anchored_detector_spill(
     tmp_path: Path,
 ) -> None:
     image_path = tmp_path / "page.png"
     Image.new("RGB", (100, 50), "white").save(image_path)
 
     class SpillPipeline:
-        def __init__(self, left: float) -> None:
-            self.left = left
+        def __init__(self, box: tuple[float, float, float, float]) -> None:
+            self.box = box
 
+        def __call__(
+            self, image_path: str, *, merge_level: str
+        ) -> list[dict[str, object]]:
+            left, lower, right, upper = self.box
+            return [
+                {
+                    "text": "edge text",
+                    "confidence": 0.9,
+                    "left": left,
+                    "lower": lower,
+                    "right": right,
+                    "upper": upper,
+                }
+            ]
+
+    bottom_clipped = process_document(
+        image_path,
+        NemotronOCRV2Reader(pipeline=SpillPipeline((0.1, 0.75, 0.8, 1.0408))),
+    )
+    left_clipped = process_document(
+        image_path,
+        NemotronOCRV2Reader(pipeline=SpillPipeline((-0.03, 0.1, 0.8, 0.3))),
+    )
+
+    assert bottom_clipped.status == "success"
+    assert bottom_clipped.pages[0].regions[0].bounding_box == BoundingBox(
+        10, 37, 80, 50
+    )
+    assert left_clipped.status == "success"
+    assert left_clipped.pages[0].regions[0].bounding_box == BoundingBox(0, 5, 80, 15)
+    assert bottom_clipped.pages[0].regions[0].text_provenance == {
+        "merge_level": "paragraph",
+        "bounding_box_adjustment": {
+            "method": "clip_to_image",
+            "normalized_box": [0.1, 0.75, 0.8, 1.0408],
+        },
+    }
+
+
+def test_nemotron_reader_rejects_detector_box_not_anchored_in_image(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (100, 50), "white").save(image_path)
+
+    class OutsidePipeline:
         def __call__(
             self, image_path: str, *, merge_level: str
         ) -> list[dict[str, object]]:
             return [
                 {
-                    "text": "edge text",
+                    "text": "outside text",
                     "confidence": 0.9,
-                    "left": self.left,
+                    "left": 1.2,
                     "lower": 0.1,
-                    "right": 1.0015,
+                    "right": 1.5,
                     "upper": 0.3,
                 }
             ]
 
-    clipped = process_document(
+    result = process_document(
         image_path,
-        NemotronOCRV2Reader(pipeline=SpillPipeline(-0.01)),
-    )
-    rejected = process_document(
-        image_path,
-        NemotronOCRV2Reader(pipeline=SpillPipeline(-0.03)),
+        NemotronOCRV2Reader(pipeline=OutsidePipeline()),
     )
 
-    assert clipped.status == "success"
-    assert clipped.pages[0].regions[0].bounding_box == BoundingBox(0, 5, 100, 15)
-    assert rejected.failures[0].code == "invalid_reader_output"
+    assert result.failures[0].code == "invalid_reader_output"
 
 
 def test_nemotron_reader_reports_import_and_init_failures(

@@ -121,6 +121,101 @@ def test_nested_table_cell_conflict_routes_review_without_hiding_table(
     assert result.pages[0].text.value == "| primary |"
 
 
+def test_post_restore_recovery_failure_preserves_last_good_regions(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (40, 20), "white").save(source)
+
+    class FailedRecoveryReader(FixedReader):
+        def restore_regions(
+            self,
+            regions: list[TextRegion],
+            page_number: int,
+        ) -> list[TextRegion]:
+            regions[0].text = "restored canonical"
+            return regions
+
+        def recover_regions(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            regions[0].text = "mutated before failure"
+            raise ReaderError("recovery_failed", "controlled recovery failure")
+
+    result = process_document(source, FailedRecoveryReader())
+
+    assert result.pages[0].route == "review"
+    assert result.pages[0].text.value == "restored canonical"
+    assert result.pages[0].regions[0].text == "restored canonical"
+    assert result.pages[0].failure_ids == ["failure-1"]
+    assert result.failures[0].stage == "ocr"
+    assert result.failures[0].code == "recovery_failed"
+
+
+def test_final_restored_tail_repetition_routes_review_without_rewriting(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (40, 20), "white").save(source)
+    repeated = "stable prefix " + "AB12|" * 8
+
+    class RestoredTailReader(FixedReader):
+        def restore_regions(
+            self,
+            regions: list[TextRegion],
+            page_number: int,
+        ) -> list[TextRegion]:
+            regions[0].text = repeated
+            return regions
+
+    result = process_document(source, RestoredTailReader())
+
+    assert result.pages[0].route == "review"
+    assert result.pages[0].text.value == repeated
+    assert result.pages[0].regions[0].text == repeated
+    assert result.pages[0].text.evidence_ids == ["p1-word-1"]
+    assert result.pages[0].regions[1].structure == {
+        "role": "coverage_risk",
+        "reasons": ["tail_repetition"],
+        "region_risks": [{"region_id": "p1-word-1", "reasons": ["tail_repetition"]}],
+    }
+
+
+def test_final_literal_date_risk_routes_review_with_result_evidence(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (40, 20), "white").save(source)
+
+    class InvalidDateStage:
+        name = "literal-validation"
+
+        def apply(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            regions[0].text = "DOB: 02/31/2024"
+            return regions
+
+    result = process_document(source, FixedReader(), stages=[InvalidDateStage()])
+
+    assert result.pages[0].route == "review"
+    assert result.pages[0].text.value == "DOB: 02/31/2024"
+    assert result.pages[0].text.evidence_ids == ["p1-word-1"]
+    assert result.pages[0].regions[1].structure == {
+        "role": "coverage_risk",
+        "reasons": ["invalid_calendar_date"],
+        "region_risks": [
+            {"region_id": "p1-word-1", "reasons": ["invalid_calendar_date"]}
+        ],
+    }
+
+
 def test_stages_run_in_order_and_keep_native_batching(tmp_path: Path) -> None:
     source = tmp_path / "pages.tiff"
     page = Image.new("RGB", (40, 20), "white")
@@ -199,6 +294,123 @@ def test_pipeline_reports_timings_outside_the_result_schema(tmp_path: Path) -> N
     assert all(seconds >= 0 for seconds in timings.values())
 
 
+def test_pipeline_reports_page_queue_and_execution_outside_schema(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "two-pages.tiff"
+    page = Image.new("RGB", (40, 20), "white")
+    page.save(source, format="TIFF", save_all=True, append_images=[page])
+    page_execution: list[dict[str, object]] = [{"page_number": 99}]
+
+    result = process_document(
+        source,
+        FixedReader(),
+        page_execution=page_execution,
+    )
+
+    assert "page_execution" not in result.to_dict()
+    assert [run["page_number"] for run in page_execution] == [1, 2]
+    assert all(float(run["queue_seconds"]) >= 0 for run in page_execution)
+    assert all(float(run["execution_seconds"]) >= 0 for run in page_execution)
+    assert all(run["batched_reader"] is False for run in page_execution)
+    assert all(set(run["steps"]) == {"reader", "stage_view"} for run in page_execution)
+    assert float(page_execution[1]["queue_seconds"]) >= float(
+        page_execution[0]["queue_seconds"]
+    )
+
+
+def test_pipeline_reports_truthful_stage_execution_outside_schema(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (40, 20), "white").save(source)
+    execution: list[dict[str, object]] = [{"stage": "stale"}]
+
+    class NoopStage:
+        name = "tables"
+
+        def apply(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            return regions
+
+    class ProductiveStage:
+        name = "controls"
+
+        def apply(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            regions[0].text += " changed"
+            regions.append(_region("control", "[x] selected", 2))
+            return regions
+
+    result = process_document(
+        source,
+        FixedReader(),
+        stages=[NoopStage(), ProductiveStage()],
+        stage_execution=execution,
+    )
+
+    assert "stage_execution" not in result.to_dict()
+    assert [run["status"] for run in execution] == ["fired", "productive"]
+    assert execution[0]["input_regions"] == execution[0]["output_regions"] == 1
+    assert execution[1]["input_regions"] == 1
+    assert execution[1]["output_regions"] == 2
+    assert execution[1]["added_regions"] == 1
+    assert execution[1]["modified_regions"] == 1
+    assert all(float(run["elapsed_seconds"]) >= 0 for run in execution)
+
+
+def test_pipeline_marks_never_reached_stages_as_skipped(tmp_path: Path) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (40, 20), "white").save(source)
+    execution: list[dict[str, object]] = []
+
+    class BrokenStageViewReader(FixedReader):
+        def stage_view(self, image_path: Path, page_number: int) -> None:
+            raise ReaderError("orientation_failed", "oriented view is unavailable")
+
+    class NoopStage:
+        name = "tables"
+
+        def apply(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            raise AssertionError("stage must not run")
+
+    result = process_document(
+        source,
+        BrokenStageViewReader(),
+        stages=[NoopStage()],
+        stage_execution=execution,
+    )
+
+    assert result.pages[0].route == "review"
+    assert execution == [
+        {
+            "page_number": 1,
+            "stage": "tables",
+            "status": "skipped",
+            "input_regions": 1,
+            "output_regions": 1,
+            "added_regions": 0,
+            "removed_regions": 0,
+            "modified_regions": 0,
+            "elapsed_seconds": 0.0,
+            "skip_reason": "orientation_failed",
+        }
+    ]
+
+
 def test_pipeline_records_prepare_time_when_rendering_fails(tmp_path: Path) -> None:
     source = tmp_path / "page.pdf"
     source.write_bytes(b"%PDF-1.4\n")
@@ -249,10 +461,12 @@ def test_stage_reader_error_keeps_last_good_regions_and_continues(
             regions[0].alternatives.append(TextAlternative("alternate", 0.7, self.name))
             return regions
 
+    execution: list[dict[str, object]] = []
     result = process_document(
         source,
         FixedReader(),
         stages=[FailingStage(), LaterStage()],
+        stage_execution=execution,
     )
 
     assert seen == ["base"]
@@ -260,6 +474,8 @@ def test_stage_reader_error_keeps_last_good_regions_and_continues(
     assert result.pages[0].regions[0].alternatives == [
         TextAlternative("alternate", 0.7, "controls")
     ]
+    assert [run["status"] for run in execution] == ["failed", "productive"]
+    assert execution[0]["failure_code"] == "model_unavailable"
     assert result.pages[0].text.value == "base"
     assert result.pages[0].route == "review"
     assert result.pages[0].failure_ids == ["failure-1"]

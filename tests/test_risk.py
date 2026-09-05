@@ -88,8 +88,24 @@ def test_uncertain_table_text_routes_review(tmp_path: Path) -> None:
     )
 
     assert result.pages[0].route == "review"
-    risk = result.pages[0].regions[-1]
-    assert risk.structure["reasons"] == ["table_text_uncertainty"]
+    assert result.pages[0].text.value == ""
+    assert result.pages[0].text.evidence_ids == ["table-1"]
+    evidence_risk = next(
+        region
+        for region in result.pages[0].regions
+        if region.provider == "deterministic-evidence-risk"
+    )
+    assert evidence_risk.structure["reasons"] == ["table_text_uncertainty"]
+    output_risk = next(
+        region
+        for region in result.pages[0].regions
+        if region.provider == "deterministic-output-validation"
+    )
+    assert output_risk.structure == {
+        "role": "coverage_risk",
+        "reasons": ["empty_content"],
+        "region_risks": [{"region_id": "table-1", "reasons": ["empty_content"]}],
+    }
 
 
 def test_non_primary_specialist_regions_do_not_distort_signal(

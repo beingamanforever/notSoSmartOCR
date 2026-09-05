@@ -383,6 +383,10 @@ def _score(prediction: str, reference: str) -> dict[str, dict[str, float | int]]
                 6,
             ),
         },
+        "spacer_d_total": _spacer_metric(
+            normalized_prediction,
+            normalized_reference,
+        ),
         "character_edit_counts": _edit_count_payload(character_counts),
         "word_edit_counts": _edit_count_payload(word_counts),
         "missed_text_rate": _case_reference_character_rate(
@@ -441,6 +445,7 @@ def _summarize(
         "cer": _aggregate_metric(records, "cer"),
         "wer": _aggregate_metric(records, "wer"),
         "normalized_edit_distance": _aggregate_normalized_edit_distance(records),
+        "spacer_d_total": _aggregate_spacer(records),
         "character_edit_counts": _aggregate_edit_counts(
             records, "character_edit_counts"
         ),
@@ -532,6 +537,40 @@ def _case_metric(edits: int, reference_units: int) -> dict[str, float | int]:
         "edits": edits,
         "reference_units": reference_units,
         "rate": round(_ratio(edits, reference_units), 6),
+    }
+
+
+def _spacer_metric(prediction: str, reference: str) -> dict[str, float | int]:
+    reference_counts = Counter(reference)
+    prediction_counts = Counter(prediction)
+    characters = set(reference_counts) | set(prediction_counts)
+    count_difference = sum(
+        abs(reference_counts[character] - prediction_counts[character])
+        for character in characters
+    )
+    deletions = max(0, len(reference) - len(prediction))
+    score = (deletions + count_difference) / (2 * len(reference)) if reference else 0.0
+    return {
+        "deletions": deletions,
+        "count_difference": count_difference,
+        "reference_characters": len(reference),
+        "rate": round(score, 6),
+    }
+
+
+def _aggregate_spacer(records: list[dict[str, object]]) -> dict[str, object]:
+    rates = [
+        float(record["metrics"]["spacer_d_total"]["rate"])  # type: ignore[index]
+        for record in records
+    ]
+    return {
+        "definition": (
+            "SpACER d_total over normalized page-level character-count vectors; "
+            "this does not provide d_ocr or parsing-versus-recognition triage"
+        ),
+        "aggregation": "median across failure-inclusive pages",
+        "case_median": round(_percentile(rates, 0.5), 6) if rates else None,
+        "scored_cases": len(rates),
     }
 
 

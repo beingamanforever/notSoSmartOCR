@@ -45,11 +45,13 @@ class CropReader:
     def __init__(self, outputs: list[str]) -> None:
         self.outputs = outputs
         self.crop_sizes: list[tuple[int, int]] = []
+        self.crop_modes: list[str] = []
         self.calls = 0
 
     def transcribe_batch(self, images: list[Image.Image]) -> list[str]:
         self.calls += 1
         self.crop_sizes = [image.size for image in images]
+        self.crop_modes = [image.mode for image in images]
         return self.outputs
 
 
@@ -326,6 +328,140 @@ def test_explicit_handwriting_candidate_is_routed_and_preserves_incumbent(
     assert region.structure["handwriting_review"]["reason"] == ("specialist_candidate")
 
 
+def test_anchored_residual_proposal_is_reread_as_unresolved_evidence(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (100, 80), (240, 230, 220)).save(source)
+    crop_reader = CropReader(["Take 5 mg every morning", "Take 5 mg every morning"])
+    stage = HandwritingStage(crop_reader, text_provider="incumbent")
+    proposal = _anchored_proposal(BoundingBox(20, 20, 60, 36))
+    unrelated_unreadable = TextRegion(
+        id="unrelated-unreadable",
+        kind="handwriting",
+        text="",
+        confidence=None,
+        bounding_box=BoundingBox(70, 20, 90, 36),
+        reading_order=3,
+        provider="other-proposal",
+        resolution="unreadable",
+        structure={"handwriting_candidate": True},
+    )
+
+    result = process_document(
+        source,
+        FixedReader(
+            [
+                _region("label", "Dose:", 0.98, BoundingBox(2, 20, 16, 36), 1),
+                proposal,
+                unrelated_unreadable,
+            ]
+        ),
+        stages=[stage],
+    )
+
+    page = result.pages[0]
+    assert crop_reader.calls == 1
+    assert crop_reader.crop_sizes == [(40, 16), (64, 40)]
+    assert crop_reader.crop_modes == ["RGB", "RGB"]
+    assert page.route == "review"
+    assert page.text.value == "Dose:"
+    assert page.text.evidence_ids == ["label"]
+    processed = next(region for region in page.regions if region.id == proposal.id)
+    assert processed.text == ""
+    assert processed.resolution == "unreadable"
+    assert processed.provider == "opencv-anchored-ink"
+    assert [(item.text, item.provider) for item in processed.alternatives] == [
+        ("Take 5 mg every morning", "phi4-handwriting")
+    ]
+    alternative = processed.alternatives[0]
+    assert alternative.text_provenance == {
+        "method": "dual_crop_exact_agreement",
+        "page_number": 1,
+        "crops": {
+            "tight": {"bounding_box": [20, 20, 60, 36]},
+            "context": {"bounding_box": [8, 8, 72, 48]},
+        },
+        "model": crop_reader.provenance,
+        "view": "agreed",
+    }
+    assert processed.structure["handwriting_review"] == {
+        "required": True,
+        "reason": "specialist_candidate",
+        "provenance": {
+            key: value
+            for key, value in alternative.text_provenance.items()
+            if key != "view"
+        },
+    }
+    assert unrelated_unreadable.alternatives == []
+    assert "handwriting_review" not in unrelated_unreadable.structure
+
+
+@pytest.mark.parametrize(
+    ("candidate", "reason"),
+    [
+        ("", "empty_candidate"),
+        ("<UNREADABLE>", "abstention_candidate"),
+        ("<|x|>", "candidate_control_tokens"),
+    ],
+)
+def test_anchored_residual_rejects_nonliteral_specialist_outputs(
+    tmp_path: Path,
+    candidate: str,
+    reason: str,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (80, 60), "white").save(source)
+    crop_reader = CropReader([candidate, candidate])
+    proposal = _anchored_proposal(BoundingBox(20, 20, 50, 35))
+
+    result = process_document(
+        source,
+        FixedReader([proposal]),
+        stages=[HandwritingStage(crop_reader, text_provider="incumbent")],
+    )
+
+    assert crop_reader.calls == 1
+    assert len(crop_reader.crop_sizes) == 2
+    page = result.pages[0]
+    processed = page.regions[0]
+    assert processed.text == ""
+    assert processed.resolution == "unreadable"
+    assert processed.alternatives == []
+    assert processed.structure["handwriting_review"]["reason"] == reason
+    assert page.route == "review"
+    assert page.text.value == ""
+
+
+def test_anchored_residual_crop_disagreement_keeps_only_valid_alternatives(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (80, 60), "white").save(source)
+    crop_reader = CropReader(["5 mg", "<|x|>"])
+
+    result = process_document(
+        source,
+        FixedReader([_anchored_proposal(BoundingBox(20, 20, 50, 35))]),
+        stages=[HandwritingStage(crop_reader, text_provider="incumbent")],
+    )
+
+    page = result.pages[0]
+    proposal = page.regions[0]
+    assert crop_reader.calls == 1
+    assert len(crop_reader.crop_sizes) == 2
+    assert proposal.text == ""
+    assert proposal.resolution == "unreadable"
+    assert [(item.text, item.provider) for item in proposal.alternatives] == [
+        ("5 mg", "phi4-handwriting:tight")
+    ]
+    assert proposal.alternatives[0].text_provenance["view"] == "tight"
+    assert proposal.structure["handwriting_review"]["reason"] == ("crop_disagreement")
+    assert page.route == "review"
+    assert page.text.value == ""
+
+
 def test_manual_review_routes_high_confidence_text_inside_a_form_grid(
     tmp_path: Path,
 ) -> None:
@@ -380,7 +516,7 @@ def test_demo_rereads_an_explicit_form_region_end_to_end() -> None:
     crop_reader = CropReader(["handwritten", "handwritten"])
     app = create_app(
         FormReader(),
-        stages=[HandwritingStage(crop_reader, text_provider="incumbent")],
+        handwriting_stage=HandwritingStage(crop_reader, text_provider="incumbent"),
     )
 
     with TestClient(app) as client:
@@ -400,7 +536,7 @@ def test_demo_rereads_an_explicit_form_region_end_to_end() -> None:
         assert reread.status_code == 200
         assert crop_reader.calls == 1
         payload = reread.json()
-        assert payload["pipeline_stages"] == ["handwriting"]
+        assert payload["pipeline_stages"] == []
         page = payload["result"]["pages"][0]
         region = page["regions"][0]
         assert page["route"] == "review"
@@ -680,4 +816,23 @@ def _region(
         provider="incumbent",
         text_provenance={"method": "fixture"},
         structure=structure,
+    )
+
+
+def _anchored_proposal(box: BoundingBox) -> TextRegion:
+    return TextRegion(
+        id="anchored-proposal",
+        kind="handwriting",
+        text="",
+        confidence=None,
+        bounding_box=box,
+        reading_order=2,
+        provider="opencv-anchored-ink",
+        text_provenance={"method": "fixture"},
+        resolution="unreadable",
+        structure={
+            "role": "handwriting_candidate",
+            "handwriting_candidate": True,
+            "handwriting_candidate_source": "anchored_residual",
+        },
     )

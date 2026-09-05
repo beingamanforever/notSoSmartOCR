@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
+from dataclasses import replace
 import json
 from pathlib import Path
 import random
@@ -219,13 +220,198 @@ def test_enables_only_existing_vision_decoder_lora() -> None:
 
 def test_parser_defaults_are_bf16_sdpa_canary_contract() -> None:
     args = finetune.build_parser().parse_args(["data", "output"])
+    scheduled = finetune.build_parser().parse_args(
+        [
+            "data",
+            "output",
+            "--hard-replay-ratio",
+            "1:1",
+            "--hard-stratum-weights",
+            "resolved=6,blank=1,printed_only=1,stray_mark=1,unreadable=1",
+        ]
+    )
 
     assert args.effective_batch == 8
     assert args.mode == "canary"
     assert args.epochs == 3
+    assert args.hard_replay_ratio is None
+    assert args.hard_stratum_weights is None
+    assert scheduled.hard_replay_ratio == (1, 1)
+    assert scheduled.hard_stratum_weights == {
+        "resolved": 6,
+        "blank": 1,
+        "printed_only": 1,
+        "stray_mark": 1,
+        "unreadable": 1,
+    }
     assert finetune.MAX_TOKENS == 1024
     assert finetune.MICROBATCH == 1
     assert finetune.MODEL_REVISION == "93f923e1a7727d1c4f446756212d9d3e8fcc5d81"
+
+
+def test_split_group_lineage_and_legacy_family_fallback(tmp_path: Path) -> None:
+    legacy = tmp_path / "legacy-groups"
+    _split(legacy, "train", "C08-D001-P001", "train", origin="public")
+    _split(legacy, "dev", "C08-D002-P001", "dev", origin="public")
+
+    train, _ = finetune.load_splits(legacy, mode="infrastructure")
+
+    assert train[0].split_group_id == train[0].family_id
+
+    invalid = tmp_path / "invalid-groups"
+    _split(
+        invalid,
+        "train",
+        "C08-D003-P001",
+        "family-one",
+        origin="public",
+        split_group_id="shared",
+    )
+    _split(
+        invalid,
+        "train",
+        "C08-D004-P001",
+        "family-two",
+        origin="public",
+        split_group_id="shared",
+    )
+    _split(invalid, "dev", "C08-D005-P001", "dev", origin="public")
+    with pytest.raises(ValueError, match="split group belongs to multiple"):
+        finetune.load_splits(invalid, mode="infrastructure")
+
+
+def test_materialized_schedule_is_deterministic_and_balanced() -> None:
+    weights = {
+        "resolved": 6,
+        "blank": 1,
+        "printed_only": 1,
+        "stray_mark": 1,
+        "unreadable": 1,
+    }
+    hard_counts = {
+        "resolved": 134,
+        "blank": 4,
+        "printed_only": 3,
+        "stray_mark": 10,
+        "unreadable": 5,
+    }
+    records = [
+        _schedule_record(
+            f"{stratum}-{index}",
+            f"hard-family-{index % 18}",
+            f"hard-family-{index % 18}-group-{index % 2}",
+            stratum=stratum,
+        )
+        for stratum, amount in hard_counts.items()
+        for index in range(amount)
+    ]
+    records.extend(
+        _schedule_record(
+            f"replay-{index}",
+            f"replay-family-{index % 20}",
+            f"replay-family-{index % 20}-group-{index % 3}",
+            origin="public",
+        )
+        for index in range(200)
+    )
+
+    first = finetune.materialize_training_schedule(
+        records,
+        hard_replay_ratio=(1, 1),
+        hard_stratum_weights=weights,
+        epochs=3,
+        seed=17,
+    )
+    repeated = finetune.materialize_training_schedule(
+        records,
+        hard_replay_ratio=(1, 1),
+        hard_stratum_weights=weights,
+        epochs=3,
+        seed=17,
+    )
+    changed_seed = finetune.materialize_training_schedule(
+        records,
+        hard_replay_ratio=(1, 1),
+        hard_stratum_weights=weights,
+        epochs=3,
+        seed=19,
+    )
+
+    assert [row.field_id for row in first] == [row.field_id for row in repeated]
+    assert [row.field_id for row in first] != [row.field_id for row in changed_seed]
+    assert {row.field_id for row in first} == {row.field_id for row in records}
+    summary = finetune.training_schedule_summary(
+        first,
+        hard_replay_ratio=(1, 1),
+        hard_stratum_weights=weights,
+    )
+    assert summary["fields"] == len(records) * 3 == 1068
+    assert summary["unique_fields"] == len(records) == 356
+    assert summary["hard_fields"] == summary["replay_fields"] == 534
+    assert summary["hard_replay_ratio"] == {"hard": 1, "replay": 1}
+    assert summary["hard_stratum_weights"] == weights
+    assert summary["hard_strata"] == {
+        "blank": 54,
+        "printed_only": 54,
+        "resolved": 320,
+        "stray_mark": 53,
+        "unreadable": 53,
+    }
+    for stratum, weight in weights.items():
+        expected = summary["hard_fields"] * weight / sum(weights.values())
+        assert abs(summary["hard_strata"][stratum] - expected) < 1
+
+
+@pytest.mark.parametrize("subtype", [None, "absent"])
+def test_scheduled_mode_rejects_generic_absent_with_clear_error(
+    subtype: str | None,
+) -> None:
+    records = [
+        replace(
+            _schedule_record("absent", "family", "group", stratum="blank"),
+            abstention_subtype=subtype,
+        )
+    ]
+
+    assert finetune.materialize_training_schedule(records) is records
+    with pytest.raises(
+        ValueError, match="must specify blank, printed_only, or stray_mark"
+    ):
+        finetune.materialize_training_schedule(
+            records,
+            hard_replay_ratio=(1, 1),
+            hard_stratum_weights=dict.fromkeys(finetune.HARD_STRATA, 1),
+            epochs=3,
+        )
+
+
+def test_materialized_schedule_falls_back_to_available_data() -> None:
+    records = [
+        _schedule_record(f"hard-{index}", "family", "group") for index in range(3)
+    ]
+    weights = dict.fromkeys(finetune.HARD_STRATA, 1)
+
+    assert finetune.materialize_training_schedule(records) is records
+    scheduled = finetune.materialize_training_schedule(
+        records,
+        hard_replay_ratio=(1, 1),
+        hard_stratum_weights=weights,
+        seed=17,
+    )
+
+    assert len(scheduled) == len(records)
+    assert {row.target_state for row in scheduled} == {"resolved"}
+    with pytest.raises(ValueError, match="supplied together"):
+        finetune.materialize_training_schedule(
+            records,
+            hard_replay_ratio=(1, 1),
+        )
+    with pytest.raises(ValueError, match="exactly"):
+        finetune.materialize_training_schedule(
+            records,
+            hard_replay_ratio=(1, 1),
+            hard_stratum_weights={"resolved": 1},
+        )
 
 
 def test_adapter_provenance_rejects_overlap_and_accepts_train_only(
@@ -309,6 +495,7 @@ def test_training_output_excludes_private_literals_and_exception_messages(
     ]
     argument_calls = []
     train_calls = []
+    train_datasets = []
     prediction_calls = []
     models = [object(), object()]
 
@@ -320,6 +507,7 @@ def test_training_output_excludes_private_literals_and_exception_messages(
     class FakeTrainer:
         def __init__(self, **values: object) -> None:
             self.values = values
+            train_datasets.append(values["train_dataset"])
 
         def train(self) -> None:
             train_calls.append(True)
@@ -377,15 +565,24 @@ def test_training_output_excludes_private_literals_and_exception_messages(
         lambda model, path, torch_module: None,
     )
 
+    schedule_options = {}
+    if mode == "canary":
+        schedule_options = {
+            "hard_replay_ratio": (1, 1),
+            "hard_stratum_weights": dict.fromkeys(finetune.HARD_STRATA, 1),
+        }
     result = finetune.run_canary(
         records,
         records,
         tmp_path / "run",
         mode=mode,
+        **schedule_options,
     )
 
     assert train_calls == [True]
     assert argument_calls[0]["max_steps"] == expected_max_steps
+    assert argument_calls[0]["num_train_epochs"] == (1 if mode == "canary" else 3)
+    assert len(train_datasets[0]) == (3 if mode == "canary" else 1)
     assert argument_calls[0]["per_device_train_batch_size"] == 1
     assert argument_calls[0]["gradient_accumulation_steps"] == 8
     assert argument_calls[0]["bf16"] is True
@@ -801,6 +998,31 @@ def _record(root: Path, tight: Path, padded: Path) -> finetune.CropRecord:
     )
 
 
+def _schedule_record(
+    field_id: str,
+    family_id: str,
+    split_group_id: str,
+    *,
+    origin: str = "private",
+    stratum: str = "resolved",
+) -> finetune.CropRecord:
+    target_state = "resolved" if stratum == "resolved" else "absent"
+    if stratum == "unreadable":
+        target_state = "unreadable"
+    return finetune.CropRecord(
+        field_id=field_id,
+        case_id=field_id,
+        family_id=family_id,
+        split_group_id=split_group_id,
+        reference="literal" if target_state == "resolved" else "",
+        crop_path=Path("unused.png"),
+        split="train",
+        data_origin=origin,
+        target_state=target_state,
+        abstention_subtype=None if stratum == "resolved" else stratum,
+    )
+
+
 def _metric_record(
     field_id: str,
     reference: str,
@@ -832,6 +1054,7 @@ def _split(
     target_state: str | None = None,
     abstention_subtype: str | None = None,
     embedded_reviews: bool = False,
+    split_group_id: str | None = None,
 ) -> None:
     crop = root / "crops" / split / f"{case_id}.png"
     crop.parent.mkdir(parents=True, exist_ok=True)
@@ -847,6 +1070,8 @@ def _split(
     }
     if origin is not None:
         record["data_origin"] = origin
+    if split_group_id is not None:
+        record["split_group_id"] = split_group_id
     if target_state is not None:
         record["target_state"] = target_state
     if abstention_subtype is not None:

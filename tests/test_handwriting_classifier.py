@@ -4,7 +4,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from ocr_pipeline.contracts import BoundingBox, TextRegion
+from ocr_pipeline.contracts import BoundingBox, TextAlternative, TextRegion
+from ocr_pipeline.handwriting import HandwritingStage
 from ocr_pipeline.handwriting_classifier import HandwritingClassifierStage
 from ocr_pipeline.pipeline import process_document
 
@@ -32,6 +33,20 @@ class Scores:
         return self.values
 
 
+class CropReader:
+    name = "handwriting-reader"
+    max_batch_items = 32
+    provenance = {"id": "fixture", "revision": "test"}
+
+    def __init__(self, values: list[str]) -> None:
+        self.values = values
+        self.sizes: list[tuple[int, int]] = []
+
+    def transcribe_batch(self, images: list[Image.Image]) -> list[str]:
+        self.sizes = [image.size for image in images]
+        return self.values
+
+
 def test_dual_view_agreement_marks_existing_region_without_rewriting(
     tmp_path: Path,
 ) -> None:
@@ -55,6 +70,7 @@ def test_dual_view_agreement_marks_existing_region_without_rewriting(
     assert proposed.provider == "base"
     assert proposed.structure == {
         "handwriting_candidate": True,
+        "handwriting_candidate_source": "classifier",
         "handwriting_classifier": {
             "method": "dual_crop_classifier_agreement",
             "page_number": 1,
@@ -90,7 +106,7 @@ def test_printed_tall_region_is_not_marked_without_classifier_agreement(
     assert result.pages[0].route == "accept_local"
 
 
-def test_excludes_semantic_regions_and_material_table_control_overlap(
+def test_allows_table_text_but_excludes_semantic_and_control_regions(
     tmp_path: Path,
 ) -> None:
     image_path = tmp_path / "page.png"
@@ -132,7 +148,7 @@ def test_excludes_semantic_regions_and_material_table_control_overlap(
         ),
         _region("eligible", "Amlodipine", 0.2, BoundingBox(130, 120, 190, 138), 7),
     ]
-    classifier = Scores([0.95, 0.95])
+    classifier = Scores([0.95, 0.95, 0.95, 0.95])
 
     result = process_document(
         image_path,
@@ -141,12 +157,76 @@ def test_excludes_semantic_regions_and_material_table_control_overlap(
     )
 
     by_id = {region.id: region for region in result.pages[0].regions}
-    assert classifier.sizes and len(classifier.sizes) == 2
+    assert classifier.sizes and len(classifier.sizes) == 4
+    assert by_id["table-text"].structure["handwriting_candidate"] is True
     assert by_id["eligible"].structure["handwriting_candidate"] is True
-    for region_id in ("header", "footer", "table-text", "control-text"):
+    for region_id in ("header", "footer", "control-text"):
         assert by_id[region_id].structure is None or not by_id[region_id].structure.get(
             "handwriting_candidate"
         )
+
+
+def test_table_cell_candidate_flows_to_specialist_as_add_only_evidence(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "form.png"
+    Image.new("RGB", (180, 100), "white").save(image_path)
+    cell = _region(
+        "medication-cell",
+        "Jardlance",
+        0.2,
+        BoundingBox(40, 30, 110, 48),
+        1,
+        structure={"role": "table_source", "parent_id": "medication-grid"},
+    )
+    cell.alternatives.append(
+        TextAlternative(
+            text="Jardiance",
+            confidence=0.8,
+            provider="tesseract",
+            text_provenance={"method": "fixture"},
+        )
+    )
+    table = _region(
+        "medication-grid",
+        "",
+        None,
+        BoundingBox(20, 15, 160, 80),
+        2,
+        kind="table",
+    )
+    classifier = Scores([0.98, 0.96])
+    crop_reader = CropReader(["Jardiance", "Jardiance"])
+
+    result = process_document(
+        image_path,
+        PageReader([cell, table]),
+        stages=[
+            HandwritingClassifierStage(classifier, text_provider="base"),
+            HandwritingStage(crop_reader, text_provider="base"),
+        ],
+    )
+
+    page = result.pages[0]
+    processed = page.regions[0]
+    assert classifier.sizes == [(70, 18), (94, 42)]
+    assert crop_reader.sizes == [(70, 18), (94, 42)]
+    assert page.route == "review"
+    assert processed.text == "Jardlance"
+    assert processed.provider == "base"
+    assert processed.structure["role"] == "table_source"
+    assert processed.structure["parent_id"] == "medication-grid"
+    assert processed.structure["handwriting_candidate_source"] == "classifier"
+    assert processed.structure["handwriting_classifier"]["decision"] == "candidate"
+    assert processed.structure["handwriting_review"]["reason"] == (
+        "specialist_candidate"
+    )
+    assert [(item.text, item.provider) for item in processed.alternatives] == [
+        ("Jardiance", "tesseract"),
+        ("Jardiance", "handwriting-reader"),
+    ]
+    assert processed.alternatives[-1].text_provenance["view"] == "agreed"
+    assert page.regions[1] == table
 
 
 def test_view_disagreement_records_review_evidence_without_routing(
@@ -209,13 +289,33 @@ def test_strict_prefilter_rejects_invalid_candidates_without_model_call(
     )
 
     assert classifier.sizes == []
-    assert [region.text for region in result.pages[0].regions] == [
+    page = result.pages[0]
+    semantic_regions = page.regions[: len(regions)]
+    assert [region.text for region in semantic_regions] == [
         region.text for region in regions
     ]
-    assert [region.reading_order for region in result.pages[0].regions] == list(
-        range(1, 8)
-    )
-    assert all(region.structure is None for region in result.pages[0].regions)
+    assert [region.reading_order for region in semantic_regions] == list(range(1, 8))
+    assert all(region.structure is None for region in semantic_regions)
+    assert page.text.value == " ".join(region.text for region in regions)
+    assert page.text.evidence_ids == [region.id for region in regions]
+    assert page.route == "review"
+    assert page.regions[-1].structure == {
+        "role": "coverage_risk",
+        "reasons": [
+            "empty_content",
+            "tail_repetition",
+            "repeated_suffix",
+            "invalid_bbox",
+        ],
+        "region_risks": [
+            {"region_id": "empty", "reasons": ["empty_content"]},
+            {
+                "region_id": "long",
+                "reasons": ["tail_repetition", "repeated_suffix"],
+            },
+            {"region_id": "box", "reasons": ["invalid_bbox"]},
+        ],
+    }
 
 
 def _region(

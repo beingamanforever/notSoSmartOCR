@@ -330,6 +330,12 @@ def test_transcription_metrics_cover_edit_types_and_failure_denominators_end_to_
         "insertions": 0,
         "deletions": 0,
     }
+    assert cases[0]["metrics"]["spacer_d_total"] == {
+        "deletions": 0,
+        "count_difference": 0,
+        "reference_characters": 3,
+        "rate": 0.0,
+    }
     assert cases[0]["metrics"]["missed_text_rate"]["rate"] == 0.0
     assert cases[0]["metrics"]["hallucinated_text_rate"]["rate"] == 0.0
     assert cases[1]["metrics"]["character_edit_counts"] == {
@@ -356,6 +362,7 @@ def test_transcription_metrics_cover_edit_types_and_failure_denominators_end_to_
     assert cases[5]["prediction"] == ""
     assert cases[5]["metrics"]["character_edit_counts"]["deletions"] == 4
     assert cases[5]["metrics"]["missed_text_rate"]["rate"] == 1.0
+    assert cases[5]["metrics"]["spacer_d_total"]["rate"] == 1.0
 
     summary = result["summary"]
     assert summary["normalized_edit_distance"] == {
@@ -385,6 +392,27 @@ def test_transcription_metrics_cover_edit_types_and_failure_denominators_end_to_
         "micro": 0.4,
         "character_insertions": 10,
         "normalized_reference_characters": 25,
+    }
+    assert summary["spacer_d_total"] == {
+        "definition": (
+            "SpACER d_total over normalized page-level character-count vectors; "
+            "this does not provide d_ocr or parsing-versus-recognition triage"
+        ),
+        "aggregation": "median across failure-inclusive pages",
+        "case_median": 0.416666,
+        "scored_cases": 6,
+    }
+
+
+def test_spacer_total_is_order_independent_but_cer_is_not() -> None:
+    metrics = public_benchmark._score("cba", "abc")
+
+    assert metrics["cer"]["rate"] > 0
+    assert metrics["spacer_d_total"] == {
+        "deletions": 0,
+        "count_difference": 0,
+        "reference_characters": 3,
+        "rate": 0.0,
     }
 
 
