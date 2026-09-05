@@ -15,6 +15,8 @@ from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from .cascade import add_runtime_risk_evidence
+from .cross_page_tables import CrossPageTableStage
 from .contracts import (
     BoundingBox,
     DocumentResult,
@@ -42,7 +44,10 @@ def process_document(
     pdf_dpi: int = 300,
     pdftoppm_executable: str = "pdftoppm",
     stages: Sequence[RegionStage] = (),
+    cross_page_table_stage: CrossPageTableStage | None = None,
     timings: dict[str, float] | None = None,
+    stage_execution: list[dict[str, object]] | None = None,
+    page_execution: list[dict[str, object]] | None = None,
     prepared_pages: _PreparedPages | None = None,
     max_pages: int | None = None,
     max_page_pixels: int | None = None,
@@ -50,6 +55,10 @@ def process_document(
 ) -> DocumentResult:
     if timings is not None:
         timings.clear()
+    if stage_execution is not None:
+        stage_execution.clear()
+    if page_execution is not None:
+        page_execution.clear()
     source_path = Path(source)
     source_kind = _source_kind(source_path)
     result = DocumentResult(
@@ -147,7 +156,10 @@ def process_document(
                         )
                         for item in batch_results
                     ]
+            pages_queued = time.perf_counter()
             for page_number, page_path in enumerate(pages, start=1):
+                page_started = time.perf_counter()
+                page_timings: dict[str, float] = {}
                 reader_result = (
                     batch_results[page_number - 1]
                     if batch_results is not None
@@ -161,11 +173,73 @@ def process_document(
                         result.failures,
                         reader_result,
                         stages,
-                        timings,
+                        page_timings,
+                        stage_execution,
                     )
                 )
+                _merge_timings(timings, page_timings)
+                if page_execution is not None:
+                    page_execution.append(
+                        {
+                            "page_number": page_number,
+                            "queue_seconds": page_started - pages_queued,
+                            "execution_seconds": time.perf_counter() - page_started,
+                            "steps": page_timings,
+                            "batched_reader": batch_results is not None,
+                        }
+                    )
+            if cross_page_table_stage is not None and len(pages) > 1:
+                continuation_started = time.perf_counter()
+                execution: dict[str, object] = {
+                    "page_number": None,
+                    "stage": cross_page_table_stage.name,
+                    "status": "fired",
+                    "input_regions": sum(len(page.regions) for page in result.pages),
+                    "output_regions": sum(len(page.regions) for page in result.pages),
+                    "added_regions": 0,
+                    "removed_regions": 0,
+                    "modified_regions": 0,
+                    "added_artifacts": 0,
+                }
+                try:
+                    result.table_continuations = cross_page_table_stage.apply(
+                        pages,
+                        result.pages,
+                    )
+                    execution["added_artifacts"] = len(result.table_continuations)
+                    if result.table_continuations:
+                        execution["status"] = "productive"
+                except ReaderError as error:
+                    execution["status"] = "failed"
+                    execution["failure_code"] = error.code
+                    result.failures.append(
+                        _failure(
+                            cross_page_table_stage.name,
+                            error.code,
+                            str(error),
+                            sequence=len(result.failures) + 1,
+                        )
+                    )
+                    for page in result.pages:
+                        page.route = "review"
+                finally:
+                    _add_timing(
+                        timings,
+                        f"stage.{cross_page_table_stage.name}",
+                        continuation_started,
+                    )
+                    execution["elapsed_seconds"] = (
+                        time.perf_counter() - continuation_started
+                    )
+                    if stage_execution is not None:
+                        stage_execution.append(execution)
     except PipelineError as error:
         result.failures.append(_failure(error.stage, error.code, str(error)))
+
+    review_pages = add_runtime_risk_evidence(result)
+    for page in result.pages:
+        if page.page_number in review_pages:
+            page.route = "review"
 
     result.status = _document_status(result)
     return result
@@ -186,12 +260,20 @@ def _read_page(
     reader_result: list[TextRegion] | ReaderError | None = None,
     stages: Sequence[RegionStage] = (),
     timings: dict[str, float] | None = None,
+    stage_execution: list[dict[str, object]] | None = None,
 ) -> PageResult:
     page_failure_ids: list[str] = []
     try:
         with Image.open(image_path) as image:
             width, height = image.size
     except (OSError, UnidentifiedImageError) as error:
+        _record_skipped_stages(
+            stage_execution,
+            stages,
+            page_number,
+            0,
+            "invalid_image",
+        )
         failure = _failure(
             "image",
             "invalid_image",
@@ -274,6 +356,7 @@ def _read_page(
                 failures,
                 page_failure_ids,
                 timings,
+                stage_execution,
             )
     except ReaderError as error:
         if not stage_view_recorded:
@@ -287,6 +370,13 @@ def _read_page(
         )
         failures.append(failure)
         page_failure_ids.append(failure.id)
+        _record_skipped_stages(
+            stage_execution,
+            stages,
+            page_number,
+            len(regions),
+            error.code,
+        )
 
     restore_regions = getattr(reader, "restore_regions", None)
     if callable(restore_regions):
@@ -306,6 +396,32 @@ def _read_page(
             failures.append(failure)
             page_failure_ids.append(failure.id)
             regions = []
+    recover_regions = getattr(reader, "recover_regions", None)
+    if callable(recover_regions):
+        recovery_started = time.perf_counter()
+        preserved_regions = regions
+        try:
+            regions = recover_regions(
+                image_path,
+                page_number,
+                copy.deepcopy(regions),
+            )
+        except ReaderError as error:
+            failure = _failure(
+                "ocr",
+                error.code,
+                str(error),
+                page_number,
+                len(failures) + 1,
+            )
+            failures.append(failure)
+            page_failure_ids.append(failure.id)
+            regions = preserved_regions
+            record_failure = getattr(reader, "record_recovery_failure", None)
+            if callable(record_failure):
+                record_failure(page_number, error)
+        finally:
+            _add_timing(timings, "recover", recovery_started)
     page_needs_review = getattr(reader, "page_needs_review", None)
     reader_review = bool(callable(page_needs_review) and page_needs_review(page_number))
     needs_review = (
@@ -333,12 +449,41 @@ def _apply_stages(
     failures: list[Failure],
     page_failure_ids: list[str],
     timings: dict[str, float] | None = None,
+    stage_execution: list[dict[str, object]] | None = None,
 ) -> list[TextRegion]:
     for stage in stages:
         stage_started = time.perf_counter()
+        run: dict[str, object] = {
+            "page_number": page_number,
+            "stage": stage.name,
+            "status": "fired",
+            "input_regions": len(regions),
+            "output_regions": len(regions),
+            "added_regions": 0,
+            "removed_regions": 0,
+            "modified_regions": 0,
+        }
         try:
             candidate = stage.apply(image_path, page_number, copy.deepcopy(regions))
+            before = {region.id: region for region in regions}
+            after = {region.id: region for region in candidate}
+            added = after.keys() - before.keys()
+            removed = before.keys() - after.keys()
+            modified = sum(
+                before[region_id] != after[region_id]
+                for region_id in before.keys() & after.keys()
+            )
+            run.update(
+                {
+                    "status": "productive" if added or removed or modified else "fired",
+                    "output_regions": len(candidate),
+                    "added_regions": len(added),
+                    "removed_regions": len(removed),
+                    "modified_regions": modified,
+                }
+            )
         except ReaderError as error:
+            run.update({"status": "failed", "failure_code": error.code})
             failure = _failure(
                 stage.name,
                 error.code,
@@ -350,25 +495,73 @@ def _apply_stages(
             page_failure_ids.append(failure.id)
             continue
         finally:
-            _add_timing(timings, f"stage.{stage.name}", stage_started)
+            run["elapsed_seconds"] = _add_timing(
+                timings,
+                f"stage.{stage.name}",
+                stage_started,
+            )
+            if stage_execution is not None:
+                stage_execution.append(run)
         regions = candidate
     return regions
+
+
+def _record_skipped_stages(
+    stage_execution: list[dict[str, object]] | None,
+    stages: Sequence[RegionStage],
+    page_number: int,
+    input_regions: int,
+    reason: str,
+) -> None:
+    if stage_execution is None:
+        return
+    recorded = {(run["page_number"], run["stage"]) for run in stage_execution}
+    for stage in stages:
+        if (page_number, stage.name) in recorded:
+            continue
+        stage_execution.append(
+            {
+                "page_number": page_number,
+                "stage": stage.name,
+                "status": "skipped",
+                "input_regions": input_regions,
+                "output_regions": input_regions,
+                "added_regions": 0,
+                "removed_regions": 0,
+                "modified_regions": 0,
+                "elapsed_seconds": 0.0,
+                "skip_reason": reason,
+            }
+        )
 
 
 def _add_timing(
     timings: dict[str, float] | None,
     name: str,
     started: float,
+) -> float:
+    elapsed = time.perf_counter() - started
+    if timings is not None:
+        timings[name] = timings.get(name, 0.0) + elapsed
+    return elapsed
+
+
+def _merge_timings(
+    timings: dict[str, float] | None,
+    additions: dict[str, float],
 ) -> None:
     if timings is None:
         return
-    timings[name] = timings.get(name, 0.0) + time.perf_counter() - started
+    for name, seconds in additions.items():
+        timings[name] = timings.get(name, 0.0) + seconds
 
 
 def _region_needs_review(region: TextRegion) -> bool:
     if region.resolution != "resolved":
         return True
     structure = region.structure or {}
+    if structure.get("coverage_status") == "insufficient_control_group":
+        return True
     handwriting_review = structure.get("handwriting_review")
     if isinstance(handwriting_review, dict) and handwriting_review.get("required"):
         return True

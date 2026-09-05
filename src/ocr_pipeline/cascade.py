@@ -9,11 +9,12 @@ from collections import Counter
 from dataclasses import asdict
 from typing import Any
 
-from .contracts import DocumentResult, TextRegion
+from .contracts import BoundingBox, DocumentResult, PageResult, TextRegion
 from .rendering import render_evidence
-from .verification import literal_text_risks
+from .verification import TEXT_RISK_ORDER, literal_text_risks
 
 NON_TEXT_VISUAL_KINDS = {
+    "coverage_risk",
     "image",
     "figure",
     "chart",
@@ -21,39 +22,146 @@ NON_TEXT_VISUAL_KINDS = {
     "footer_image",
 }
 MAX_REPEATED_PHRASE_TOKENS = 32
+MIN_TAIL_REPEATS = 8
+MAX_TAIL_UNIT_CHARS = 256
+MIN_REPEATED_SUFFIX_CHARS = 30
+RUNTIME_RISK_REASONS = {
+    "empty_content",
+    "invalid_bbox",
+    "malformed_html_table",
+    "non_rectangular_html_table",
+    "repeated_text",
+    "tail_repetition",
+    "repeated_suffix",
+} | set(TEXT_RISK_ORDER)
+RUNTIME_RISK_PROVIDER = "deterministic-output-validation"
 
 
 def identify_risky_regions(document: DocumentResult) -> dict[str, list[str]]:
     risks: dict[str, list[str]] = {}
     for page in document.pages:
-        order_counts = Counter(region.reading_order for region in page.regions)
-        for region in page.regions:
-            reasons: list[str] = []
-            kind = region.kind.casefold().replace("-", "_")
-            if not region.text.strip() and kind not in NON_TEXT_VISUAL_KINDS:
-                reasons.append("empty_content")
-            box = region.bounding_box
-            if (
-                box.left < 0
-                or box.top < 0
-                or box.right <= box.left
-                or box.bottom <= box.top
-                or box.right > page.width
-                or box.bottom > page.height
-            ):
-                reasons.append("invalid_bbox")
-            if order_counts[region.reading_order] > 1:
-                reasons.append("duplicate_reading_order")
-            if not 1 <= region.reading_order <= len(page.regions):
-                reasons.append("out_of_range_reading_order")
-            table_risk = _html_table_risk(region)
-            if table_risk:
-                reasons.append(table_risk)
-            if _has_repeated_text(region):
-                reasons.append("repeated_text")
-            reasons.extend(literal_text_risks(region.text))
-            if reasons:
-                risks[region.id] = reasons
+        risks.update(_identify_page_risks(page))
+    return risks
+
+
+def add_runtime_risk_evidence(document: DocumentResult) -> set[int]:
+    """Append review evidence for hard final-output risks without changing text."""
+    review_pages: set[int] = set()
+    for page in document.pages:
+        canonical_ids = set(page.text.evidence_ids)
+        regions = {region.id: region for region in page.regions}
+        runtime_risks = {
+            region_id: [
+                reason
+                for reason in reasons
+                if reason in RUNTIME_RISK_REASONS
+                and (
+                    reason != "empty_content"
+                    or _is_empty_canonical_region(
+                        page,
+                        regions[region_id],
+                        canonical_ids,
+                    )
+                )
+            ]
+            for region_id, reasons in _identify_page_risks(page).items()
+        }
+        runtime_risks = {
+            region_id: reasons
+            for region_id, reasons in runtime_risks.items()
+            if reasons
+        }
+        if not runtime_risks:
+            continue
+
+        existing_ids = {region.id for region in page.regions}
+        risk_id = f"p{page.page_number}-output-risk-1"
+        suffix = 2
+        while risk_id in existing_ids:
+            risk_id = f"p{page.page_number}-output-risk-{suffix}"
+            suffix += 1
+        reasons = list(
+            dict.fromkeys(
+                reason
+                for region_reasons in runtime_risks.values()
+                for reason in region_reasons
+            )
+        )
+        page.regions.append(
+            TextRegion(
+                id=risk_id,
+                kind="coverage_risk",
+                text="",
+                confidence=None,
+                bounding_box=BoundingBox(0, 0, page.width, page.height),
+                reading_order=max(
+                    (region.reading_order for region in page.regions), default=0
+                )
+                + 1,
+                provider=RUNTIME_RISK_PROVIDER,
+                resolution="unreadable",
+                structure={
+                    "role": "coverage_risk",
+                    "reasons": reasons,
+                    "region_risks": [
+                        {"region_id": region_id, "reasons": region_reasons}
+                        for region_id, region_reasons in runtime_risks.items()
+                    ],
+                },
+            )
+        )
+        review_pages.add(page.page_number)
+    return review_pages
+
+
+def _is_empty_canonical_region(
+    page: PageResult,
+    region: TextRegion,
+    canonical_ids: set[str],
+) -> bool:
+    role = str((region.structure or {}).get("role", ""))
+    return (
+        region.id in canonical_ids
+        and region.resolution == "resolved"
+        and role not in {"coverage_risk", "handwriting_candidate", "table_candidate"}
+        and not (page.failure_ids and region.kind == "page_text")
+    )
+
+
+def _identify_page_risks(page: PageResult) -> dict[str, list[str]]:
+    risks: dict[str, list[str]] = {}
+    order_counts = Counter(region.reading_order for region in page.regions)
+    for region in page.regions:
+        reasons: list[str] = []
+        kind = region.kind.casefold().replace("-", "_")
+        if not region.text.strip() and kind not in NON_TEXT_VISUAL_KINDS:
+            reasons.append("empty_content")
+        box = region.bounding_box
+        if not isinstance(box, BoundingBox) or (
+            box.left < 0
+            or box.top < 0
+            or box.right <= box.left
+            or box.bottom <= box.top
+            or box.right > page.width
+            or box.bottom > page.height
+        ):
+            reasons.append("invalid_bbox")
+        if order_counts[region.reading_order] > 1:
+            reasons.append("duplicate_reading_order")
+        if not 1 <= region.reading_order <= len(page.regions):
+            reasons.append("out_of_range_reading_order")
+        table_risk = _html_table_risk(region)
+        if table_risk:
+            reasons.append(table_risk)
+        if _has_repeated_text(region):
+            reasons.append("repeated_text")
+        if _has_tail_repetition(region.text):
+            reasons.append("tail_repetition")
+        if _has_repeated_suffix(region.text):
+            reasons.append("repeated_suffix")
+        reasons.extend(literal_text_risks(region.text))
+        if reasons:
+            risks[region.id] = reasons
     return risks
 
 
@@ -224,6 +332,31 @@ def _has_repeated_text(region: TextRegion) -> bool:
                 and tokens[start + (size * 2) : start + (size * 3)] == phrase
             ):
                 return True
+    return False
+
+
+def _has_tail_repetition(text: str) -> bool:
+    length = len(text)
+    if length < 2 * MIN_TAIL_REPEATS:
+        return False
+    maximum = min(MAX_TAIL_UNIT_CHARS, length // MIN_TAIL_REPEATS)
+    for size in range(1, maximum + 1):
+        unit = text[length - size :]
+        if not unit.strip():
+            continue
+        if all(
+            text[length - size * repeat : length - size * (repeat - 1)] == unit
+            for repeat in range(2, MIN_TAIL_REPEATS + 1)
+        ):
+            return True
+    return False
+
+
+def _has_repeated_suffix(text: str) -> bool:
+    normalized = text.casefold()
+    for size in range(MIN_REPEATED_SUFFIX_CHARS, len(normalized) // 2):
+        if normalized[-size:] == normalized[-2 * size : -size]:
+            return True
     return False
 
 

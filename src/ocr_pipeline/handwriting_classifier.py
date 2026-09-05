@@ -13,10 +13,8 @@ from .contracts import BoundingBox, TextRegion
 from .handwriting import ELIGIBLE_KINDS, EXCLUDED_ROLES
 from .providers import ReaderError
 
-OVERLAP_KINDS = frozenset({"checkbox", "control", "table", "table_candidate"})
-OVERLAP_ROLES = frozenset(
-    {"checkbox", "control", "table", "table_candidate", "table_source"}
-)
+OVERLAP_KINDS = frozenset({"checkbox", "control"})
+OVERLAP_ROLES = frozenset({"checkbox", "control"})
 
 
 class HandwritingClassifier(Protocol):
@@ -157,6 +155,7 @@ class HandwritingClassifierStage:
             if accepted:
                 structure = dict(regions[index].structure or {})
                 structure["handwriting_candidate"] = True
+                structure["handwriting_candidate_source"] = "classifier"
                 structure["handwriting_classifier"] = {
                     **evidence,
                     "decision": "candidate",

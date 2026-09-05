@@ -31,6 +31,10 @@ class ControlDetection:
     confidence: float
     ink_ratio: float
     source: str = "square"
+    label: str | None = None
+    label_ids: tuple[str, ...] = ()
+    source_ids: tuple[str, ...] = ()
+    reading_order: int | None = None
 
 
 class GeometricControlStage:
@@ -57,23 +61,61 @@ class GeometricControlStage:
     ) -> list[TextRegion]:
         cv2, np, gray = _load_gray(image_path)
         detections = _square_detections(gray, cv2, np)
-        detections = _merge_detections(
-            detections,
-            _anchored_marks(gray, regions, self.label_provider, detections, cv2, np),
-        )
         detections = [
             detection
             for detection in detections
-            if not _inside_text_region(
+            if not _contains_readable_text(
+                detection.bounding_box,
+                regions,
+                self.label_provider,
+            )
+        ]
+        anchored_marks = _anchored_marks(
+            gray,
+            regions,
+            self.label_provider,
+            detections,
+            cv2,
+            np,
+        )
+        if len(anchored_marks) >= self.minimum_group_size:
+            detections = _merge_detections(detections, anchored_marks)
+        table_marks = _table_marks(gray, regions, detections, cv2, np)
+        detections = [
+            detection
+            for detection in detections
+            if not _overlaps_detection(detection.bounding_box, table_marks)
+        ]
+        detections = _merge_detections(detections, table_marks)
+        detections = [
+            detection
+            for detection in detections
+            if detection.source == "table_mark"
+            or not _inside_text_region(
                 detection.bounding_box,
                 regions,
                 self.label_provider,
             )
         ]
         labels = [
-            _nearest_label(detection.bounding_box, regions, self.label_provider)
+            detection.label
+            or _nearest_label(detection.bounding_box, regions, self.label_provider)
             for detection in detections
         ]
+        geometric_count = sum(
+            detection.source != "table_mark" for detection in detections
+        )
+        if geometric_count < self.minimum_group_size:
+            supported = [
+                (detection, label)
+                for detection, label in zip(detections, labels, strict=True)
+                if detection.source != "square"
+                or detection.state != "unselected"
+                or label is None
+                or _explicit_control_label(label)
+            ]
+            detections = [detection for detection, _ in supported]
+            labels = [label for _, label in supported]
         if any(label is not None for label in labels):
             detections = [
                 detection
@@ -98,7 +140,15 @@ class GeometricControlStage:
             )
             for index, detection in enumerate(detections, start=1)
         ]
-        coverage_missing = bool(controls) and len(controls) < self.minimum_group_size
+        geometric_controls = [
+            control
+            for control in controls
+            if control.text_provenance["method"] != "table_cell_residual_ink"
+        ]
+        coverage_missing = (
+            bool(geometric_controls)
+            and len(geometric_controls) < self.minimum_group_size
+        )
         for control in controls:
             if control.structure["label"] is None:
                 control.structure["coverage_status"] = "unmatched_label"
@@ -106,8 +156,6 @@ class GeometricControlStage:
                 control.structure["coverage_status"] = (
                     "insufficient_control_group" if coverage_missing else "detected"
                 )
-            if coverage_missing:
-                control.resolution = "unreadable"
         return sorted(
             regions + controls,
             key=lambda region: (
@@ -192,6 +240,10 @@ def _anchored_marks(
             continue
         if region.confidence is None or region.confidence < 0.9:
             continue
+        if (region.structure or {}).get("role") == "table_source" and sum(
+            character.isalpha() for character in region.text
+        ) < 2:
+            continue
 
         box = region.bounding_box
         line_height = max(1, box.bottom - box.top)
@@ -218,7 +270,11 @@ def _anchored_marks(
                     label_provider,
                 ):
                     continue
-                if _inside_text_region(detection.bounding_box, regions, label_provider):
+                if _inside_text_region(
+                    detection.bounding_box,
+                    regions,
+                    label_provider,
+                ):
                     continue
                 detections.append(detection)
     return detections
@@ -292,8 +348,667 @@ def _marks_in_slot(
     return detections
 
 
+def _table_marks(
+    gray: Any,
+    regions: list[TextRegion],
+    existing: list[ControlDetection],
+    cv2: Any,
+    np: Any,
+) -> list[ControlDetection]:
+    detections = _candidate_table_marks(gray, regions, cv2, np)
+    for table in (region for region in regions if region.kind == "table"):
+        cells = (table.structure or {}).get("cells", [])
+        indexed = _indexed_cells(cells)
+        for (row, _), cell in indexed.items():
+            label = _same_cell_label(cell)
+            if label is None:
+                continue
+            mark = _same_cell_mark(gray, _cell_box(cell), cv2, np)
+            if mark is None or _overlaps_detection(
+                mark.bounding_box,
+                detections,
+            ):
+                continue
+            cell_id = cell.get("id")
+            detections.append(
+                ControlDetection(
+                    bounding_box=mark.bounding_box,
+                    state=mark.state,
+                    confidence=mark.confidence,
+                    ink_ratio=mark.ink_ratio,
+                    source="table_mark",
+                    label=label,
+                    label_ids=(cell_id,) if cell_id else (),
+                    source_ids=tuple(item for item in (table.id, cell_id) if item),
+                    reading_order=table.reading_order + row,
+                )
+            )
+        header_rows = _header_rows(indexed)
+        for header_index, header_row in enumerate(header_rows):
+            next_header = (
+                header_rows[header_index + 1]
+                if header_index + 1 < len(header_rows)
+                else 10**9
+            )
+            headers = {
+                column: cell
+                for (row, column), cell in indexed.items()
+                if row == header_row and _header_text(cell.get("text", ""))
+            }
+            control_columns = _control_columns(
+                indexed,
+                headers,
+                header_row,
+                next_header,
+            )
+            for (row, column), cell in indexed.items():
+                if not header_row < row < next_header or column not in control_columns:
+                    continue
+                row_label = _row_label(indexed, row, column)
+                if row_label is None or not _mark_cell_text(cell):
+                    continue
+                mark = _mark_in_cell(gray, _cell_box(cell), cv2, np)
+                if mark is None or _overlaps_detection(
+                    mark.bounding_box, existing + detections
+                ):
+                    continue
+                header = headers[column]
+                label = f"{row_label['text'].strip()} ({header['text'].strip()})"
+                label_ids = tuple(
+                    item
+                    for item in (
+                        row_label.get("id"),
+                        header.get("id"),
+                    )
+                    if item
+                )
+                source_ids = tuple(item for item in (table.id, cell.get("id")) if item)
+                detections.append(
+                    ControlDetection(
+                        bounding_box=mark.bounding_box,
+                        state="selected",
+                        confidence=mark.confidence,
+                        ink_ratio=mark.ink_ratio,
+                        source="table_mark",
+                        label=label,
+                        label_ids=label_ids,
+                        source_ids=source_ids,
+                        reading_order=table.reading_order + row,
+                    )
+                )
+    return detections
+
+
+def _candidate_table_marks(
+    gray: Any,
+    regions: list[TextRegion],
+    cv2: Any,
+    np: Any,
+) -> list[ControlDetection]:
+    detections = []
+    for candidate in (region for region in regions if region.kind == "table_candidate"):
+        if (candidate.structure or {}).get("status") != "rejected":
+            continue
+        labels = _candidate_control_labels(candidate, regions)
+        if len(labels) < 3:
+            continue
+        expected_side = round(
+            float(
+                np.median(
+                    [
+                        label.bounding_box.bottom - label.bounding_box.top
+                        for label in labels
+                    ]
+                )
+            )
+        )
+        marks = _candidate_scope_marks(
+            gray,
+            candidate.bounding_box,
+            expected_side,
+            cv2,
+            np,
+        )
+        matches = _unique_candidate_matches(marks, labels)
+        for mark, label in _clustered_candidate_matches(matches):
+            detections.append(
+                ControlDetection(
+                    bounding_box=mark.bounding_box,
+                    state=mark.state,
+                    confidence=mark.confidence,
+                    ink_ratio=mark.ink_ratio,
+                    source="table_mark",
+                    label=label.text.strip(),
+                    label_ids=(label.id,),
+                    source_ids=(candidate.id,),
+                    reading_order=label.reading_order,
+                )
+            )
+    return detections
+
+
+def _candidate_control_labels(
+    candidate: TextRegion,
+    regions: list[TextRegion],
+) -> list[TextRegion]:
+    source_ids = set((candidate.text_provenance or {}).get("source_region_ids", []))
+    labels = []
+    for region in regions:
+        if source_ids and region.id not in source_ids:
+            continue
+        if region.kind in {"checkbox", "table", "table_candidate", "coverage_risk"}:
+            continue
+        if (region.structure or {}).get("role") in {"control", "table_source"}:
+            continue
+        if region.resolution != "resolved":
+            continue
+        if region.confidence is None or region.confidence < 0.8:
+            continue
+        text = " ".join(region.text.split())
+        if sum(character.isalpha() for character in text) < 4:
+            continue
+        if text.endswith(":") or text.isupper():
+            continue
+        center_x, center_y = _center(region.bounding_box)
+        box = candidate.bounding_box
+        if (
+            not box.left <= center_x <= box.right
+            or not box.top <= center_y <= box.bottom
+        ):
+            continue
+        labels.append(region)
+
+    normalized_counts: dict[str, int] = {}
+    for label in labels:
+        normalized = " ".join(label.text.casefold().split())
+        normalized_counts[normalized] = normalized_counts.get(normalized, 0) + 1
+    return [
+        label
+        for label in labels
+        if normalized_counts[" ".join(label.text.casefold().split())] == 1
+    ]
+
+
+def _candidate_scope_marks(
+    gray: Any,
+    scope: BoundingBox,
+    expected_side: int,
+    cv2: Any,
+    np: Any,
+) -> list[ControlDetection]:
+    left = max(0, scope.left)
+    top = max(0, scope.top)
+    right = min(gray.shape[1], scope.right)
+    bottom = min(gray.shape[0], scope.bottom)
+    crop = gray[top:bottom, left:right].copy()
+    if crop.shape[0] < 8 or crop.shape[1] < 8:
+        return []
+
+    mask = np.where(crop < 180, 255, 0).astype("uint8")
+    rule_length = max(12, round(expected_side * 1.7))
+    residual = _remove_long_rules(
+        mask,
+        max(rule_length, round(mask.shape[1] * 0.12)),
+        rule_length,
+        cv2,
+    )
+    contours = cv2.findContours(
+        residual.copy(),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )[0]
+    minimum_side = max(4, round(expected_side * 0.35))
+    maximum_side = max(minimum_side, round(expected_side * 1.35))
+    boxes = []
+    for contour in contours:
+        box_left, box_top, box_width, box_height = cv2.boundingRect(contour)
+        short_side = min(box_width, box_height)
+        long_side = max(box_width, box_height)
+        if short_side < minimum_side or long_side > maximum_side:
+            continue
+        if not 0.65 <= box_width / box_height <= 1.5:
+            continue
+        component = residual[
+            box_top : box_top + box_height,
+            box_left : box_left + box_width,
+        ]
+        if not _has_candidate_control_shape(component, cv2, np):
+            continue
+        boxes.append(
+            BoundingBox(
+                left + box_left,
+                top + box_top,
+                left + box_left + box_width,
+                top + box_top + box_height,
+            )
+        )
+    return [_classify(gray, box, np) for box in _deduplicate(boxes)]
+
+
+def _has_candidate_control_shape(component: Any, cv2: Any, np: Any) -> bool:
+    height, width = component.shape
+    band = max(1, round(min(width, height) * 0.16))
+    top = float(np.max(np.mean(component[:band] > 0, axis=1))) >= 0.58
+    bottom = float(np.max(np.mean(component[-band:] > 0, axis=1))) >= 0.58
+    left = float(np.max(np.mean(component[:, :band] > 0, axis=0))) >= 0.58
+    right = float(np.max(np.mean(component[:, -band:] > 0, axis=0))) >= 0.58
+    partial_square = (top or bottom) and (left or right)
+    return partial_square or _has_mark_shape(component, cv2, np)
+
+
+def _unique_candidate_matches(
+    marks: list[ControlDetection],
+    labels: list[TextRegion],
+) -> list[tuple[ControlDetection, TextRegion]]:
+    matches = []
+    for mark in marks:
+        possible = [
+            label
+            for label in labels
+            if _candidate_label_matches(mark.bounding_box, label.bounding_box)
+        ]
+        if len(possible) == 1:
+            matches.append((mark, possible[0]))
+
+    label_counts: dict[str, int] = {}
+    for _, label in matches:
+        label_counts[label.id] = label_counts.get(label.id, 0) + 1
+    return [(mark, label) for mark, label in matches if label_counts[label.id] == 1]
+
+
+def _candidate_label_matches(mark: BoundingBox, label: BoundingBox) -> bool:
+    side = max(mark.right - mark.left, mark.bottom - mark.top)
+    label_height = max(1, label.bottom - label.top)
+    mark_x, mark_y = _center(mark)
+    _, label_y = _center(label)
+    if not label_height * 0.35 <= side <= label_height * 1.25:
+        return False
+    if mark.left >= label.left or mark_x > label.left:
+        return False
+    gap = label.left - mark.right
+    if not -side * 0.5 <= gap <= max(5, label_height * 0.8):
+        return False
+    return abs(mark_y - label_y) <= max(side, label_height) * 0.55
+
+
+def _clustered_candidate_matches(
+    matches: list[tuple[ControlDetection, TextRegion]],
+) -> list[tuple[ControlDetection, TextRegion]]:
+    clusters: list[list[tuple[ControlDetection, TextRegion]]] = []
+    for match in sorted(
+        matches,
+        key=lambda item: (
+            _center(item[0].bounding_box)[1],
+            item[0].bounding_box.left,
+        ),
+    ):
+        if not clusters:
+            clusters.append([match])
+            continue
+        previous = clusters[-1][-1]
+        previous_y = _center(previous[0].bounding_box)[1]
+        current_y = _center(match[0].bounding_box)[1]
+        previous_height = previous[1].bounding_box.bottom - previous[1].bounding_box.top
+        current_height = match[1].bounding_box.bottom - match[1].bounding_box.top
+        if current_y - previous_y <= max(previous_height, current_height) * 2.25:
+            clusters[-1].append(match)
+        else:
+            clusters.append([match])
+    return [match for cluster in clusters if len(cluster) >= 3 for match in cluster]
+
+
+def _remove_long_rules(
+    mask: Any,
+    horizontal_length: int,
+    vertical_length: int,
+    cv2: Any,
+) -> Any:
+    horizontal = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (horizontal_length, 1)),
+    )
+    vertical = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (1, vertical_length)),
+    )
+    return cv2.bitwise_and(
+        mask,
+        cv2.bitwise_not(cv2.bitwise_or(horizontal, vertical)),
+    )
+
+
+def _same_cell_label(cell: dict[str, Any]) -> str | None:
+    if cell.get("resolution") not in {None, "resolved"}:
+        return None
+    if cell.get("column_header") or cell.get("projected_row_header"):
+        return None
+
+    text = " ".join(str(cell.get("text", "")).split())
+    if not text.startswith("["):
+        return None
+    marker_end = text.find("]", 1, 4)
+    if marker_end < 0 or text[1:marker_end].strip().casefold() not in {"", "x"}:
+        return None
+    label = text[marker_end + 1 :].strip(" :-")
+    if sum(character.isalpha() for character in label) < 2:
+        return None
+    return label
+
+
+def _same_cell_mark(
+    gray: Any,
+    cell: BoundingBox,
+    cv2: Any,
+    np: Any,
+) -> ControlDetection | None:
+    left = max(0, cell.left)
+    top = max(0, cell.top)
+    right = min(gray.shape[1], cell.right)
+    bottom = min(gray.shape[0], cell.bottom)
+    crop = gray[top:bottom, left:right].copy()
+    if crop.shape[0] < 8 or crop.shape[1] < 8:
+        return None
+
+    mask = np.where(crop < 180, 255, 0).astype("uint8")
+    horizontal = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (max(10, round(mask.shape[1] * 0.45)), 1),
+        ),
+    )
+    vertical = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (1, max(10, round(mask.shape[0] * 0.65))),
+        ),
+    )
+    residual = cv2.bitwise_and(
+        mask,
+        cv2.bitwise_not(cv2.bitwise_or(horizontal, vertical)),
+    )
+    contours = cv2.findContours(
+        residual.copy(),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )[0]
+    minimum_side = max(6, round(mask.shape[0] * 0.1))
+    maximum_side = min(
+        max(minimum_side, round(mask.shape[0] * 0.55)),
+        max(minimum_side, round(mask.shape[1] * 0.28)),
+        48,
+    )
+    candidates = []
+    for contour in contours:
+        box_left, box_top, box_width, box_height = cv2.boundingRect(contour)
+        short_side = min(box_width, box_height)
+        long_side = max(box_width, box_height)
+        if short_side < minimum_side or long_side > maximum_side:
+            continue
+        if not 0.72 <= box_width / box_height <= 1.35:
+            continue
+        if box_left + box_width / 2 > mask.shape[1] * 0.4:
+            continue
+        component = residual[
+            box_top : box_top + box_height,
+            box_left : box_left + box_width,
+        ]
+        if not _has_square_border(component, np):
+            continue
+        candidates.append((box_left, box_top, box_width, box_height))
+    if len(candidates) != 1:
+        return None
+
+    box_left, box_top, box_width, box_height = candidates[0]
+    box = BoundingBox(
+        left + box_left,
+        top + box_top,
+        left + box_left + box_width,
+        top + box_top + box_height,
+    )
+    return _classify(gray, box, np)
+
+
+def _has_square_border(component: Any, np: Any) -> bool:
+    height, width = component.shape
+    band = max(1, round(min(width, height) * 0.16))
+    edge_strengths = (
+        float(np.max(np.mean(component[:band] > 0, axis=1))),
+        float(np.max(np.mean(component[-band:] > 0, axis=1))),
+        float(np.max(np.mean(component[:, :band] > 0, axis=0))),
+        float(np.max(np.mean(component[:, -band:] > 0, axis=0))),
+    )
+    return sum(strength >= 0.65 for strength in edge_strengths) >= 3
+
+
+def _indexed_cells(
+    cells: list[dict[str, Any]],
+) -> dict[tuple[int, int], dict[str, Any]]:
+    indexed = {}
+    for cell in cells:
+        rows = cell.get("row_nums") or []
+        columns = cell.get("column_nums") or []
+        if len(rows) == 1 and len(columns) == 1:
+            indexed[(int(rows[0]), int(columns[0]))] = cell
+    return indexed
+
+
+def _header_rows(
+    cells: dict[tuple[int, int], dict[str, Any]],
+) -> list[int]:
+    rows = sorted({row for row, _ in cells})
+    return [
+        row
+        for row in rows
+        if sum(
+            _header_text(cell.get("text", ""))
+            for (cell_row, _), cell in cells.items()
+            if cell_row == row
+        )
+        >= 3
+        or any(
+            _control_header(cell.get("text", ""))
+            for (cell_row, _), cell in cells.items()
+            if cell_row == row
+        )
+    ]
+
+
+def _header_text(text: str) -> bool:
+    normalized = " ".join(text.split())
+    alpha_count = sum(character.isalpha() for character in normalized)
+    return 2 <= alpha_count <= 24 and not any(
+        character.isdigit() for character in normalized
+    )
+
+
+def _control_header(text: str) -> bool:
+    words = [
+        "".join(character for character in word.lower() if character.isalnum())
+        for word in text.split()
+    ]
+    compact = "".join(words)
+    return "checkbox" in words or "radio" in words or compact == "checkbox"
+
+
+def _control_columns(
+    cells: dict[tuple[int, int], dict[str, Any]],
+    headers: dict[int, dict[str, Any]],
+    header_row: int,
+    next_header: int,
+) -> set[int]:
+    columns = {
+        column
+        for column, header in headers.items()
+        if _control_header(header.get("text", ""))
+    }
+    data_rows = sorted({row for row, _ in cells if header_row < row < next_header})
+    for row in data_rows:
+        mark_columns = [
+            column
+            for column in headers
+            if (row, column) in cells
+            and _mark_cell_text(cells[(row, column)])
+            and _row_label(cells, row, column) is not None
+        ]
+        if len(mark_columns) >= 2:
+            columns.update(mark_columns)
+    return columns
+
+
+def _row_label(
+    cells: dict[tuple[int, int], dict[str, Any]],
+    row: int,
+    column: int,
+) -> dict[str, Any] | None:
+    candidates = [
+        (candidate_column, cell)
+        for (candidate_row, candidate_column), cell in cells.items()
+        if candidate_row == row
+        and candidate_column < column
+        and sum(character.isalpha() for character in cell.get("text", "")) >= 2
+    ]
+    if not candidates:
+        return None
+    return max(
+        candidates,
+        key=lambda item: (
+            sum(character.isalpha() for character in item[1].get("text", "")),
+            item[0],
+        ),
+    )[1]
+
+
+def _mark_cell_text(cell: dict[str, Any]) -> bool:
+    text = str(cell.get("text", ""))
+    normalized = "".join(character for character in text if character.isalnum())
+    if any(character.isdigit() for character in normalized) or len(normalized) > 3:
+        return False
+    if not normalized:
+        return True
+    confidence = cell.get("confidence")
+    return isinstance(confidence, int | float) and confidence < 0.6
+
+
+def _cell_box(cell: dict[str, Any]) -> BoundingBox:
+    box = cell["bbox"]
+    return BoundingBox(
+        int(box["left"]),
+        int(box["top"]),
+        int(box["right"]),
+        int(box["bottom"]),
+    )
+
+
+def _mark_in_cell(
+    gray: Any,
+    cell: BoundingBox,
+    cv2: Any,
+    np: Any,
+) -> ControlDetection | None:
+    width = cell.right - cell.left
+    height = cell.bottom - cell.top
+    pad = max(2, round(min(width, height) * 0.08))
+    crop = gray[
+        cell.top + pad : cell.bottom - pad,
+        cell.left + pad : cell.right - pad,
+    ]
+    if crop.shape[0] < 4 or crop.shape[1] < 4:
+        return None
+
+    mask = np.where(crop < 180, 255, 0).astype("uint8")
+    horizontal = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (max(8, round(mask.shape[1] * 0.55)), 1),
+        ),
+    )
+    vertical = cv2.morphologyEx(
+        mask,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (1, max(8, round(mask.shape[0] * 0.65))),
+        ),
+    )
+    residual = cv2.bitwise_and(
+        mask,
+        cv2.bitwise_not(cv2.bitwise_or(horizontal, vertical)),
+    )
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(residual)
+    candidates = []
+    crop_area = max(1, crop.shape[0] * crop.shape[1])
+    for index in range(1, count):
+        left, top, box_width, box_height, area = map(int, stats[index])
+        if area < 8 or box_width < crop.shape[1] * 0.3:
+            continue
+        if box_height < crop.shape[0] * 0.35 or area / crop_area > 0.35:
+            continue
+        component = np.where(
+            labels[top : top + box_height, left : left + box_width] == index,
+            255,
+            0,
+        ).astype("uint8")
+        if not _has_table_mark_shape(component, cv2, np):
+            continue
+        candidates.append((area, left, top, box_width, box_height))
+    if not candidates:
+        return None
+
+    area, left, top, box_width, box_height = max(candidates)
+    box = BoundingBox(
+        cell.left + pad + left,
+        cell.top + pad + top,
+        cell.left + pad + left + box_width,
+        cell.top + pad + top + box_height,
+    )
+    ink_ratio = area / max(1, box_width * box_height)
+    return ControlDetection(
+        box,
+        "selected",
+        min(0.94, 0.78 + ink_ratio * 0.5),
+        ink_ratio,
+        "table_mark",
+    )
+
+
+def _has_table_mark_shape(component: Any, cv2: Any, np: Any) -> bool:
+    height, width = component.shape
+    lines = cv2.HoughLinesP(
+        component,
+        1,
+        np.pi / 180,
+        threshold=2,
+        minLineLength=max(3, round(min(width, height) * 0.2)),
+        maxLineGap=2,
+    )
+    if lines is None:
+        return False
+    longest_diagonal = max(
+        (
+            float(np.hypot(right - left, bottom - top))
+            for left, top, right, bottom in lines.reshape(-1, 4)
+            if 15
+            <= abs(float(np.degrees(np.arctan2(bottom - top, right - left))))
+            <= 80
+        ),
+        default=0.0,
+    )
+    return longest_diagonal >= min(width, height) * 0.35
+
+
 def _has_mark_shape(component: Any, cv2: Any, np: Any) -> bool:
     height, width = component.shape
+    if float(np.mean(component > 0)) >= 0.85:
+        return False
+
     corners = ()
     if 0.5 <= width / height <= 2:
         edge_height = max(1, height // 3)
@@ -398,7 +1113,7 @@ def _supported_unmatched_detection(
 def _square_boxes(mask: Any, cv2: Any) -> list[BoundingBox]:
     height, width = mask.shape
     min_side = max(4, round(min(height, width) * 0.006))
-    max_side = max(18, round(min(height, width) * 0.08))
+    max_side = max(20, round(min(height, width) * 0.08))
     contours, hierarchy = cv2.findContours(
         mask,
         cv2.RETR_TREE,
@@ -444,18 +1159,96 @@ def _joins_text(
 ) -> bool:
     import numpy as np
 
-    page_width = mask.shape[1]
+    page_height, page_width = mask.shape
+    crop = mask[top : top + height, left : left + width]
     if height <= 2:
         return True
-    left_strip = mask[top + 1 : top + height - 1, max(0, left - 3) : left]
+
+    border_width = max(1, round(min(width, height) * 0.2))
+    edge_ink = (
+        float(np.mean(crop[:border_width] > 0, axis=1).max()),
+        float(np.mean(crop[-border_width:] > 0, axis=1).max()),
+        float(np.mean(crop[:, :border_width] > 0, axis=0).max()),
+        float(np.mean(crop[:, -border_width:] > 0, axis=0).max()),
+    )
+    if min(edge_ink) >= 0.9:
+        return _continues_grid(mask, left, top, width, height)
+
+    scan = max(3, round(min(width, height) * 0.5))
+    left_strip = mask[top : top + height, max(0, left - scan) : left]
     right_strip = mask[
-        top + 1 : top + height - 1,
-        left + width : min(page_width, left + width + 3),
+        top : top + height,
+        left + width : min(page_width, left + width + scan),
+    ]
+    above_strip = mask[max(0, top - scan) : top, left : left + width]
+    below_strip = mask[
+        top + height : min(page_height, top + height + scan),
+        left : left + width,
     ]
     occupancy = [
-        float(np.mean(strip > 0)) for strip in (left_strip, right_strip) if strip.size
+        float(np.mean(strip > 0, axis=axis).max())
+        for strip, axis in (
+            (left_strip, 0),
+            (right_strip, 0),
+            (above_strip, 1),
+            (below_strip, 1),
+        )
+        if strip.size
     ]
-    return bool(occupancy and max(occupancy) > 0.25)
+    return bool(occupancy and max(occupancy) >= 0.15)
+
+
+def _continues_grid(
+    mask: Any,
+    left: int,
+    top: int,
+    width: int,
+    height: int,
+) -> bool:
+    import numpy as np
+
+    page_height, page_width = mask.shape
+    reach = max(3, round(min(width, height) * 0.5))
+    thickness = max(1, round(min(width, height) * 0.12))
+    horizontal_bands = (
+        (max(0, top - thickness), min(page_height, top + thickness + 1)),
+        (
+            max(0, top + height - thickness - 1),
+            min(page_height, top + height + thickness),
+        ),
+    )
+    vertical_bands = (
+        (max(0, left - thickness), min(page_width, left + thickness + 1)),
+        (
+            max(0, left + width - thickness - 1),
+            min(page_width, left + width + thickness),
+        ),
+    )
+    patches = []
+    for band_top, band_bottom in horizontal_bands:
+        patches.extend(
+            (
+                mask[band_top:band_bottom, max(0, left - reach) : left],
+                mask[
+                    band_top:band_bottom,
+                    left + width : min(page_width, left + width + reach),
+                ],
+            )
+        )
+    for band_left, band_right in vertical_bands:
+        patches.extend(
+            (
+                mask[max(0, top - reach) : top, band_left:band_right],
+                mask[
+                    top + height : min(page_height, top + height + reach),
+                    band_left:band_right,
+                ],
+            )
+        )
+    continuations = sum(
+        float(np.mean(patch > 0)) >= 0.15 for patch in patches if patch.size
+    )
+    return continuations >= 2
 
 
 def _deduplicate(boxes: list[BoundingBox]) -> list[BoundingBox]:
@@ -512,8 +1305,15 @@ def _classify(gray: Any, box: BoundingBox, np: Any) -> ControlDetection:
     if not inner.size:
         return ControlDetection(box, "ambiguous", 0.0, 0.0)
 
-    dark_ratio = float(np.mean(inner < 200))
-    faint_ratio = float(np.mean(inner < 235))
+    pad = max(2, round(side * 0.5))
+    top = max(0, box.top - pad)
+    left = max(0, box.left - pad)
+    bottom = min(gray.shape[0], box.bottom + pad)
+    right = min(gray.shape[1], box.right + pad)
+    context = gray[top:bottom, left:right]
+    background = float(np.median(context)) if context.size else 255.0
+    dark_ratio = float(np.mean(inner < background - 45))
+    faint_ratio = float(np.mean(inner < background - 20))
     ink_ratio = max(dark_ratio, faint_ratio * 0.75)
     if dark_ratio >= 0.2 or faint_ratio >= 0.45:
         return ControlDetection(box, "selected", min(0.99, 0.75 + ink_ratio), ink_ratio)
@@ -531,7 +1331,11 @@ def _control_region(
     detections: list[ControlDetection],
     page_shape: tuple[int, ...],
 ) -> TextRegion:
-    label = _nearest_label(detection.bounding_box, regions, label_provider)
+    label = (
+        None
+        if detection.label is not None
+        else _nearest_label(detection.bounding_box, regions, label_provider)
+    )
     label_regions = _label_regions(detection.bounding_box, label, regions)
     selection_supported = _selection_supported(
         detection,
@@ -541,21 +1345,42 @@ def _control_region(
     observed_state = detection.state
     state = (
         "ambiguous"
-        if observed_state == "selected" and (label is None or not selection_supported)
+        if observed_state == "selected"
+        and ((label is None and detection.label is None) or not selection_supported)
         else observed_state
     )
     resolution = "resolved"
-    if state == "ambiguous" or label is None:
+    if state == "ambiguous" or (label is None and detection.label is None):
         resolution = "unreadable"
     symbol = {"selected": "[x]", "unselected": "[ ]", "ambiguous": "[?]"}[state]
-    label_text = _semantic_label(label_regions)
-    label_ids = [region.id for region in label_regions]
-    method = (
-        "label_anchored_residual_ink"
-        if detection.source == "anchored_mark"
-        else "square_contour_with_line_cleanup"
-    )
-    model = MARK_MODEL if detection.source == "anchored_mark" else MODEL
+    label_text = detection.label or _semantic_label(label_regions)
+    label_ids = list(detection.label_ids) or [region.id for region in label_regions]
+    source_ids = list(detection.source_ids)
+    methods = {
+        "anchored_mark": "label_anchored_residual_ink",
+        "table_mark": "table_cell_residual_ink",
+    }
+    method = methods.get(detection.source, "square_contour_with_line_cleanup")
+    model = MARK_MODEL if detection.source != "square" else MODEL
+    text_provenance = {
+        "method": method,
+        "label_evidence_ids": label_ids,
+    }
+    if source_ids:
+        text_provenance["source_evidence_ids"] = source_ids
+    structure = {
+        "role": "control",
+        "control_type": "checkbox",
+        "state": state,
+        "observed_state": observed_state,
+        "selection_supported": selection_supported,
+        "label": label_text or None,
+        "label_evidence_ids": label_ids,
+        "ink_ratio": round(detection.ink_ratio, 4),
+        "model": model,
+    }
+    if source_ids:
+        structure["source_evidence_ids"] = source_ids
     return TextRegion(
         id=f"p{page_number}-controls-checkbox-{index}",
         kind="checkbox",
@@ -563,27 +1388,16 @@ def _control_region(
         confidence=detection.confidence,
         bounding_box=detection.bounding_box,
         reading_order=(
-            min(region.reading_order for region in label_regions)
+            detection.reading_order
+            if detection.reading_order is not None
+            else min(region.reading_order for region in label_regions)
             if label_regions
             else 10**9 + index
         ),
         provider=PROVIDER,
-        text_provenance={
-            "method": method,
-            "label_evidence_ids": label_ids,
-        },
+        text_provenance=text_provenance,
         resolution=resolution,
-        structure={
-            "role": "control",
-            "control_type": "checkbox",
-            "state": state,
-            "observed_state": observed_state,
-            "selection_supported": selection_supported,
-            "label": label_text or None,
-            "label_evidence_ids": label_ids,
-            "ink_ratio": round(detection.ink_ratio, 4),
-            "model": model,
-        },
+        structure=structure,
     )
 
 
@@ -593,6 +1407,8 @@ def _selection_supported(
     page_shape: tuple[int, ...],
 ) -> bool:
     if detection.state != "selected":
+        return True
+    if detection.source == "table_mark":
         return True
     if detection.source == "anchored_mark":
         return False
@@ -611,6 +1427,33 @@ def _selection_supported(
             continue
         peer_center_y = _center(peer.bounding_box)[1]
         if abs(peer_center_y - center_y) <= max(side, peer_side) * 0.6:
+            return True
+    return False
+
+
+def _contains_readable_text(
+    control: BoundingBox,
+    regions: list[TextRegion],
+    label_provider: str | None,
+) -> bool:
+    side = _side(control)
+    for region in regions:
+        if region.kind in {"checkbox", "table", "coverage_risk", "page_text"}:
+            continue
+        if label_provider is not None and region.provider != label_provider:
+            continue
+        if sum(character.isalnum() for character in region.text) < 2:
+            continue
+        box = region.bounding_box
+        height = max(1, box.bottom - box.top)
+        if side < height * 2:
+            continue
+        if (
+            control.left <= box.left
+            and control.top <= box.top
+            and control.right >= box.right
+            and control.bottom >= box.bottom
+        ):
             return True
     return False
 
@@ -757,6 +1600,15 @@ def _readable_label(text: str) -> bool:
     if normalized in {"x", "0", "区", "口", "□", "☐", "☒", "✓", "✔"}:
         return False
     return any(character.isalnum() for character in normalized)
+
+
+def _explicit_control_label(region: TextRegion) -> bool:
+    role = (region.structure or {}).get("role")
+    return region.kind == "form_field" or role in {
+        "control",
+        "control_label",
+        "form_field",
+    }
 
 
 def _center(box: BoundingBox) -> tuple[float, float]:

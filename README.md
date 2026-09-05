@@ -103,12 +103,14 @@ Reaching for the CLI and expecting the full stack is the easiest way to misread 
 | Entry point | Reader | Stages |
 | --- | --- | --- |
 | `ocr_pipeline.cli` | one bare reader, chosen by `--reader` | none |
-| `ocr_pipeline.demo` | `RoutedTesseractReader`, so the frame-routed view only | none |
-| `experiments/serve_gpu_demo.py` | orientation guard, over selective wide-band recovery, over tiny-text tiling, over Nemotron OCR v2 at word merge level | tables with two Tesseract crop challengers, controls, optional handwriting, then evidence risk |
+| `ocr_pipeline.demo` | reduced workbench with `RoutedTesseractReader` as primary OCR | none |
+| `experiments/serve_gpu_demo.py` | page-frame and orientation guards, over selective wide-band recovery, over tiny-text tiling, over Nemotron OCR v2 at word merge level and batch size one | tables with two Tesseract crop challengers, controls, then evidence risk; optional Phi-4 is manual reread only |
 
 The verified GPU composition uses three of the four guards described under [gated recovery](#gated-recovery).
-Its base recognizer is Nemotron OCR v2, and the wide-band fallback and its independent confirmation reader are both Tesseract at page segmentation mode 6, the second under Sauvola thresholding.
-The frame-routed view is the workbench default rather than part of that composition, and evidence risk runs last so that it sees what every other stage produced.
+Its primary recognizer is Nemotron OCR v2 at batch size one.
+Tesseract is limited to orientation OSD, selective wide-band fallback and confirmation, and raw and Sauvola table-crop challengers.
+Page-frame isolation wraps the full reader, and evidence risk runs last so that it sees what every other stage produced.
+The always-visible banner and `GET /api/composition` report this static configuration before a request; per-page stage execution in the process response reports what actually ran.
 
 The GPU composition needs local model paths.
 Run it with `--help` for the full list; the required arguments are the Nemotron model directory, the pinned Table Transformer source and its detection and structure checkpoints, and the Tesseract executable.
@@ -142,7 +144,8 @@ It prepares pages, reads them, runs the ordered stages, restores coordinates, co
 | Layer | Contract | Current implementations |
 | --- | --- | --- |
 | Reader | `read(image_path, page_number) -> list[TextRegion]` | Tesseract, Nemotron OCR v2, Nemotron Parse 2.0, Granite Docling, Ministral OCR |
-| Region stage | `apply(image_path, page_number, regions) -> list[TextRegion]` | tables, controls, evidence risk, handwriting |
+| Region stage | `apply(image_path, page_number, regions) -> list[TextRegion]` | tables, controls, evidence risk |
+| Manual crop reviewer | `review_region(image_path, page_number, region) -> TextRegion` | Phi-4 handwriting reread |
 | Result | pages, regions, alternatives, provenance, failures, route | `DocumentResult`, `schema_version = 2` |
 | Workbench | inspect the result without changing the model route | page overlays, evidence detail, stage timings, JSON and Markdown export |
 

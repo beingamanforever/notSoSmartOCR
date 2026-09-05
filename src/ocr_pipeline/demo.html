@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Not So Smart OCR</title>
+  __OCR_KATEX_ASSETS__
   <style>
     :root {
       color-scheme: light;
@@ -54,6 +55,32 @@
     h1 { margin: 4px 0 2px; font-size: clamp(1.7rem, 3vw, 2.45rem); letter-spacing: -.04em; }
     .subtitle { margin: 0; color: var(--muted); }
     .privacy { color: var(--muted); font-size: .82rem; text-align: right; }
+
+    .composition-banner {
+      display: grid;
+      grid-template-columns: minmax(190px, .45fr) minmax(0, 1.55fr);
+      gap: 8px 18px;
+      margin-bottom: 18px;
+      padding: 13px 15px;
+      border: 1px solid var(--line-strong);
+      border-left: 4px solid var(--text);
+      border-radius: 12px;
+      background: var(--panel);
+    }
+    .composition-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .composition-heading strong { font-size: .9rem; }
+    .composition-scope {
+      padding: 3px 7px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: .66rem;
+      font-weight: 720;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+    .composition-summary, .composition-note { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.45; }
+    .composition-note { grid-column: 2; }
 
     .toolbar, .card {
       border: 1px solid var(--line);
@@ -133,26 +160,30 @@
     .timer-state { color: var(--muted); font-size: .7rem; }
 
     .examples {
-      display: flex;
-      align-items: center;
-      gap: 10px;
+      display: grid;
+      grid-template-columns: repeat(6, minmax(130px, 1fr));
+      gap: 12px;
       margin: -6px 0 18px;
-      overflow-x: auto;
       padding: 2px;
     }
-    .examples-label { flex: 0 0 auto; color: var(--muted); font-size: .74rem; font-weight: 700; }
+    .examples-label { grid-column: 1 / -1; color: var(--muted); font-size: .74rem; font-weight: 700; }
     .example-button {
-      flex: 0 0 auto;
-      padding: 7px 10px;
+      min-width: 0;
+      overflow: hidden;
+      padding: 0;
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 10px;
       background: var(--panel);
       color: var(--text);
       cursor: pointer;
-      font-size: .76rem;
+      text-align: left;
+      font-size: .75rem;
       font-weight: 650;
     }
     .example-button:hover { border-color: var(--accent); background: var(--accent-soft); }
+    .example-preview { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-bottom: 1px solid var(--line); background: var(--panel-raised); }
+    .example-name { display: block; padding: 8px 9px 2px; }
+    .example-kind { display: block; padding: 0 9px 8px; color: var(--muted); font-size: .68rem; font-weight: 500; }
 
     .metadata { display: none; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
     .metadata.visible { display: flex; }
@@ -191,6 +222,13 @@
       font-size: .75rem;
     }
     .timing-item strong { color: var(--text); font-variant-numeric: tabular-nums; }
+    .timing-item small {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: .68rem;
+      line-height: 1.35;
+    }
     .chip {
       padding: 6px 10px;
       border: 1px solid var(--line);
@@ -362,18 +400,31 @@
     .document-table { width: 100%; border-collapse: collapse; font-size: .84rem; line-height: 1.45; }
     .document-table th, .document-table td { min-width: 90px; padding: 9px 10px; border: 1px solid var(--line-strong); text-align: left; vertical-align: top; white-space: pre-wrap; }
     .document-table th { background: var(--panel-raised); font-weight: 720; }
-    .document-table td.evidence-conflicting, .document-table td.evidence-unreadable,
-    .document-table th.evidence-conflicting, .document-table th.evidence-unreadable { background: var(--accent-soft); }
-    .semantic-block.control, .semantic-block.handwriting { padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--accent-soft); }
+    .semantic-block.control { padding: 10px 12px; border-left: 3px solid var(--line-strong); background: var(--panel-raised); }
+    .semantic-block.handwriting { padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--accent-soft); }
     .semantic-block.figure, .semantic-block.field { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-raised); }
     .semantic-block.list { padding-left: 18px; }
-    .evidence-state { display: inline-flex; margin: 0 7px 7px 0; padding: 3px 7px; border: 1px solid var(--accent); border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: .67rem; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; vertical-align: middle; }
-    .evidence-alternatives { margin: 7px 0 0; color: var(--muted); font-size: .76rem; }
-    .evidence-alternatives summary { cursor: pointer; font-weight: 650; }
-    .evidence-alternatives ul { margin: 6px 0 0; padding-left: 18px; }
+    .semantic-block.form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 20px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+    .semantic-block.form-row > span { min-width: 0; }
+    .semantic-block.form-row strong { display: block; margin-bottom: 2px; font-size: .76rem; color: var(--muted); letter-spacing: .02em; }
+    .presentation-content p { margin: 0 0 12px; line-height: 1.65; white-space: pre-wrap; }
+    .presentation-content h3 { margin: 22px 0 9px; font-size: 1.08rem; }
+    .presentation-content h4 { margin: 18px 0 8px; font-size: .96rem; }
+    .presentation-content .document-table { margin: 0 0 18px; }
+    .presentation-block { margin: 0 0 18px; }
+    .presentation-fallback { padding-left: 12px; border-left: 3px solid var(--line-strong); }
+    .presentation-validation { margin: 8px 0; padding: 9px 11px; border-left: 3px solid var(--accent); background: var(--accent-soft); color: var(--accent); font-size: .76rem; line-height: 1.45; }
+    .presentation-raw { margin-top: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-raised); }
+    .presentation-caption, .presentation-footnote, .presentation-page-footer, .presentation-page-header { color: var(--muted); font-size: .78rem; }
     .layout-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
     .layout-table th, .layout-table td { padding: 9px 8px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
     .layout-table th { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-size: .68rem; text-transform: uppercase; letter-spacing: .06em; }
+    .view-note { margin: 0 0 12px; color: var(--muted); font-size: .78rem; line-height: 1.5; }
+    .view-note strong { color: var(--text); }
+    .view-control { display: inline-flex; align-items: center; gap: 7px; margin: 0 0 12px; color: var(--text); font-size: .78rem; cursor: pointer; }
+    .failure-section + .failure-section { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+    .failure-section h3 { margin: 0 0 10px; font-size: .86rem; }
+    .review-flag { margin-bottom: 10px; padding: 13px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-raised); }
     .failure {
       margin-bottom: 10px;
       padding: 13px;
@@ -409,6 +460,9 @@
       header { align-items: flex-start; flex-direction: column; }
       .privacy { text-align: left; }
       .risk-card { grid-template-columns: 1fr; }
+      .composition-banner { grid-template-columns: 1fr; }
+      .composition-note { grid-column: 1; }
+      .examples { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
       .workspace { grid-template-columns: 1fr; }
       .preview-wrap { min-height: 420px; }
       .tab-panel { min-height: 420px; }
@@ -420,6 +474,7 @@
       .toolbar { align-items: stretch; flex-wrap: wrap; }
       .file-field { flex-basis: 100%; }
       .button { flex: 1; }
+      .examples { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .card-head { align-items: flex-start; flex-direction: column; }
       .categories { align-items: flex-start; flex-direction: column; }
       .inspector-grid { grid-template-columns: 1fr 1fr; }
@@ -437,6 +492,7 @@
   </style>
 </head>
 <body>
+  <script id="composition-data" type="application/json">__OCR_COMPOSITION_JSON__</script>
   <main class="shell">
     <header>
       <div>
@@ -446,6 +502,15 @@
       </div>
       <div class="privacy">Private execution path<br>25 MB maximum</div>
     </header>
+
+    <section class="composition-banner" id="composition-banner" aria-labelledby="composition-label" aria-live="polite">
+      <div class="composition-heading">
+        <strong id="composition-label">Pipeline configuration</strong>
+        <span class="composition-scope" id="composition-scope">Loading</span>
+      </div>
+      <p class="composition-summary" id="composition-summary">Loading the configured local pipeline.</p>
+      <p class="composition-note" id="composition-note">Configuration is shown before processing so reduced and full paths cannot be confused.</p>
+    </section>
 
     <form class="toolbar" id="upload-form">
       <label class="file-field" for="source-file">
@@ -457,11 +522,38 @@
       <button class="button" id="clear-button" type="button" disabled>Clear</button>
     </form>
 
-    <nav class="examples" aria-label="Generated example documents">
-      <span class="examples-label">Try a generated example</span>
-      <button class="example-button" type="button" data-example="architecture">OCR architecture</button>
-      <button class="example-button" type="button" data-example="hard-case-routing">Hard-case routing</button>
-      <button class="example-button" type="button" data-example="clinical-table">Clinical table</button>
+    <nav class="examples" aria-label="Example documents">
+      <span class="examples-label">Try a public example</span>
+      <button class="example-button" type="button" data-example="clinical-table">
+        <img class="example-preview" src="/api/examples/clinical-table" alt="Synthetic clinical table preview" loading="lazy">
+        <span class="example-name">Clinical table</span>
+        <span class="example-kind">Structured data</span>
+      </button>
+      <button class="example-button" type="button" data-example="handwriting">
+        <img class="example-preview" src="/api/examples/handwriting" alt="Handwritten page preview" loading="lazy">
+        <span class="example-name">Handwriting</span>
+        <span class="example-kind">Multilingual text</span>
+      </button>
+      <button class="example-button" type="button" data-example="academic-paper">
+        <img class="example-preview" src="/api/examples/academic-paper" alt="Academic paper preview" loading="lazy">
+        <span class="example-name">Academic paper</span>
+        <span class="example-kind">Math and columns</span>
+      </button>
+      <button class="example-button" type="button" data-example="code">
+        <img class="example-preview" src="/api/examples/code" alt="Code document preview" loading="lazy">
+        <span class="example-name">Code</span>
+        <span class="example-kind">Mixed typography</span>
+      </button>
+      <button class="example-button" type="button" data-example="photographed-table">
+        <img class="example-preview" src="/api/examples/photographed-table" alt="Photographed table preview" loading="lazy">
+        <span class="example-name">Photo table</span>
+        <span class="example-kind">Perspective scan</span>
+      </button>
+      <button class="example-button" type="button" data-example="multi-column-page">
+        <img class="example-preview" src="/api/examples/multi-column-page" alt="Multi-column document preview" loading="lazy">
+        <span class="example-name">Multi-column page</span>
+        <span class="example-kind">Dense layout</span>
+      </button>
     </nav>
 
     <div class="activity-line" id="activity-line" hidden>
@@ -474,7 +566,7 @@
     </div>
     <div class="metadata" id="metadata" aria-label="Processing metadata"></div>
     <details class="timing-card" id="timing-card" hidden>
-      <summary><span>Backend stage timing</span><span class="timing-total" id="timing-total"></span></summary>
+      <summary><span>Pipeline execution</span><span class="timing-total" id="timing-total"></span></summary>
       <div class="timing-list" id="timing-list"></div>
     </details>
 
@@ -543,18 +635,18 @@
           <span class="card-title">Document output</span>
           <div class="downloads">
             <span class="copy-control">
-              <button class="download" id="copy-json" type="button" data-copy-state="idle" disabled>Copy JSON</button>
+              <button class="download" id="copy-json" type="button" data-copy-state="idle" disabled>Copy API response JSON</button>
               <span class="copy-status" id="copy-status" role="status" aria-live="polite" aria-atomic="true"></span>
             </span>
-            <a class="download" id="download-json" download aria-disabled="true">Download JSON</a>
+            <a class="download" id="download-json" download aria-disabled="true">Download result JSON</a>
             <a class="download" id="download-markdown" download aria-disabled="true">Download Markdown</a>
           </div>
         </div>
         <div class="tabs" role="tablist" aria-label="Output views">
           <button class="tab" role="tab" type="button" aria-selected="true" aria-controls="panel-rendered" id="tab-rendered">Rendered</button>
-          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-layout" id="tab-layout" tabindex="-1">Layout</button>
+          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-layout" id="tab-layout" tabindex="-1">Regions</button>
           <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-processed" id="tab-processed" tabindex="-1">Processed</button>
-          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-raw" id="tab-raw" tabindex="-1">Raw</button>
+          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-raw" id="tab-raw" tabindex="-1">Region JSON</button>
           <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-json" id="tab-json" tabindex="-1">JSON</button>
           <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-failures" id="tab-failures" tabindex="-1">Failures</button>
         </div>
@@ -563,7 +655,10 @@
         </div>
         <div class="tab-panel" role="tabpanel" id="panel-layout" aria-labelledby="tab-layout" hidden></div>
         <div class="tab-panel" role="tabpanel" id="panel-processed" aria-labelledby="tab-processed" hidden></div>
-        <div class="tab-panel" role="tabpanel" id="panel-raw" aria-labelledby="tab-raw" hidden><pre>[]</pre></div>
+        <div class="tab-panel" role="tabpanel" id="panel-raw" aria-labelledby="tab-raw" aria-describedby="raw-scope" hidden>
+          <p class="view-note" id="raw-scope"><strong>Final post-stage region JSON.</strong> This view contains page-numbered regions after all pipeline stages. Use JSON for the complete API response.</p>
+          <pre>[]</pre>
+        </div>
         <div class="tab-panel" role="tabpanel" id="panel-json" aria-labelledby="tab-json" hidden><pre>{}</pre></div>
         <div class="tab-panel" role="tabpanel" id="panel-failures" aria-labelledby="tab-failures" hidden>
           <div class="empty-state"><strong>No result yet</strong>Ingest, render, and OCR failures will be shown explicitly.</div>
@@ -573,6 +668,7 @@
   </main>
 
   <script>
+    const composition = JSON.parse(document.getElementById("composition-data").textContent);
     const state = {
       response: null,
       pageIndex: 0,
@@ -580,6 +676,7 @@
       image: null,
       imageRequest: 0,
       hiddenKinds: new Set(),
+      showAllRegions: false,
       selectedFile: null,
       clientTimerStartedAt: null,
       clientTimerId: null,
@@ -597,6 +694,21 @@
     const structureColor = rootStyle.getPropertyValue("--text").trim();
     const actionColor = rootStyle.getPropertyValue("--accent").trim();
     const neutralColor = rootStyle.getPropertyValue("--panel").trim();
+
+    renderComposition(composition);
+
+    function renderComposition(value) {
+      byId("composition-label").textContent = value.label;
+      byId("composition-scope").textContent = value.scope;
+      const tesseract = value.tesseract_roles.length
+        ? ` Tesseract: ${value.tesseract_roles.join(", ")}.`
+        : " Tesseract is not configured.";
+      const stages = value.stages.length ? value.stages.join(" + ") : "none";
+      byId("composition-summary").textContent =
+        `Primary OCR: ${value.primary_ocr}. Orientation: ${value.orientation}. Configured stages: ${stages}. Handwriting: ${value.handwriting}.${tesseract}`;
+      byId("composition-note").textContent = value.note;
+      byId("composition-banner").dataset.scope = value.scope;
+    }
 
     fileInput.addEventListener("change", () => {
       const file = fileInput.files[0];
@@ -711,7 +823,7 @@
 
     async function handleCopyJson() {
       if (!state.response) return;
-      const content = JSON.stringify(state.response.result, null, 2);
+      const content = JSON.stringify(state.response, null, 2);
       const button = byId("copy-json");
       button.disabled = true;
       button.setAttribute("aria-busy", "true");
@@ -818,7 +930,7 @@
       status.classList.toggle("error", copyState === "error");
       state.copyResetId = window.setTimeout(() => {
         button.dataset.copyState = "idle";
-        button.textContent = "Copy JSON";
+        button.textContent = "Copy API response JSON";
         status.textContent = "";
         status.classList.remove("error");
       }, 1600);
@@ -893,18 +1005,22 @@
       const payload = state.response;
       const result = payload.result;
       renderMetadata(payload);
-      renderTiming(payload.timing);
+      renderTiming(payload.timing, payload.page_execution, payload.stage_execution);
       renderUncertainty();
-      renderRendered(result.pages);
+      renderRendered(result.pages, payload.presentation?.pages || []);
       renderLayout(result.pages);
-      renderProcessed(result.pages);
+      renderProcessed(result.pages, payload.presentation?.pages || []);
       byId("panel-raw").querySelector("pre").textContent = JSON.stringify(
         result.pages.map((page) => ({ page_number: page.page_number, regions: page.regions })),
         null,
         2
       );
-      byId("panel-json").querySelector("pre").textContent = JSON.stringify(result, null, 2);
-      renderFailures(result.failures, payload.preview_failure);
+      byId("panel-json").querySelector("pre").textContent = JSON.stringify(state.response, null, 2);
+      renderFailures(
+        result.failures,
+        payload.preview_failure,
+        payload.presentation?.pages || []
+      );
       byId("download-json").href = `/api/sessions/${payload.session_id}/result.json`;
       byId("download-markdown").href = `/api/sessions/${payload.session_id}/result.md`;
       byId("download-json").setAttribute("aria-disabled", "false");
@@ -962,7 +1078,7 @@
       const items = [
         ["Status", result.status],
         ["Backend", payload.backend],
-        ["Stages", payload.pipeline_stages.join(" + ") || "none"],
+        ["Configured stages", payload.pipeline_stages.join(" + ") || "none"],
         ["Version", payload.backend_version],
         ["Backend pipeline", `${payload.elapsed_seconds.toFixed(3)} s`],
         ["Geometry", payload.geometry],
@@ -983,7 +1099,7 @@
       metadata.classList.add("visible");
     }
 
-    function renderTiming(timing) {
+    function renderTiming(timing, pageExecution = [], stageExecution = []) {
       const card = byId("timing-card");
       if (!timing) {
         card.hidden = true;
@@ -996,40 +1112,74 @@
         ["Preview processing", timing.preview_seconds],
         ["OCR queue", timing.queue_seconds],
         ["OCR pipeline", timing.pipeline_seconds],
-        ...Object.entries(timing.pipeline_steps || {}).map(([name, seconds]) => [
-          name.replace(/^stage\./, "").replaceAll("_", " "),
-          seconds
+        ...(timing.manual_reread_seconds == null
+          ? []
+          : [["Manual reread", timing.manual_reread_seconds]]),
+        ...pageExecution.map((run) => [
+          `Page ${run.page_number} total`,
+          run.execution_seconds,
+          `${Number(run.queue_seconds).toFixed(3)} s queued${run.batched_reader ? " · batched reader" : ""}`
+        ]),
+        ...Object.entries(timing.pipeline_steps || {})
+          .filter(([name]) => !name.startsWith("stage.") || !stageExecution.length)
+          .map(([name, seconds]) => [
+            name.replace(/^stage\./, "").replaceAll("_", " "),
+            seconds,
+            ""
+          ]),
+        ...stageExecution.map((run) => [
+          `Page ${run.page_number} · ${String(run.stage).replaceAll("_", " ")}`,
+          run.elapsed_seconds,
+          stageExecutionDetail(run)
         ])
       ];
       byId("timing-total").textContent = `${timing.total_seconds.toFixed(3)} s backend total`;
-      byId("timing-list").replaceChildren(...values.map(([label, seconds]) => {
+      byId("timing-list").replaceChildren(...values.map(([label, seconds, detail]) => {
         const item = document.createElement("div");
         item.className = "timing-item";
+        const name = document.createElement("span");
+        name.textContent = label;
+        if (detail) {
+          const small = document.createElement("small");
+          small.textContent = detail;
+          name.append(small);
+        }
         const value = document.createElement("strong");
         value.textContent = `${Number(seconds).toFixed(3)} s`;
-        item.append(document.createTextNode(label), value);
+        item.append(name, value);
         return item;
       }));
       card.hidden = false;
     }
 
-    function renderRendered(pages) {
+    function stageExecutionDetail(run) {
+      const changes = [
+        `${run.input_regions} → ${run.output_regions} regions`,
+        run.added_regions ? `+${run.added_regions}` : "",
+        run.removed_regions ? `-${run.removed_regions}` : "",
+        run.modified_regions ? `${run.modified_regions} modified` : ""
+      ].filter(Boolean).join(" · ");
+      const reason = run.failure_code || run.skip_reason;
+      return `${run.status}${reason ? ` · ${String(reason).replaceAll("_", " ")}` : ""} · ${changes}`;
+    }
+
+    function renderRendered(pages, presentations) {
       const panel = byId("panel-rendered");
-      panel.replaceChildren(...pages.map((page) => {
+      const renderedPages = pagesWithTableContinuations(
+        pages,
+        state.response?.result?.table_continuations || []
+      );
+      panel.replaceChildren(...renderedPages.map((page) => {
         const section = document.createElement("section");
         section.className = "rendered-page";
         const heading = document.createElement("h2");
         heading.textContent = `Page ${page.page_number}`;
-        const blocks = renderSemanticBlocks(displayRegions(page));
-        if (!blocks.length) {
-          const text = document.createElement("p");
-          text.className = "semantic-block text";
-          text.textContent = page.text.value || "No text detected.";
-          blocks.push(text);
-        }
-        const content = document.createElement("div");
-        content.className = "rendered-content";
-        content.append(...blocks);
+        const presentation = presentations.find(
+          (item) => item.page_number === page.page_number
+        );
+        const content = usablePresentation(presentation)
+          ? renderStructuredPresentation(page, presentation)
+          : renderCanonicalPage(page);
         section.append(heading, content);
         return section;
       }));
@@ -1040,8 +1190,453 @@
       }
     }
 
+    function pagesWithTableContinuations(pages, continuations) {
+      if (!Array.isArray(continuations) || !continuations.length) return pages;
+      const renderedPages = pages.map((page) => ({
+        ...page,
+        regions: [...page.regions],
+        text: { ...page.text, evidence_ids: [...(page.text?.evidence_ids || [])] }
+      }));
+      const pagesByNumber = new Map(
+        renderedPages.map((page) => [page.page_number, page])
+      );
+      const changedPages = new Set();
+      continuations.forEach((continuation) => {
+        const pageNumbers = continuation?.source_page_numbers;
+        const tableIds = continuation?.source_table_ids;
+        if (
+          !Array.isArray(pageNumbers)
+          || !Array.isArray(tableIds)
+          || pageNumbers.length < 2
+          || pageNumbers.length !== tableIds.length
+          || !Array.isArray(continuation?.cells)
+        ) return;
+        const sources = pageNumbers.map((pageNumber, index) => {
+          const page = pagesByNumber.get(pageNumber);
+          const matches = (page?.regions || []).filter(
+            (region) => region.id === tableIds[index] && semanticKind(region) === "table"
+          );
+          return matches.length === 1 ? { page, region: matches[0] } : null;
+        });
+        if (sources.some((source) => !source)) return;
+        const first = sources[0];
+        const replacement = {
+          ...first.region,
+          id: String(continuation.id || "cross-page-table"),
+          text: "",
+          confidence: continuation.score,
+          provider: "cross-page-tables",
+          text_provenance: {
+            method: "cross_page_table_continuation",
+            source_page_numbers: [...pageNumbers],
+            source_table_ids: [...tableIds],
+            continuation_provenance: continuation.provenance || {}
+          },
+          structure: {
+            ...(first.region.structure || {}),
+            role: "table",
+            header_row_count: continuation.header_row_count,
+            row_count: continuation.row_count,
+            column_count: continuation.column_count,
+            cells: continuation.cells,
+            cross_page_continuation_id: continuation.id
+          }
+        };
+        first.page.regions[first.page.regions.indexOf(first.region)] = replacement;
+        sources.slice(1).forEach(({ page, region }) => {
+          page.regions.splice(page.regions.indexOf(region), 1);
+        });
+        sources.forEach(({ page, region }) => {
+          changedPages.add(page.page_number);
+          page.text.evidence_ids = page.text.evidence_ids.filter(
+            (evidenceId) => evidenceId !== region.id
+          );
+        });
+        first.page.text.evidence_ids.push(replacement.id);
+      });
+      changedPages.forEach((pageNumber) => {
+        const page = pagesByNumber.get(pageNumber);
+        const evidenceIds = new Set(page.text.evidence_ids);
+        page.text.value = orderedRegions(page.regions)
+          .filter((region) =>
+            evidenceIds.has(region.id)
+            && (region.resolution || "resolved") === "resolved"
+            && region.text
+          )
+          .map((region) => String(region.text))
+          .join(" ");
+      });
+      return renderedPages;
+    }
+
+    function renderCanonicalPage(page) {
+      const content = document.createElement("div");
+      content.className = "rendered-content";
+      const blocks = renderSemanticBlocks(displayRegions(page), page.regions);
+      if (!blocks.length) {
+        const text = document.createElement("p");
+        text.className = "semantic-block text";
+        text.textContent = page.text.value || "";
+        blocks.push(text);
+      }
+      content.append(...blocks);
+      return content;
+    }
+
+    function usablePresentation(presentation) {
+      if (presentation?.status !== "review_draft" || !presentation.blocks?.length) return false;
+      return presentation.blocks.some(
+        (block) => block.rendering?.status === "selected"
+      );
+    }
+
+    function renderStructuredPresentation(page, presentation) {
+      const canonicalRegions = displayRegions(page);
+      const canonicalById = new Map(canonicalRegions.map((region) => [region.id, region]));
+      const claimedIds = new Set();
+      const entries = [];
+      presentation.blocks.forEach((block, index) => {
+        if (block.rendering?.status !== "selected") return;
+        const sourceId = block.rendering.source_region_id;
+        const source = canonicalById.get(sourceId);
+        if (!source || claimedIds.has(sourceId)) return;
+        const matching = [source];
+        const outcome = renderPresentationBlock(block);
+        claimedIds.add(sourceId);
+        const order = presentationOrder(
+          source,
+          presentationOrder(
+            block,
+            Number.MAX_SAFE_INTEGER - presentation.blocks.length + index
+          )
+        );
+        if (!outcome.failures.length) {
+          entries.push({ type: "presentation", order, node: outcome.node });
+          return;
+        }
+        entries.push({
+          type: "fallback",
+          order,
+          node: renderPresentationFallback(matching),
+        });
+      });
+      canonicalRegions
+        .filter((region) => !claimedIds.has(region.id))
+        .forEach((region) => entries.push({
+          type: "canonical",
+          order: presentationOrder(region),
+          region,
+        }));
+      entries.sort((left, right) => left.order - right.order);
+      const content = document.createElement("div");
+      content.className = "rendered-content presentation-content";
+      let canonicalRun = [];
+      const flushCanonicalRun = () => {
+        if (!canonicalRun.length) return;
+        content.append(...renderSemanticBlocks(canonicalRun, page.regions));
+        canonicalRun = [];
+      };
+      entries.forEach((entry) => {
+        if (entry.type === "canonical") {
+          canonicalRun.push(entry.region);
+          return;
+        }
+        flushCanonicalRun();
+        content.append(entry.node);
+      });
+      flushCanonicalRun();
+      return content;
+    }
+
+    function canonicalRegionsForPresentationBlock(regions, block, claimedIds) {
+      const available = regions.filter((region) => !claimedIds.has(region.id));
+      const sourceId = block.provenance?.source_region_id;
+      const exact = available.find((region) => region.id === sourceId);
+      if (exact) return [exact];
+      if (sourceId) return [];
+      const blockBox = normalizedBox(block.bbox);
+      if (!blockBox) return [];
+      return available.filter((region) => {
+        const regionBox = normalizedBox(region.bounding_box);
+        if (!regionBox) return false;
+        const intersectionWidth = Math.max(
+          0,
+          Math.min(blockBox.right, regionBox.right) - Math.max(blockBox.left, regionBox.left)
+        );
+        const intersectionHeight = Math.max(
+          0,
+          Math.min(blockBox.bottom, regionBox.bottom) - Math.max(blockBox.top, regionBox.top)
+        );
+        const regionArea = (regionBox.right - regionBox.left) * (regionBox.bottom - regionBox.top);
+        return regionArea > 0 && intersectionWidth * intersectionHeight / regionArea >= 0.5;
+      });
+    }
+
+    function renderPresentationBlock(block) {
+      const failures = Array.isArray(block.validation?.failures)
+        ? [...block.validation.failures]
+        : [];
+      const rawText = String(block.raw_text ?? "");
+      if (failures.length) return { node: null, failures };
+      const container = document.createElement("section");
+      container.className = "presentation-block";
+      container.dataset.category = block.category || "unknown";
+      if (block.category === "table") {
+        const rendered = renderSafePresentationTable(rawText);
+        if (rendered.failure) return { node: null, failures: [rendered.failure] };
+        container.append(rendered.table);
+        return { node: container, failures: [] };
+      }
+      if (block.category === "formula") {
+        const rendered = renderPresentationFormula(rawText);
+        if (rendered.failure) return { node: null, failures: [rendered.failure] };
+        container.append(rendered.formula);
+        return { node: container, failures: [] };
+      }
+      if (["plain", "text"].includes(block.category)) {
+        container.append(...renderPresentationMarkdown(rawText));
+        return { node: container, failures: [] };
+      }
+      const tags = {
+        title: "h3",
+        "section-header": "h4",
+        "list-item": "li",
+      };
+      const element = document.createElement(tags[block.category] || "p");
+      element.className = `presentation-${block.category || "text"}`;
+      element.textContent = rawText;
+      if (block.category === "list-item") {
+        const list = document.createElement("ul");
+        list.append(element);
+        container.append(list);
+      } else {
+        container.append(element);
+      }
+      return { node: container, failures: [] };
+    }
+
+    function renderPresentationFallback(regions) {
+      const container = document.createElement("section");
+      container.className = "presentation-block presentation-fallback";
+      container.append(...renderSemanticBlocks(regions));
+      return container;
+    }
+
+    function renderPresentationFormula(rawText) {
+      if (!window.katex || typeof window.katex.render !== "function") {
+        return { failure: {
+          code: "katex_unavailable",
+          message: "Local KaTeX is unavailable, so formula parseability was not verified"
+        } };
+      }
+      const formula = document.createElement("div");
+      formula.className = "presentation-formula";
+      try {
+        window.katex.render(rawText, formula, {
+          displayMode: true,
+          throwOnError: true,
+          strict: "error",
+          trust: false,
+        });
+        return { formula };
+      } catch (error) {
+        return { failure: {
+          code: "katex_parse_failed",
+          message: "Local KaTeX could not parse this formula"
+        } };
+      }
+    }
+
+    function renderSafePresentationTable(rawText) {
+      const parsed = new DOMParser().parseFromString(rawText, "text/html");
+      const bodyContent = [...parsed.body.childNodes].filter(
+        (node) => node.nodeType !== Node.TEXT_NODE || node.textContent.trim()
+      );
+      const source = bodyContent.length === 1 && bodyContent[0].tagName === "TABLE"
+        ? bodyContent[0]
+        : null;
+      if (!source || !validPresentationTableDOM(source)) {
+        return {
+          failure: {
+            code: "unsafe_html_table",
+            message: "HTML table failed the browser allowlist or rectangular-grid check"
+          }
+        };
+      }
+      const table = clonePresentationTableNode(source);
+      table.className = "document-table";
+      table.setAttribute("aria-label", "Model-assisted presentation table");
+      return { table };
+    }
+
+    function validPresentationTableDOM(table) {
+      const allowed = new Set(["TABLE", "CAPTION", "THEAD", "TBODY", "TFOOT", "TR", "TH", "TD", "SUP", "SUB"]);
+      const elements = [table, ...table.querySelectorAll("*")];
+      if (elements.some((element) => !allowed.has(element.tagName))) return false;
+      for (const element of elements) {
+        const parent = element === table ? null : element.parentElement?.tagName;
+        const validParent = element.tagName === "TABLE"
+          ? parent === null
+          : ["CAPTION", "THEAD", "TBODY", "TFOOT"].includes(element.tagName)
+            ? parent === "TABLE"
+            : element.tagName === "TR"
+              ? ["TABLE", "THEAD", "TBODY", "TFOOT"].includes(parent)
+              : ["SUP", "SUB"].includes(element.tagName)
+                ? ["TH", "TD"].includes(parent)
+                : parent === "TR";
+        if (!validParent) return false;
+        const attributes = [...element.attributes];
+        if (attributes.some((attribute) => !["rowspan", "colspan"].includes(attribute.name))) return false;
+        if (attributes.length && !["TH", "TD"].includes(element.tagName)) return false;
+        if (attributes.some((attribute) => !/^\d+$/.test(attribute.value) || Number(attribute.value) < 1 || Number(attribute.value) > 100)) return false;
+        for (const child of element.childNodes) {
+          if (![Node.TEXT_NODE, Node.ELEMENT_NODE].includes(child.nodeType)) return false;
+          if (child.nodeType === Node.TEXT_NODE && child.textContent.trim()
+              && !["CAPTION", "TH", "TD", "SUP", "SUB"].includes(element.tagName)) return false;
+        }
+      }
+      const rows = [...table.querySelectorAll("tr")];
+      if (!rows.length) return false;
+      const occupied = new Set();
+      rows.forEach((row, rowIndex) => {
+        let column = 0;
+        [...row.children].forEach((cell) => {
+          while (occupied.has(`${rowIndex}:${column}`)) column += 1;
+          const rowSpan = Number(cell.getAttribute("rowspan") || 1);
+          const columnSpan = Number(cell.getAttribute("colspan") || 1);
+          for (let rowOffset = 0; rowOffset < rowSpan; rowOffset += 1) {
+            for (let columnOffset = 0; columnOffset < columnSpan; columnOffset += 1) {
+              const point = `${rowIndex + rowOffset}:${column + columnOffset}`;
+              if (rowIndex + rowOffset >= rows.length || occupied.has(point)) occupied.add("invalid");
+              occupied.add(point);
+            }
+          }
+          column += columnSpan;
+        });
+      });
+      if (occupied.has("invalid")) return false;
+      const width = Math.max(...[...occupied].map((point) => Number(point.split(":")[1]))) + 1;
+      return width > 0 && rows.every((_, rowIndex) =>
+        Array.from({ length: width }, (_, column) => occupied.has(`${rowIndex}:${column}`)).every(Boolean)
+      );
+    }
+
+    function clonePresentationTableNode(source) {
+      const clone = document.createElement(source.tagName.toLowerCase());
+      if (["TH", "TD"].includes(source.tagName)) {
+        ["rowspan", "colspan"].forEach((name) => {
+          if (source.hasAttribute(name)) clone.setAttribute(name, source.getAttribute(name));
+        });
+      }
+      source.childNodes.forEach((child) => {
+        if (child.nodeType === Node.TEXT_NODE) {
+          clone.append(document.createTextNode(child.textContent));
+        } else {
+          clone.append(clonePresentationTableNode(child));
+        }
+      });
+      return clone;
+    }
+
+    function renderPresentationMarkdown(markdown) {
+      const lines = String(markdown || "").split(/\r?\n/);
+      const blocks = [];
+      let paragraph = [];
+      const flushParagraph = () => {
+        const text = paragraph.join(" ").trim();
+        paragraph = [];
+        if (!text) return;
+        const element = document.createElement("p");
+        appendPresentationInline(element, text);
+        blocks.push(element);
+      };
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index].trim();
+        if (!line) {
+          flushParagraph();
+          continue;
+        }
+        const heading = line.match(/^(#{1,6})\s+(.+)$/);
+        if (heading) {
+          flushParagraph();
+          const element = document.createElement(heading[1].length <= 2 ? "h3" : "h4");
+          appendPresentationInline(element, heading[2]);
+          blocks.push(element);
+          continue;
+        }
+        if (
+          line.startsWith("|")
+          && index + 1 < lines.length
+          && /^\|?(\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?$/.test(lines[index + 1].trim())
+        ) {
+          flushParagraph();
+          const rows = [presentationTableCells(line)];
+          index += 2;
+          while (index < lines.length && lines[index].trim().startsWith("|")) {
+            rows.push(presentationTableCells(lines[index].trim()));
+            index += 1;
+          }
+          index -= 1;
+          blocks.push(renderPresentationTable(rows));
+          continue;
+        }
+        paragraph.push(line);
+      }
+      flushParagraph();
+      return blocks;
+    }
+
+    function appendPresentationInline(element, text) {
+      const parts = String(text || "").split(/(\*\*[^*\n]+\*\*)/g);
+      parts.filter(Boolean).forEach((part) => {
+        if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+          const strong = document.createElement("strong");
+          strong.textContent = part.slice(2, -2);
+          element.append(strong);
+          return;
+        }
+        element.append(document.createTextNode(part));
+      });
+    }
+
+    function presentationTableCells(line) {
+      return line.replace(/^\||\|$/g, "").split("|").map((cell) => cell.trim());
+    }
+
+    function renderPresentationTable(rows) {
+      const table = document.createElement("table");
+      table.className = "document-table";
+      table.setAttribute("aria-label", "Model-assisted presentation table");
+      const head = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      rows[0].forEach((text) => {
+        const cell = document.createElement("th");
+        cell.scope = "col";
+        cell.textContent = text;
+        headRow.append(cell);
+      });
+      head.append(headRow);
+      const body = document.createElement("tbody");
+      rows.slice(1).forEach((values) => {
+        const row = document.createElement("tr");
+        values.forEach((text) => {
+          const cell = document.createElement("td");
+          cell.textContent = text;
+          row.append(cell);
+        });
+        body.append(row);
+      });
+      table.append(head, body);
+      return table;
+    }
+
     function displayRegions(page) {
       const evidenceIds = new Set(page.text.evidence_ids || []);
+      const layoutOwnerIds = new Set(
+        page.regions
+          .filter((region) => region.structure?.role === "layout_block")
+          .map((region) => region.id)
+      );
       const included = orderedRegions(page.regions).filter((region) => {
         const role = region.structure?.role;
         if (["table_source", "coverage_risk", "table_candidate"].includes(role)) return false;
@@ -1055,21 +1650,32 @@
           .filter((region) => semanticKind(region) === "control" && region.text)
           .flatMap((region) => region.structure?.label_evidence_ids || [])
       );
-      return included.filter((region) => !linkedLabels.has(region.id));
+      return included.filter((region) =>
+        !(region.structure?.layout_owner_id && layoutOwnerIds.has(region.structure.layout_owner_id))
+        && !linkedLabels.has(region.id)
+        || ["table", "figure", "control"].includes(semanticKind(region))
+      );
     }
 
     function orderedRegions(regions) {
       return regions
         .map((region, index) => ({ region, index }))
         .sort((left, right) => {
-          const leftOrder = Number.isInteger(left.region.reading_order) ? left.region.reading_order : Number.MAX_SAFE_INTEGER;
-          const rightOrder = Number.isInteger(right.region.reading_order) ? right.region.reading_order : Number.MAX_SAFE_INTEGER;
+          const leftOrder = presentationOrder(left.region);
+          const rightOrder = presentationOrder(right.region);
           return leftOrder - rightOrder || left.index - right.index;
         })
         .map(({ region }) => region);
     }
 
-    function renderSemanticBlocks(regions) {
+    function presentationOrder(region, fallback = Number.MAX_SAFE_INTEGER) {
+      const rank = region?.structure?.presentation_rank;
+      if (Number.isInteger(rank)) return rank;
+      return Number.isInteger(region?.reading_order) ? region.reading_order : fallback;
+    }
+
+    function renderSemanticBlocks(regions, sourceRegions = regions) {
+      const sourceIndex = new Map(sourceRegions.map((region) => [region.id, region]));
       const groups = [];
       orderedRegions(regions).forEach((region) => {
         const kind = semanticKind(region);
@@ -1092,12 +1698,13 @@
         }
         groups.push({
           kind,
-          text: region.text,
+          text: canonicalLayoutText(region, sourceIndex),
           sourceKind,
           role: region.structure?.role || "",
           inline,
           region,
-          lastRegion: region
+          lastRegion: region,
+          sourceIndex
         });
       });
       return groups.map(renderSemanticBlock);
@@ -1106,25 +1713,66 @@
     function renderSemanticBlock(group) {
       const kind = group.kind;
       if (kind === "table") return renderDocumentTable(group.region);
+      if (kind === "form_row") return renderFormRow(group.region, group.sourceIndex);
       const tag = kind === "title" ? "h3" : kind === "heading" ? "h4" : "div";
       const block = document.createElement(tag);
       block.className = `semantic-block ${kind}`;
       block.dataset.regionKind = kind;
       block.dataset.sourceKind = group.sourceKind;
       if (group.role) block.dataset.regionRole = group.role;
-      block.dataset.resolution = group.region.resolution || "resolved";
       const label = kind === "field"
         ? group.region.structure?.label || group.region.structure?.field_name
         : null;
-      if (label && group.text) {
+      const displayedText = renderedLiteral(group.text, group.region.resolution);
+      if (label) {
         const strong = document.createElement("strong");
         strong.textContent = `${label}: `;
-        block.append(strong, document.createTextNode(group.text));
+        block.append(strong, document.createTextNode(displayedText));
       } else {
-        block.textContent = group.text || "";
+        block.textContent = displayedText || "";
       }
-      appendEvidenceState(block, group.region.resolution, group.region.alternatives);
       return block;
+    }
+
+    function renderFormRow(region, sourceIndex) {
+      const block = document.createElement("div");
+      block.className = "semantic-block form-row";
+      block.dataset.regionKind = "form_row";
+      (region.structure?.fields || region.structure?.segments || []).forEach((segment) => {
+        const item = document.createElement("span");
+        const text = canonicalEvidenceText(segment.evidence_ids, sourceIndex);
+        const field = text.match(/^(.{1,80}?):\s*(.*)$/s);
+        if (field) {
+          const label = document.createElement("strong");
+          label.textContent = `${field[1]}:`;
+          item.append(label, document.createTextNode(field[2]));
+        } else {
+          item.textContent = text;
+        }
+        block.append(item);
+      });
+      return block;
+    }
+
+    function canonicalLayoutText(region, sourceIndex) {
+      if (region.structure?.role !== "layout_block") return region.text || "";
+      const groups = region.structure?.block_type === "form_row"
+        ? region.structure?.fields || region.structure?.segments
+        : region.structure?.lines;
+      if (!Array.isArray(groups)) return "";
+      const separator = region.structure?.block_type === "form_row" ? " | " : " ";
+      return groups
+        .map((group) => canonicalEvidenceText(group.evidence_ids, sourceIndex))
+        .join(separator);
+    }
+
+    function canonicalEvidenceText(evidenceIds, sourceIndex) {
+      return (Array.isArray(evidenceIds) ? evidenceIds : [])
+        .map((evidenceId) => sourceIndex.get(evidenceId))
+        .filter((source) => source?.resolution === "resolved" && source.text)
+        .map((source) => String(source.text).trim())
+        .filter(Boolean)
+        .join(" ");
     }
 
     function sameTextLine(first, second) {
@@ -1145,11 +1793,9 @@
       wrapper.dataset.regionKind = "table";
       wrapper.dataset.sourceKind = region.kind || "table";
       wrapper.dataset.regionRole = region.structure?.role || "table";
-      wrapper.dataset.resolution = region.resolution || "resolved";
       const cells = normalizedTableCells(region.structure?.cells || []);
       if (!cells.length) {
-        wrapper.textContent = region.text || "";
-        appendEvidenceState(wrapper, region.resolution, region.alternatives);
+        wrapper.textContent = renderedLiteral(region.text, region.resolution);
         return wrapper;
       }
 
@@ -1189,19 +1835,14 @@
               if (cellRow !== rowIndex || cellColumn !== columnIndex) occupied.add(`${cellRow}:${cellColumn}`);
             }
           }
-          element.textContent = cell.text || "";
           const resolution = cell.resolution || "resolved";
-          element.dataset.resolution = resolution;
-          if (resolution !== "resolved") element.classList.add(`evidence-${resolution}`);
-          const alternatives = alternativeTexts(cell.alternatives, cell.text);
-          appendEvidenceState(element, resolution, cell.alternatives);
+          element.textContent = renderedLiteral(cell.text, resolution);
           row.append(element);
         }
         body.append(row);
       }
       table.append(body);
       wrapper.append(table);
-      appendEvidenceState(wrapper, region.resolution, region.alternatives);
       return wrapper;
     }
 
@@ -1226,37 +1867,27 @@
       return normalized.sort((left, right) => left.rows[0] - right.rows[0] || left.columns[0] - right.columns[0]);
     }
 
-    function appendEvidenceState(container, resolution, alternatives) {
-      if (!resolution || resolution === "resolved") return;
-      const values = alternativeTexts(alternatives, container.textContent);
-      const state = document.createElement("span");
-      state.className = "evidence-state";
-      state.textContent = `${resolution} evidence`;
-      container.prepend(state);
-      if (!values.length) return;
-      const details = document.createElement("details");
-      details.className = "evidence-alternatives";
-      const summary = document.createElement("summary");
-      summary.textContent = `${values.length} alternative${values.length === 1 ? "" : "s"}`;
-      const list = document.createElement("ul");
-      values.forEach((value) => {
-        const item = document.createElement("li");
-        item.textContent = value;
-        list.append(item);
-      });
-      details.append(summary, list);
-      container.append(details);
-    }
-
-    function alternativeTexts(alternatives, selected) {
-      const selectedText = String(selected || "").trim();
-      return (Array.isArray(alternatives) ? alternatives : [])
-        .map((alternative) => String(alternative?.text || "").trim())
-        .filter((text, index, values) => text && text !== selectedText && values.indexOf(text) === index);
+    function renderedLiteral(value, resolution) {
+      const text = String(value || "");
+      if (!resolution || resolution === "resolved") return text;
+      return "";
     }
 
     function renderLayout(pages) {
       const panel = byId("panel-layout");
+      const note = document.createElement("p");
+      note.className = "view-note";
+      note.textContent = "Canonical and review-relevant semantic regions are shown by default. Reveal all evidence to inspect source, challenger, and risk regions.";
+      const control = document.createElement("label");
+      control.className = "view-control";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = state.showAllRegions;
+      input.addEventListener("change", () => {
+        state.showAllRegions = input.checked;
+        renderLayout(pages);
+      });
+      control.append(input, document.createTextNode("Show all evidence regions"));
       const table = document.createElement("table");
       table.className = "layout-table";
       const head = document.createElement("thead");
@@ -1269,34 +1900,62 @@
       });
       head.append(headRow);
       const body = document.createElement("tbody");
-      pages.forEach((page) => page.regions.forEach((region) => {
-        const row = document.createElement("tr");
-        const box = normalizedBox(region.bounding_box);
-        [
-          page.page_number,
-          region.reading_order ?? "-",
-          semanticKind(region),
-          box ? `${box.left}, ${box.top}, ${box.right}, ${box.bottom}` : "-",
-          region.provider || "-",
-          region.resolution || "-"
-        ].forEach((value) => {
-          const cell = document.createElement("td");
-          cell.textContent = value;
-          row.append(cell);
+      pages.forEach((page) => {
+        const regions = state.showAllRegions ? orderedRegions(page.regions) : displayRegions(page);
+        regions.forEach((region) => {
+          const row = document.createElement("tr");
+          const box = normalizedBox(region.bounding_box);
+          [
+            page.page_number,
+            region.reading_order ?? "-",
+            semanticKind(region),
+            box ? `${box.left}, ${box.top}, ${box.right}, ${box.bottom}` : "-",
+            region.provider || "-",
+            region.resolution || "-"
+          ].forEach((value) => {
+            const cell = document.createElement("td");
+            cell.textContent = value;
+            row.append(cell);
+          });
+          body.append(row);
         });
-        body.append(row);
-      }));
+      });
       table.append(head, body);
       if (!body.childElementCount) {
-        panel.textContent = "No layout regions were produced.";
+        const empty = document.createElement("p");
+        empty.textContent = state.showAllRegions
+          ? "No evidence regions were produced."
+          : "No canonical or review-relevant regions were produced.";
+        panel.replaceChildren(note, control, empty);
         return;
       }
-      panel.replaceChildren(table);
+      panel.replaceChildren(note, control, table);
     }
 
-    function renderProcessed(pages) {
+    function renderProcessed(pages, presentations = []) {
       const panel = byId("panel-processed");
-      panel.replaceChildren(...pages.map((page) => {
+      const presentationSummary = document.createElement("section");
+      presentationSummary.className = "rendered-page";
+      const presentationHeading = document.createElement("h2");
+      presentationHeading.textContent = "Structured presentation";
+      presentationSummary.append(presentationHeading);
+      if (!presentations.length) {
+        const note = document.createElement("p");
+        note.textContent = "No local presentation model ran for this document.";
+        presentationSummary.append(note);
+      } else {
+        presentations.forEach((presentation) => {
+          const note = document.createElement("p");
+          const validation = presentation.validation?.status || presentation.status;
+          const count = Array.isArray(presentation.blocks) ? presentation.blocks.length : 0;
+          const selected = Array.isArray(presentation.blocks)
+            ? presentation.blocks.filter((block) => block.rendering?.status === "selected").length
+            : 0;
+          note.textContent = `Page ${presentation.page_number}: ${presentation.provider || "local model"} · ${validation} · ${selected}/${count} blocks used in Rendered`;
+          presentationSummary.append(note);
+        });
+      }
+      panel.replaceChildren(presentationSummary, ...pages.map((page) => {
         const section = document.createElement("section");
         section.className = "rendered-page";
         const heading = document.createElement("h2");
@@ -1309,29 +1968,105 @@
       if (!pages.length) panel.textContent = "No processed pages were produced.";
     }
 
-    function renderFailures(failures, previewFailure) {
+    function renderFailures(failures, previewFailure, presentations = []) {
       const panel = byId("panel-failures");
-      const allFailures = [...failures];
+      const allFailures = [...(failures || [])];
       if (previewFailure) allFailures.push(previewFailure);
+      const executionSection = document.createElement("section");
+      executionSection.className = "failure-section";
+      const executionHeading = document.createElement("h3");
+      executionHeading.textContent = "Execution failures";
+      executionSection.append(executionHeading);
       if (!allFailures.length) {
         const note = document.createElement("p");
         note.className = "success-note";
         note.textContent = `No execution failures were reported. ${state.response.coverage_assessment.message}`;
-        panel.replaceChildren(note);
-        return;
+        executionSection.append(note);
+      } else {
+        executionSection.append(...allFailures.map((failure) => {
+          const item = document.createElement("div");
+          item.className = "failure";
+          const code = document.createElement("div");
+          code.className = "failure-code";
+          code.textContent = `${failure.stage}/${failure.code}${failure.page_number ? ` · page ${failure.page_number}` : ""}`;
+          const message = document.createElement("div");
+          message.className = "failure-message";
+          message.textContent = failure.message;
+          item.append(code, message);
+          return item;
+        }));
       }
-      panel.replaceChildren(...allFailures.map((failure) => {
-        const item = document.createElement("div");
-        item.className = "failure";
-        const code = document.createElement("div");
-        code.className = "failure-code";
-        code.textContent = `${failure.stage}/${failure.code}${failure.page_number ? ` · page ${failure.page_number}` : ""}`;
-        const message = document.createElement("div");
-        message.className = "failure-message";
-        message.textContent = failure.message;
-        item.append(code, message);
-        return item;
-      }));
+
+      const presentationSection = document.createElement("section");
+      presentationSection.className = "failure-section";
+      const presentationHeading = document.createElement("h3");
+      presentationHeading.textContent = "Presentation status";
+      presentationSection.append(presentationHeading);
+      const presentationIssues = presentations.filter((page) =>
+        ["failed", "skipped"].includes(page.status)
+        || page.validation?.status === "failed"
+      );
+      if (!presentationIssues.length) {
+        const note = document.createElement("p");
+        note.className = "success-note";
+        note.textContent = "No presentation failures or skips were reported.";
+        presentationSection.append(note);
+      } else {
+        presentationSection.append(...presentationIssues.map((page) => {
+          const item = document.createElement("div");
+          item.className = "failure";
+          const code = document.createElement("div");
+          code.className = "failure-code";
+          const validationFailure = page.validation?.failures?.[0];
+          const reason = page.failure?.code || validationFailure?.code || page.status;
+          code.textContent = `presentation/${reason} · page ${page.page_number}`;
+          const message = document.createElement("div");
+          message.className = "failure-message";
+          message.textContent = page.failure?.message
+            || validationFailure?.message
+            || page.message
+            || "Presentation was not available.";
+          item.append(code, message);
+          return item;
+        }));
+      }
+
+      const reviewSection = document.createElement("section");
+      reviewSection.className = "failure-section";
+      const reviewHeading = document.createElement("h3");
+      reviewHeading.textContent = "Unresolved evidence and review flags";
+      reviewSection.append(reviewHeading);
+      const reviewPages = (state.response.uncertainty?.pages || []).filter((page) => page.review_required);
+      if (!reviewPages.length) {
+        const note = document.createElement("p");
+        note.className = "success-note";
+        note.textContent = "No unresolved evidence or review flags were reported.";
+        reviewSection.append(note);
+      } else {
+        reviewSection.append(...reviewPages.map((page) => {
+          const item = document.createElement("div");
+          item.className = "review-flag";
+          const code = document.createElement("div");
+          code.className = "failure-code";
+          code.textContent = `Review flag · page ${page.page_number}`;
+          const message = document.createElement("div");
+          message.className = "failure-message";
+          message.textContent = reviewFlagSummary(page);
+          item.append(code, message);
+          return item;
+        }));
+      }
+      panel.replaceChildren(executionSection, presentationSection, reviewSection);
+    }
+
+    function reviewFlagSummary(page) {
+      const details = [
+        page.unresolved_evidence ? `${page.unresolved_evidence} unreadable` : "",
+        page.conflicting_evidence ? `${page.conflicting_evidence} conflicting` : "",
+        page.disagreeing_alternatives ? `${page.disagreeing_alternatives} alternative disagreements` : "",
+        ...(page.risk_reasons || []).map((reason) => String(reason).replaceAll("_", " "))
+      ].filter(Boolean);
+      return details.length ? details.join(" · ") : "Page routed for review.";
     }
 
     byId("previous-page").addEventListener("click", () => changePage(-1));
@@ -1345,7 +2080,10 @@
 
     function resetHiddenKinds() {
       state.hiddenKinds.clear();
+      state.hiddenKinds.add("text");
       state.hiddenKinds.add("table_candidate");
+      state.hiddenKinds.add("table");
+      state.hiddenKinds.add("table_cell");
     }
 
     function renderPage() {
@@ -1407,7 +2145,7 @@
       const overlays = [];
       currentRegions().forEach((region) => {
         const role = region.structure?.role;
-        if (role !== "table_source") overlays.push(region);
+        if (normalPreviewRegion(region)) overlays.push(region);
         if (region.structure?.role !== "table") return;
         (region.structure.cells || []).forEach((cell, cellIndex) => {
           const box = normalizedBox(cell.bbox || cell.bounding_box);
@@ -1438,6 +2176,16 @@
       return overlays;
     }
 
+    function normalPreviewRegion(region) {
+      const role = region.structure?.role;
+      if (["table_source", "table_candidate", "coverage_risk", "layout_block", "presentation_challenger"].includes(role)) return false;
+      if (["table_candidate", "coverage_risk", "layout_block"].includes(region.kind)) return false;
+      if (semanticKind(region) === "table") {
+        return Array.isArray(region.structure?.cells) && region.structure.cells.length > 0;
+      }
+      return Boolean(String(region.text || "").trim()) || semanticKind(region) === "control";
+    }
+
     function renderCategories() {
       const categories = new Map();
       pageOverlays().forEach((region) => {
@@ -1449,7 +2197,7 @@
       byId("category-list").replaceChildren(...Array.from(categories, ([kind, count]) => {
         const button = document.createElement("button");
         const visible = !state.hiddenKinds.has(kind);
-        const label = kind.replaceAll("_", " ");
+        const label = overlayCategoryLabel(kind);
         button.type = "button";
         button.className = "category-button";
         button.setAttribute("aria-pressed", String(visible));
@@ -1462,6 +2210,13 @@
         button.addEventListener("click", () => handleCategory(kind));
         return button;
       }));
+    }
+
+    function overlayCategoryLabel(kind) {
+      if (kind === "table") return "table bounds";
+      if (kind === "table_cell") return "table cell bounds";
+      if (kind === "table_candidate") return "table candidate bounds";
+      return kind.replaceAll("_", " ");
     }
 
     function handleCategory(kind) {
@@ -1479,6 +2234,7 @@
         ? regionOrKind.kind
         : regionOrKind;
       if (kind === "table_candidate") return kind;
+      if (kind === "table_cell") return kind;
       return semanticKind(regionOrKind);
     }
 
@@ -1486,6 +2242,8 @@
       const region = typeof regionOrKind === "object" && regionOrKind !== null ? regionOrKind : null;
       const kind = region ? region.kind : regionOrKind;
       const role = region?.structure?.role || "";
+      const blockType = region?.structure?.block_type;
+      if (role === "layout_block" && blockType) return blockType;
       const value = `${kind || "text"} ${role}`.toLowerCase();
       if (value.includes("section") && value.includes("head")) return "heading";
       if (value.includes("heading")) return "heading";
@@ -1523,9 +2281,15 @@
         const box = region.bounding_box;
         const color = index === state.selectedOverlay ? actionColor : regionColor();
         context.strokeStyle = color;
-        context.fillStyle = `${color}1f`;
-        context.fillRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
+        const structural = ["table", "table_cell", "table_candidate"].includes(
+          categoryKey(region)
+        );
+        if (!structural) {
+          context.fillStyle = `${color}1f`;
+          context.fillRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
+        }
         context.strokeRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
+        if (structural && index !== state.selectedOverlay) return;
         const label = index === state.selectedOverlay
           ? `${index + 1} ${region.kind.replaceAll("_", " ")}`
           : String(index + 1);
@@ -1635,6 +2399,7 @@
       state.image = null;
       state.imageRequest += 1;
       state.hiddenKinds.clear();
+      state.showAllRegions = false;
       byId("metadata").classList.remove("visible");
       byId("timing-card").hidden = true;
       byId("risk-card").hidden = true;
@@ -1656,7 +2421,7 @@
       window.clearTimeout(state.copyResetId);
       state.copyResetId = null;
       byId("copy-json").dataset.copyState = "idle";
-      byId("copy-json").textContent = "Copy JSON";
+      byId("copy-json").textContent = "Copy API response JSON";
       byId("copy-status").textContent = "";
       byId("copy-status").classList.remove("error");
       byId("panel-rendered").textContent = "No result yet.";

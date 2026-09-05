@@ -318,6 +318,14 @@ def export_control_predictions(
                     "instances": len(table_continuation_scores),
                     "cross_page_instances": table_cross_page_continuations,
                 },
+                "TEDS-100": {
+                    "all": _mean(
+                        [float(score == 1.0) for score in table_continuation_scores]
+                    ),
+                    "perfect": sum(score == 1.0 for score in table_continuation_scores),
+                    "instances": len(table_continuation_scores),
+                    "definition": "fraction of table instances with TEDS equal to 1",
+                },
                 "continuation_accuracy": {
                     "all": _mean(table_continuation_exact),
                     "cross_page": _mean(table_cross_page_exact),

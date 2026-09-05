@@ -118,11 +118,13 @@ def _manual_records(
             literal_disagreements += 1
             continue
         field_id = _identifier(row, "field_id", root)
+        family_id = _text(row, "source_component_id", root)
         record = {
             "field_id": field_id,
             "case_id": page_id,
             "category_id": page_id.split("-", 1)[0],
-            "family_id": _text(row, "source_component_id", root),
+            "family_id": family_id,
+            "split_group_id": _lineage_group(row, family_id, root),
             "reference": reference,
             "target_state": target_state,
             "data_origin": "private",
@@ -147,12 +149,14 @@ def _public_records(root: Path) -> list[dict[str, Any]]:
             raise ValueError(f"public source must be train-only public data: {root}")
         target_state = _target_state(row, root)
         field_id = _identifier(row, "field_id", root)
+        family_id = _text(row, "family_id", root)
         records.append(
             {
                 "field_id": field_id,
                 "case_id": _text(row, "case_id", root),
                 "category_id": _text(row, "category_id", root),
-                "family_id": _text(row, "family_id", root),
+                "family_id": family_id,
+                "split_group_id": _lineage_group(row, family_id, root),
                 "reference": _reference(row, target_state, root),
                 "target_state": target_state,
                 "data_origin": "public",
@@ -223,6 +227,21 @@ def _validate_records(records: list[dict[str, Any]]) -> None:
     dev_families = {row["family_id"] for row in records if row["split"] == "dev"}
     if train_families & dev_families:
         raise ValueError("train and dev contain overlapping clinical families")
+    group_lineage: dict[str, tuple[str, str]] = {}
+    for row in records:
+        lineage = (row["family_id"], row["split"])
+        previous = group_lineage.setdefault(row["split_group_id"], lineage)
+        if previous[0] != lineage[0]:
+            raise ValueError("split group belongs to multiple families")
+        if previous[1] != lineage[1]:
+            raise ValueError("split group belongs to multiple splits")
+
+
+def _lineage_group(row: dict[str, Any], family_id: str, root: Path) -> str:
+    value = row.get("split_group_id", family_id)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"invalid split_group_id in {root}")
+    return value
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

@@ -25,7 +25,6 @@ EXCLUDED_ROLES = frozenset(
         "heading",
         "table",
         "table_candidate",
-        "table_source",
         "tiny_text_candidate",
         "title",
     }
@@ -168,11 +167,15 @@ class HandwritingStage:
 
     def _selected_indices(self, regions: list[TextRegion]) -> list[int]:
         candidates = [
-            index for index, region in enumerate(regions) if self._is_eligible(region)
+            index
+            for index, region in enumerate(regions)
+            if self._is_eligible(region) or _is_anchored_residual_proposal(region)
         ]
         candidates.sort(
             key=lambda index: (
-                regions[index].confidence,
+                regions[index].confidence
+                if regions[index].confidence is not None
+                else -1.0,
                 regions[index].reading_order,
                 index,
             )
@@ -247,6 +250,18 @@ class HandwritingStage:
             region.text_provenance = current
             return
 
+        if _is_anchored_residual_proposal(region) or _is_classifier_candidate(region):
+            region.alternatives.append(
+                TextAlternative(
+                    text=tight_text,
+                    confidence=None,
+                    provider=self.reader.name,
+                    text_provenance={**provenance, "view": "agreed"},
+                )
+            )
+            _mark_review(region, "specialist_candidate", provenance)
+            return
+
         support = _independent_support(region, tight_text, self.reader.name)
         if support is not None:
             incumbent = TextAlternative(
@@ -292,14 +307,35 @@ def _literal_rejection(
         return "abstention_candidate"
     if len(candidate) > max_candidate_characters:
         return "candidate_too_long"
-    relative_limit = max(12, len(incumbent.strip()) * 3 + 8)
-    if len(candidate) > relative_limit:
-        return "candidate_expanded_context"
+    incumbent = incumbent.strip()
+    if incumbent:
+        relative_limit = max(12, len(incumbent) * 3 + 8)
+        if len(candidate) > relative_limit:
+            return "candidate_expanded_context"
     if any(unicodedata.category(character).startswith("C") for character in candidate):
         return "candidate_control_characters"
     if "<|" in candidate or "|>" in candidate:
         return "candidate_control_tokens"
     return None
+
+
+def _is_anchored_residual_proposal(region: TextRegion) -> bool:
+    structure = region.structure or {}
+    return (
+        structure.get("handwriting_candidate_source") == "anchored_residual"
+        and region.kind == "handwriting"
+        and region.text == ""
+        and region.confidence is None
+        and region.resolution == "unreadable"
+    )
+
+
+def _is_classifier_candidate(region: TextRegion) -> bool:
+    structure = region.structure or {}
+    return (
+        structure.get("handwriting_candidate_source") == "classifier"
+        and structure.get("handwriting_candidate") is True
+    )
 
 
 def _independent_support(

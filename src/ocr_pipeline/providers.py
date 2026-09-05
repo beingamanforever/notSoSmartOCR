@@ -9,6 +9,7 @@ import json
 import math
 import subprocess
 import threading
+import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -20,14 +21,18 @@ from urllib.request import Request, urlopen
 from PIL import Image
 
 from .contracts import BoundingBox, TextRegion
+from .openrouter import OpenRouterError, OpenRouterResult
 
-NEMOTRON_BOX_TOLERANCE = 0.02
 MINISTRAL_OCR_PROMPT = (
-    "Transcribe all visible text from this document in reading order. "
-    "Preserve line breaks, tables, form labels, checkbox states, and handwriting. "
-    "Do not add, correct, or summarize content."
+    "Return only a literal Markdown transcription of the visible document, with no "
+    "preamble, commentary, or code fence. Preserve reading order, line breaks, "
+    "headings, tables, form labels, checkbox states, handwriting, mathematical "
+    "symbols, and original spelling. Never repair grammar, complete a phrase, "
+    "explain a diagram, or add text that is not visible. Write [illegible] when a "
+    "character sequence cannot be read literally."
 )
-MINISTRAL_MODEL_REVISION = "6f9c4b12a95b139af68670a6713616b757923735"
+MINISTRAL_MODEL_ID = "mistralai/Ministral-3-3B-Instruct-2512"
+MINISTRAL_MODEL_REVISION = "b35d4dfe56c142746f54dbd64f579faab2744308"
 MINISTRAL_MODEL_ORIGIN = "Mistral AI, France"
 MINISTRAL_MODEL_LICENSE = "Apache-2.0"
 PHI4_HANDWRITING_PROMPT = (
@@ -42,6 +47,7 @@ PHI4_LORA_PARTS = ("lora_A.vision", "lora_B.vision")
 PHI4_LORA_TARGETS = ("qkv_proj", "o_proj", "gate_up_proj", "down_proj")
 _PHI4_SDPA_LOCK = threading.RLock()
 MAX_HANDWRITING_SERVICE_RESPONSE_BYTES = 1_000_000
+MAX_MINISTRAL_SERVICE_RESPONSE_BYTES = 5_000_000
 
 
 class LocalReader(Protocol):
@@ -775,8 +781,9 @@ class MinistralOCRReader:
     def __init__(
         self,
         *,
-        model_name: str = "mistralai/Ministral-3-3B-Base-2512",
+        model_name: str = MINISTRAL_MODEL_ID,
         model_revision: str = MINISTRAL_MODEL_REVISION,
+        device_map: str = "cuda:0",
         prompt: str = MINISTRAL_OCR_PROMPT,
         max_new_tokens: int = 8192,
         processor: object | None = None,
@@ -786,17 +793,39 @@ class MinistralOCRReader:
             raise ValueError("Ministral OCR prompt must not be empty")
         if max_new_tokens <= 0:
             raise ValueError("Ministral OCR max_new_tokens must be positive")
+        if not device_map.strip():
+            raise ValueError("Ministral OCR device_map must not be empty")
         if len(model_revision) != 40 or any(
             char not in "0123456789abcdef" for char in model_revision.lower()
         ):
             raise ValueError("Ministral OCR model revision must be an immutable commit")
+        if (
+            model_name == MINISTRAL_MODEL_ID
+            and model_revision != MINISTRAL_MODEL_REVISION
+        ):
+            raise ValueError("Ministral OCR must use the pinned model revision")
         self.model_name = model_name
         self.model_revision = model_revision
+        self.device_map = device_map
         self.prompt = prompt
         self.max_new_tokens = max_new_tokens
+        self.local_files_only = True
         self._processor = processor
         self._model = model
         self._lock = threading.Lock()
+
+    @property
+    def provenance(self) -> dict[str, Any]:
+        official_model = self.model_name == MINISTRAL_MODEL_ID
+        return {
+            "id": MINISTRAL_MODEL_ID if official_model else None,
+            "loaded_from": self.model_name,
+            "revision": self.model_revision,
+            "origin": MINISTRAL_MODEL_ORIGIN if official_model else None,
+            "license": MINISTRAL_MODEL_LICENSE if official_model else None,
+            "identity_verified": official_model,
+            "local_files_only": self.local_files_only,
+        }
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
         try:
@@ -805,6 +834,34 @@ class MinistralOCRReader:
         except (OSError, ValueError) as error:
             raise ReaderError("ministral_image_failed", str(error)) from error
 
+        text, input_format = self.generate_text(image_path, self.prompt)
+        provenance = {
+            "method": "ministral_full_page_generation",
+            "provider": self.name,
+            "model": self.provenance,
+            "prompt": self.prompt,
+            "generation": {
+                "max_new_tokens": self.max_new_tokens,
+                "do_sample": False,
+            },
+            "processor_input": input_format,
+        }
+        return [
+            TextRegion(
+                id=f"p{page_number}-page-1",
+                kind="page_text",
+                text=text,
+                confidence=None,
+                bounding_box=BoundingBox(0, 0, width, height),
+                reading_order=1,
+                provider=self.name,
+                text_provenance=provenance,
+            )
+        ]
+
+    def generate_text(self, image_path: Path, prompt: str) -> tuple[str, str]:
+        if not prompt.strip():
+            raise ReaderError("ministral_prompt_failed", "Prompt must not be empty")
         with self._lock:
             processor, model = self._initialize_components()
             messages = [
@@ -812,7 +869,7 @@ class MinistralOCRReader:
                     "role": "user",
                     "content": [
                         {"type": "image", "url": str(image_path)},
-                        {"type": "text", "text": self.prompt},
+                        {"type": "text", "text": prompt},
                     ],
                 }
             ]
@@ -833,7 +890,7 @@ class MinistralOCRReader:
                     with Image.open(image_path) as source:
                         inputs = processor(
                             images=source.convert("RGB"),
-                            text=f"<s>[INST][IMG]{self.prompt}[/INST]",
+                            text=f"<s>[INST][IMG]{prompt}[/INST]",
                             return_tensors="pt",
                         )
                 inputs = inputs.to(model.device)
@@ -858,41 +915,18 @@ class MinistralOCRReader:
             raise ReaderError(
                 "ministral_output_failed", "Ministral OCR returned no decoded text"
             )
-        provenance = {
-            "method": "ministral_full_page_generation",
-            "provider": self.name,
-            "model": {
-                "id": self.model_name,
-                "revision": self.model_revision,
-                "origin": MINISTRAL_MODEL_ORIGIN,
-                "license": MINISTRAL_MODEL_LICENSE,
-            },
-            "prompt": self.prompt,
-            "generation": {
-                "max_new_tokens": self.max_new_tokens,
-                "do_sample": False,
-            },
-            "processor_input": input_format,
-        }
-        return [
-            TextRegion(
-                id=f"p{page_number}-page-1",
-                kind="page_text",
-                text=text.strip(),
-                confidence=None,
-                bounding_box=BoundingBox(0, 0, width, height),
-                reading_order=1,
-                provider=self.name,
-                text_provenance=provenance,
-            )
-        ]
+        return text.strip(), input_format
 
     def _initialize_components(self) -> tuple[object, object]:
         if self._processor is not None and self._model is not None:
             return self._processor, self._model
 
         try:
-            from transformers import AutoProcessor, Mistral3ForConditionalGeneration
+            from transformers import (
+                AutoProcessor,
+                FineGrainedFP8Config,
+                Mistral3ForConditionalGeneration,
+            )
         except (ImportError, OSError) as error:
             raise ReaderError("ministral_import_failed", str(error)) from error
 
@@ -902,16 +936,201 @@ class MinistralOCRReader:
                     self.model_name,
                     revision=self.model_revision,
                     fix_mistral_regex=True,
+                    local_files_only=self.local_files_only,
                 )
             if self._model is None:
                 self._model = Mistral3ForConditionalGeneration.from_pretrained(
                     self.model_name,
                     revision=self.model_revision,
-                    device_map="auto",
+                    device_map=self.device_map,
+                    local_files_only=self.local_files_only,
+                    quantization_config=FineGrainedFP8Config(dequantize=True),
                 )
         except Exception as error:
             raise ReaderError("ministral_init_failed", str(error)) from error
         return self._processor, self._model
+
+
+class MinistralOCRServiceReader:
+    """Call a warm local Ministral page reader over loopback HTTP."""
+
+    name = "ministral-ocr"
+
+    def __init__(
+        self,
+        service_url: str,
+        *,
+        prompt: str = MINISTRAL_OCR_PROMPT,
+        timeout_seconds: float = 180,
+    ) -> None:
+        parsed = urlsplit(service_url)
+        if parsed.scheme != "http" or parsed.hostname not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }:
+            raise ValueError("Ministral OCR service must use loopback HTTP")
+        if not prompt.strip():
+            raise ValueError("Ministral OCR prompt must not be empty")
+        if timeout_seconds <= 0:
+            raise ValueError("Ministral OCR service timeout must be positive")
+        self.service_url = service_url.rstrip("/")
+        self.prompt = prompt
+        self.timeout_seconds = timeout_seconds
+        self.model_name = MINISTRAL_MODEL_ID
+        self.model_revision = MINISTRAL_MODEL_REVISION
+        self.local_files_only = True
+        self._provenance = {
+            "id": None,
+            "loaded_from": self.service_url,
+            "revision": None,
+            "origin": None,
+            "license": None,
+            "identity_verified": False,
+            "local_files_only": True,
+            "source": "loopback_service",
+        }
+
+    @property
+    def provenance(self) -> dict[str, Any]:
+        return dict(self._provenance)
+
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        try:
+            with Image.open(image_path) as image:
+                width, height = image.size
+        except (OSError, ValueError) as error:
+            raise ReaderError("ministral_image_failed", str(error)) from error
+        text, input_format = self.generate_text(image_path, self.prompt)
+        return [
+            TextRegion(
+                id=f"p{page_number}-page-1",
+                kind="page_text",
+                text=text,
+                confidence=None,
+                bounding_box=BoundingBox(0, 0, width, height),
+                reading_order=1,
+                provider=self.name,
+                text_provenance={
+                    "method": "ministral_full_page_generation",
+                    "provider": self.name,
+                    "model": self.provenance,
+                    "prompt": self.prompt,
+                    "processor_input": input_format,
+                },
+            )
+        ]
+
+    def generate_text(self, image_path: Path, prompt: str) -> tuple[str, str]:
+        if not prompt.strip():
+            raise ReaderError("ministral_prompt_failed", "Prompt must not be empty")
+        try:
+            with Image.open(image_path) as opened:
+                image = opened.convert("RGB")
+            try:
+                encoded = _encode_png(image)
+            finally:
+                image.close()
+        except (OSError, ValueError) as error:
+            raise ReaderError("ministral_image_failed", str(error)) from error
+        payload = json.dumps(
+            {"image": encoded, "prompt": prompt},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        request = Request(
+            f"{self.service_url}/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                body = response.read(MAX_MINISTRAL_SERVICE_RESPONSE_BYTES + 1)
+            if len(body) > MAX_MINISTRAL_SERVICE_RESPONSE_BYTES:
+                raise ValueError("service response exceeded its limit")
+            result = json.loads(body)
+            if not isinstance(result, dict) or set(result) != {"text", "provenance"}:
+                raise ValueError("service response did not match its contract")
+            text = result["text"]
+            provenance = result["provenance"]
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("service returned no text")
+            if not _valid_ministral_provenance(provenance):
+                raise ValueError("service model provenance was invalid")
+        except (HTTPError, URLError, OSError, ValueError) as error:
+            raise ReaderError(
+                "ministral_service_failed",
+                "The local Ministral service did not return a valid result",
+            ) from error
+        self._provenance = {**provenance, "source": "loopback_service"}
+        return text.strip(), "loopback_service"
+
+
+def _valid_ministral_provenance(value: Any) -> bool:
+    if not isinstance(value, dict) or value.get("local_files_only") is not True:
+        return False
+    if not isinstance(value.get("loaded_from"), str) or not value["loaded_from"]:
+        return False
+    verified = value.get("identity_verified") is True
+    if not verified:
+        return value.get("id") is None
+    return all(
+        (
+            value.get("id") == MINISTRAL_MODEL_ID,
+            value.get("revision") == MINISTRAL_MODEL_REVISION,
+            value.get("origin") == MINISTRAL_MODEL_ORIGIN,
+            value.get("license") == MINISTRAL_MODEL_LICENSE,
+        )
+    )
+
+
+class MinistralStructuredImageCall:
+    """Use the same local Ministral instance for strict JSON image decisions."""
+
+    def __init__(
+        self,
+        reader: MinistralOCRReader | MinistralOCRServiceReader,
+    ) -> None:
+        self.reader = reader
+
+    def __call__(
+        self,
+        image_path: Path,
+        prompt: str,
+        response_schema: Mapping[str, Any],
+    ) -> OpenRouterResult:
+        schema = json.dumps(response_schema, ensure_ascii=False, separators=(",", ":"))
+        instruction = (
+            f"{prompt}\nReturn only one JSON object matching this schema exactly: "
+            f"{schema}"
+        )
+        started = time.perf_counter()
+        try:
+            text, _ = self.reader.generate_text(image_path, instruction)
+            content = json.loads(text)
+        except ReaderError as error:
+            raise OpenRouterError(
+                str(error),
+                code=error.code,
+                latency_ms=(time.perf_counter() - started) * 1000,
+            ) from error
+        except json.JSONDecodeError as error:
+            raise OpenRouterError(
+                "Local Ministral returned invalid structured JSON",
+                code="ministral_structured_output_failed",
+                latency_ms=(time.perf_counter() - started) * 1000,
+            ) from error
+        provenance = self.reader.provenance
+        model = provenance.get("id") or provenance.get("loaded_from")
+        return OpenRouterResult(
+            content=content,
+            model=str(model) if model else self.reader.name,
+            provider="local",
+            usage={},
+            cost=None,
+            latency_ms=(time.perf_counter() - started) * 1000,
+            attempts=1,
+        )
 
 
 class GraniteDoclingReader:
@@ -925,15 +1144,21 @@ class GraniteDoclingReader:
         model_name: str = "ibm-granite/granite-docling-258M",
         max_new_tokens: int = 8192,
         output_format: str = "text",
+        local_files_only: bool = True,
         processor: object | None = None,
         model: object | None = None,
         converter: Callable[[str, Image.Image], str] | None = None,
     ) -> None:
         if output_format not in {"text", "markdown"}:
             raise ValueError("Granite output format must be text or markdown")
+        if max_new_tokens <= 0:
+            raise ValueError("Granite max_new_tokens must be positive")
+        if not local_files_only:
+            raise ValueError("Granite Docling requires local_files_only=True")
         self.model_name = model_name
         self.max_new_tokens = max_new_tokens
         self.output_format = output_format
+        self.local_files_only = True
         self._processor = processor
         self._model = model
         self._converter = converter
@@ -980,11 +1205,20 @@ class GraniteDoclingReader:
 
             try:
                 prompt_length = inputs["input_ids"].shape[1]
+                output_ids = generated_ids[0][prompt_length:]
+                generated_token_count = len(output_ids)
+                if generated_token_count >= self.max_new_tokens:
+                    raise ReaderError(
+                        "granite_output_truncated",
+                        "Granite Docling reached max_new_tokens before completing DocTags",
+                    )
                 doctags = processor.decode(
-                    generated_ids[0][prompt_length:],
+                    output_ids,
                     skip_special_tokens=False,
                 ).lstrip()
                 text = converter(doctags, image)
+            except ReaderError:
+                raise
             except Exception as error:
                 raise ReaderError("granite_output_failed", str(error)) from error
 
@@ -1001,6 +1235,39 @@ class GraniteDoclingReader:
                 bounding_box=BoundingBox(0, 0, width, height),
                 reading_order=1,
                 provider=self.name,
+                text_provenance={
+                    "method": "granite_docling_full_page_generation",
+                    "provider": self.name,
+                    "model": {
+                        "id": (
+                            self.model_name
+                            if self.model_name == "ibm-granite/granite-docling-258M"
+                            else None
+                        ),
+                        "loaded_from": self.model_name,
+                        "origin": (
+                            "IBM Research, United States"
+                            if self.model_name == "ibm-granite/granite-docling-258M"
+                            else None
+                        ),
+                        "license": (
+                            "Apache-2.0"
+                            if self.model_name == "ibm-granite/granite-docling-258M"
+                            else None
+                        ),
+                        "identity_verified": (
+                            self.model_name == "ibm-granite/granite-docling-258M"
+                        ),
+                        "local_files_only": True,
+                    },
+                    "generation": {
+                        "max_new_tokens": self.max_new_tokens,
+                        "generated_tokens": generated_token_count,
+                        "finish_reason": "before_token_limit",
+                        "raw_doctags": doctags,
+                    },
+                    "text_authority": "structure_challenger_only",
+                },
             )
         ]
 
@@ -1019,12 +1286,16 @@ class GraniteDoclingReader:
 
         try:
             if self._processor is None:
-                self._processor = AutoProcessor.from_pretrained(self.model_name)
+                self._processor = AutoProcessor.from_pretrained(
+                    self.model_name,
+                    local_files_only=self.local_files_only,
+                )
             if self._model is None:
                 self._model = AutoModelForMultimodalLM.from_pretrained(
                     self.model_name,
                     torch_dtype="auto",
                     device_map="auto",
+                    local_files_only=self.local_files_only,
                 )
         except Exception as error:
             raise ReaderError("granite_init_failed", str(error)) from error
@@ -1068,6 +1339,7 @@ class NemotronOCRV2Reader:
         merge_level: str = "paragraph",
         batch_size: int = 1,
         pipeline: object | None = None,
+        execution_lock: Any | None = None,
     ) -> None:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
@@ -1075,7 +1347,7 @@ class NemotronOCRV2Reader:
         self.merge_level = merge_level
         self.batch_size = batch_size
         self._pipeline = pipeline
-        self._lock = threading.Lock()
+        self._lock = execution_lock if execution_lock is not None else threading.Lock()
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
         return self.read_with_merge_level(
@@ -1231,10 +1503,13 @@ def _parse_nemotron_predictions(
             continue
 
         confidence = _confidence(_required_value(prediction, "confidence"))
-        left, top, right, bottom = _nemotron_box(
+        (left, top, right, bottom), box_adjustment = _nemotron_box(
             prediction,
             *image_size,
         )
+        provenance: dict[str, object] = {"merge_level": merge_level}
+        if box_adjustment is not None:
+            provenance["bounding_box_adjustment"] = box_adjustment
         regions.append(
             TextRegion(
                 id=f"p{page_number}-block-{len(regions) + 1}",
@@ -1244,7 +1519,7 @@ def _parse_nemotron_predictions(
                 bounding_box=BoundingBox(left, top, right, bottom),
                 reading_order=len(regions) + 1,
                 provider=provider,
-                text_provenance={"merge_level": merge_level},
+                text_provenance=provenance,
             )
         )
     return regions
@@ -1254,7 +1529,7 @@ def _nemotron_box(
     prediction: object,
     width: int,
     height: int,
-) -> tuple[int, int, int, int]:
+) -> tuple[tuple[int, int, int, int], dict[str, object] | None]:
     left, lower, right, upper = _coordinate_values(
         [
             _required_value(prediction, "left"),
@@ -1263,22 +1538,35 @@ def _nemotron_box(
             _required_value(prediction, "upper"),
         ]
     )
-    if (
-        min(left, lower, right, upper) < -NEMOTRON_BOX_TOLERANCE
-        or max(left, lower, right, upper) > 1 + NEMOTRON_BOX_TOLERANCE
-    ):
-        raise ValueError("Nemotron bounding box must be normalized from 0 to 1")
-    left, lower, right, upper = (
+    if right <= left or upper <= lower:
+        raise ValueError("Nemotron bounding box must have positive area")
+    center_x = (left + right) / 2
+    center_y = (lower + upper) / 2
+    if not 0 <= center_x <= 1 or not 0 <= center_y <= 1:
+        raise ValueError(
+            "Nemotron bounding box must be anchored in the image; "
+            f"received {(left, lower, right, upper)} for image {(width, height)}"
+        )
+    normalized_box = (left, lower, right, upper)
+    clipped_box = tuple(
         min(1.0, max(0.0, coordinate)) for coordinate in (left, lower, right, upper)
     )
-    return _box_coordinates(
-        [
+    left, lower, right, upper = clipped_box
+    coordinates = _box_coordinates(
+        (
             math.floor(left * width),
             math.floor(lower * height),
             math.ceil(right * width),
             math.ceil(upper * height),
-        ]
+        )
     )
+    adjustment = None
+    if clipped_box != normalized_box:
+        adjustment = {
+            "method": "clip_to_image",
+            "normalized_box": list(normalized_box),
+        }
+    return coordinates, adjustment
 
 
 def _parse_tesseract_tsv(

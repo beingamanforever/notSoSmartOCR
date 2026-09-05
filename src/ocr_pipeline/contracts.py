@@ -77,6 +77,19 @@ class PageResult:
 
 
 @dataclass
+class TableContinuation:
+    id: str
+    source_table_ids: list[str]
+    source_page_numbers: list[int]
+    score: float
+    header_row_count: int
+    row_count: int
+    column_count: int
+    cells: list[dict[str, Any]]
+    provenance: dict[str, Any]
+
+
+@dataclass
 class DocumentResult:
     document_id: str
     source: dict[str, str]
@@ -84,6 +97,7 @@ class DocumentResult:
     pages: list[PageResult] = field(default_factory=list)
     failures: list[Failure] = field(default_factory=list)
     schema_version: int = 2
+    table_continuations: list[TableContinuation] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

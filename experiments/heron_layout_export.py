@@ -31,7 +31,7 @@ OMNIDOC_CATEGORIES = (
     "formula_caption",
 )
 CATEGORY_IDS = {name: index for index, name in enumerate(OMNIDOC_CATEGORIES)}
-HERON_TO_OMNIDOC = {
+LAYOUT_TO_OMNIDOC = {
     "title": "title",
     "section_header": "title",
     "text": "plain text",
@@ -39,7 +39,10 @@ HERON_TO_OMNIDOC = {
     "document_index": "plain text",
     "page_footer": "abandon",
     "page_header": "abandon",
+    "header_footer": "abandon",
     "picture": "figure",
+    "chart": "figure",
+    "infographic": "figure",
     "caption": "figure_caption",
     "table": "table",
     "footnote": "table_footnote",
@@ -127,7 +130,7 @@ def export_predictions(
             detections = detector.detect(image_root / case_id)
             raw_count = len(detections)
             for detection in detections:
-                category = HERON_TO_OMNIDOC.get(detection.label)
+                category = LAYOUT_TO_OMNIDOC.get(detection.label)
                 if category is None:
                     unsupported[detection.label] += 1
                     continue
@@ -175,13 +178,14 @@ def export_predictions(
         "model": detector.name,
         "model_name": getattr(detector, "model_name", None),
         "model_revision": getattr(detector, "model_revision", None),
+        "model_revision_enforced": getattr(detector, "model_revision_enforced", None),
         "device": getattr(detector, "device", None),
         "threshold": getattr(detector, "threshold", None),
         "selection": {
             "base_per_language": base_per_language,
             "limit": limit,
         },
-        "mapping": HERON_TO_OMNIDOC,
+        "mapping": LAYOUT_TO_OMNIDOC,
         "case_ids": case_ids,
         "attempted": len(pages),
         "covered": states["success"],

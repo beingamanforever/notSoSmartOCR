@@ -42,6 +42,7 @@ def test_composes_family_split_private_and_train_only_public(tmp_path: Path) -> 
     assert (
         next(row for row in train if row["data_origin"] == "public")["split"] == "train"
     )
+    assert all(row["split_group_id"] == row["family_id"] for row in train + dev)
     for row in train + dev:
         assert (output / row["tight_crop_path"]).is_file()
         assert (output / row["padded_crop_path"]).is_file()
@@ -104,7 +105,32 @@ def test_rejects_single_private_family_without_publishing_output(
     assert not output.exists()
 
 
-def _manual_row(root: Path, page_id: str, reference: str) -> None:
+def test_rejects_split_group_shared_by_multiple_families(tmp_path: Path) -> None:
+    manual = tmp_path / "manual"
+    _manual_row(
+        manual,
+        "C08-D001-P001",
+        "first",
+        split_group_id="shared-record",
+    )
+    _manual_row(
+        manual,
+        "C08-D002-P001",
+        "second",
+        split_group_id="shared-record",
+    )
+
+    with pytest.raises(ValueError, match="split group belongs to multiple families"):
+        compose_dataset([manual], [], tmp_path / "composed")
+
+
+def _manual_row(
+    root: Path,
+    page_id: str,
+    reference: str,
+    *,
+    split_group_id: str | None = None,
+) -> None:
     field_id = f"{page_id}-HM001"
     tight = root / "crops" / f"{field_id}.png"
     padded = root / "crops" / "padded" / f"{field_id}.png"
@@ -133,6 +159,8 @@ def _manual_row(root: Path, page_id: str, reference: str) -> None:
         "reviewer_ids": ["one", "two"],
         "independent_reviews": [review("one"), review("two")],
     }
+    if split_group_id is not None:
+        row["split_group_id"] = split_group_id
     with (root / "accepted.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row) + "\n")
 

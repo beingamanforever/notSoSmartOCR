@@ -43,6 +43,43 @@ def test_thick_checkbox_border_does_not_imply_selected(tmp_path: Path) -> None:
     assert detections[0].state == "unselected"
 
 
+def test_thin_checkbox_next_to_label_is_preserved(tmp_path: Path) -> None:
+    source = tmp_path / "thin-checkbox.png"
+    image = np.full((70, 160), 255, dtype=np.uint8)
+    cv2.rectangle(image, (20, 20), (34, 34), 0, 1)
+    cv2.putText(
+        image,
+        "Dose",
+        (37, 31),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.4,
+        0,
+        1,
+        cv2.LINE_8,
+    )
+    cv2.imwrite(str(source), image)
+
+    detections = detect_controls(source)
+
+    assert [(item.bounding_box, item.state) for item in detections] == [
+        (BoundingBox(20, 20, 35, 35), "unselected")
+    ]
+
+
+def test_colored_background_does_not_imply_selected(tmp_path: Path) -> None:
+    source = tmp_path / "colored-background.png"
+    image = np.full((100, 180), 225, dtype=np.uint8)
+    cv2.rectangle(image, (20, 20), (36, 36), 0, 2)
+    cv2.rectangle(image, (20, 60), (36, 76), 0, 2)
+    cv2.line(image, (24, 64), (32, 72), 0, 2)
+    cv2.line(image, (32, 64), (24, 72), 0, 2)
+    cv2.imwrite(str(source), image)
+
+    detections = detect_controls(source)
+
+    assert [item.state for item in detections] == ["unselected", "selected"]
+
+
 def test_tiny_selected_candidate_on_large_page_is_preserved_as_ambiguous(
     tmp_path: Path,
 ) -> None:
@@ -128,7 +165,9 @@ def test_unlabeled_selected_geometry_is_not_asserted(tmp_path: Path) -> None:
     assert control.resolution == "unreadable"
 
 
-def test_small_control_group_routes_coverage_review(tmp_path: Path) -> None:
+def test_small_control_group_keeps_readable_state_with_coverage_warning(
+    tmp_path: Path,
+) -> None:
     source = _control_image(tmp_path, selected=True)
     label = _region("label", "Fall prevention", (45, 20, 140, 35), 4)
 
@@ -142,7 +181,7 @@ def test_small_control_group_routes_coverage_review(tmp_path: Path) -> None:
         region for region in result.pages[0].regions if region.kind == "checkbox"
     )
     assert control.structure["coverage_status"] == "insufficient_control_group"
-    assert control.resolution == "unreadable"
+    assert control.resolution == "resolved"
     assert result.pages[0].route == "review"
 
 
@@ -244,6 +283,146 @@ def test_control_stage_keeps_controls_at_edges_of_line_level_reader_boxes(
         "Leading option",
         "Trailing option",
     ]
+
+
+def test_control_stage_rejects_box_like_table_glyph_and_keeps_checkbox(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "table-controls.png"
+    image = np.full((140, 280), 255, dtype=np.uint8)
+    cv2.putText(
+        image,
+        "D",
+        (20, 45),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        0,
+        2,
+        cv2.LINE_8,
+    )
+    cv2.putText(
+        image,
+        "ate",
+        (42, 45),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        0,
+        2,
+        cv2.LINE_8,
+    )
+    cv2.rectangle(image, (20, 75), (34, 89), 0, 2)
+    cv2.imwrite(str(source), image)
+    date = _region("date", "Date", (18, 26, 110, 48), 1)
+    date.structure = {"role": "table_source"}
+    option = _region("option", "Genuine option", (45, 73, 180, 93), 2)
+    option.structure = {"role": "table_source"}
+
+    result = process_document(
+        source,
+        FixedReader([date, option]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert [control.text for control in controls] == ["[ ] Genuine option"]
+
+
+def test_control_stage_does_not_infer_unboxed_marks_from_table_text(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "table-mark.png"
+    image = Image.new("L", (280, 100), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line((30, 42, 40, 52), fill="black", width=2)
+    draw.line((40, 42, 30, 52), fill="black", width=2)
+    image.save(source)
+    value = _region("value", "25,971,901", (52, 38, 150, 58), 1)
+    value.structure = {"role": "table_source"}
+
+    result = process_document(
+        source,
+        FixedReader([value]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    assert all(region.kind != "checkbox" for region in result.pages[0].regions)
+
+
+def test_control_stage_recovers_unboxed_mark_for_table_label(tmp_path: Path) -> None:
+    source = tmp_path / "table-option.png"
+    image = Image.new("L", (280, 100), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line((30, 42, 40, 52), fill="black", width=2)
+    draw.line((40, 42, 30, 52), fill="black", width=2)
+    image.save(source)
+    option = _region("option", "Fall prevention", (52, 38, 180, 58), 1)
+    option.structure = {"role": "table_source"}
+
+    result = process_document(
+        source,
+        FixedReader([option]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert [control.text for control in controls] == ["[?] Fall prevention"]
+
+
+def test_control_stage_rejects_box_like_glyph_between_vertical_text(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "vertical-text.png"
+    line = np.full((60, 180), 255, dtype=np.uint8)
+    cv2.putText(
+        line,
+        "ADA",
+        (5, 40),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        0,
+        2,
+        cv2.LINE_8,
+    )
+    image = cv2.rotate(line, cv2.ROTATE_90_CLOCKWISE)
+    cv2.imwrite(str(source), image)
+
+    result = process_document(
+        source,
+        FixedReader([]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    assert all(region.kind != "checkbox" for region in result.pages[0].regions)
+
+
+def test_control_stage_rejects_inline_mark_inside_low_confidence_peer_label(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "broken-selected-peer.png"
+    image = Image.new("L", (440, 100), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((20, 40, 36, 56), outline="black", width=2)
+    draw.line((220, 42, 232, 54), fill="black", width=2)
+    draw.line((232, 42, 220, 54), fill="black", width=2)
+    image.save(source)
+    peer_label = _region("peer", "Initial exam", (42, 38, 160, 58), 1)
+    target_label = _region("target", "Subsequent exam", (216, 38, 390, 58), 2)
+    target_label.confidence = 0.83
+
+    result = process_document(
+        source,
+        FixedReader([peer_label, target_label]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert [control.text for control in controls] == ["[ ] Initial exam"]
 
 
 def test_control_stage_ignores_unlabeled_empty_square_artifacts(
@@ -486,6 +665,84 @@ def test_control_stage_recovers_anchored_marks_without_label_punctuation(
     ]
     assert all(control.resolution == "unreadable" for control in controls)
     assert result.pages[0].route == "review"
+
+
+def test_control_stage_does_not_count_squares_toward_anchored_mark_group(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "mixed-control-sources.png"
+    image = Image.new("L", (1000, 1000), "white")
+    draw = ImageDraw.Draw(image)
+    square_tops = (30, 100, 170, 240, 310)
+    for top in square_tops:
+        draw.rectangle((30, top, 59, top + 29), outline="black", width=2)
+    draw.line((600, 510, 612, 522), fill="black", width=2)
+    draw.line((612, 510, 600, 522), fill="black", width=2)
+    image.save(source)
+    labels = [
+        *[
+            _region(
+                f"square-{index}",
+                f"Option {index}",
+                (70, top, 170, top + 30),
+                index,
+            )
+            for index, top in enumerate(square_tops, start=1)
+        ],
+        _region("prose", "contribution", (625, 507, 760, 525), 6),
+    ]
+    for label in labels[:-1]:
+        label.kind = "form_field"
+
+    result = process_document(
+        source,
+        FixedReader(labels),
+        stages=[GeometricControlStage(minimum_group_size=6)],
+    )
+
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert [control.structure["label"] for control in controls] == [
+        "Option 1",
+        "Option 2",
+        "Option 3",
+        "Option 4",
+        "Option 5",
+    ]
+    assert all(
+        control.text_provenance["method"] == "square_contour_with_line_cleanup"
+        for control in controls
+    )
+
+
+def test_solid_square_list_markers_are_not_reported_as_controls(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "solid-list-markers.png"
+    image = Image.new("L", (620, 320), "white")
+    draw = ImageDraw.Draw(image)
+    regions = []
+    for index in range(6):
+        top = 25 + index * 42
+        draw.rectangle((28, top + 4, 35, top + 11), fill="black")
+        regions.append(
+            _region(
+                f"list-item-{index}",
+                f"Financial statement bullet {index + 1}",
+                (48, top, 560, top + 18),
+                index + 1,
+            )
+        )
+    image.save(source)
+
+    result = process_document(
+        source,
+        FixedReader(regions),
+        stages=[GeometricControlStage()],
+    )
+
+    assert not any(region.kind == "checkbox" for region in result.pages[0].regions)
 
 
 def test_control_stage_preserves_numbered_narrative_mark_for_review(
@@ -775,6 +1032,447 @@ def test_control_stage_ignores_underlines_and_single_diagonal_noise(
     assert all(region.kind != "checkbox" for region in result.pages[0].regions)
 
 
+def test_control_stage_rejects_text_bearing_icon_and_keeps_real_boxes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "screen-controls.png"
+    image = Image.new("L", (1000, 1000), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((80, 80, 149, 149), outline="black", width=2)
+    draw.text((91, 103), "People", fill="black")
+    draw.rectangle((80, 260, 109, 289), outline="black", width=2)
+    draw.rectangle((80, 330, 109, 359), outline="black", width=2)
+    image.save(source)
+    regions = [
+        _region("icon-label", "People", (91, 103, 137, 119), 1),
+        _region("saas", "SaaS", (122, 265, 190, 285), 2),
+        _region("one-time", "One-Time", (122, 335, 220, 355), 3),
+    ]
+
+    result = process_document(
+        source,
+        FixedReader(regions),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert [control.text for control in controls] == ["[ ] SaaS", "[ ] One-Time"]
+
+
+def test_control_stage_rejects_sparse_unselected_list_boxes(tmp_path: Path) -> None:
+    source = tmp_path / "sparse-list-boxes.png"
+    image = Image.new("L", (1000, 1000), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((80, 260, 109, 289), outline="black", width=2)
+    draw.rectangle((80, 330, 109, 359), outline="black", width=2)
+    image.save(source)
+    regions = [
+        _region("first-item", "First list item", (122, 265, 250, 285), 2),
+        _region("second-item", "Second list item", (122, 335, 270, 355), 3),
+    ]
+
+    result = process_document(
+        source,
+        FixedReader(regions),
+        stages=[GeometricControlStage()],
+    )
+
+    assert all(region.kind != "checkbox" for region in result.pages[0].regions)
+
+
+def test_control_stage_preserves_single_unselected_form_field(tmp_path: Path) -> None:
+    source = tmp_path / "single-form-control.png"
+    image = Image.new("L", (400, 400), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((30, 40, 55, 65), outline="black", width=2)
+    image.save(source)
+    label = _region("consent", "Patient consent", (65, 42, 210, 64), 1)
+    label.kind = "form_field"
+
+    result = process_document(
+        source,
+        FixedReader([label]),
+        stages=[GeometricControlStage()],
+    )
+
+    control = next(
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    )
+    assert control.text == "[ ] Patient consent"
+    assert control.structure["coverage_status"] == "insufficient_control_group"
+
+
+def test_control_stage_recovers_selected_marks_inside_semantic_table_cells(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "table-check.png"
+    image = Image.new("L", (600, 260), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line((365, 106, 374, 115), fill="black", width=3)
+    draw.line((374, 115, 394, 88), fill="black", width=3)
+    image.save(source)
+    cells = [
+        _cell("header-task", 0, 0, "TASK", (20, 40, 180, 80)),
+        _cell("header-mon", 0, 1, "MON", (180, 40, 260, 80)),
+        _cell("header-tues", 0, 2, "TUES", (260, 40, 340, 80)),
+        _cell("header-wed", 0, 3, "WED", (340, 40, 420, 80)),
+        _cell("row-label", 1, 0, "Bed Bath", (20, 80, 180, 125)),
+        _cell("row-mon", 1, 1, "", (180, 80, 260, 125)),
+        _cell("row-tues", 1, 2, "", (260, 80, 340, 125)),
+        _cell("row-wed", 1, 3, "hm", (340, 80, 420, 125)) | {"confidence": 0.25},
+    ]
+    table = TextRegion(
+        id="table",
+        kind="table",
+        text="",
+        confidence=0.96,
+        bounding_box=BoundingBox(20, 40, 420, 125),
+        reading_order=10,
+        provider="table-transformer",
+        structure={"role": "table", "cells": cells},
+    )
+
+    result = process_document(
+        source,
+        FixedReader([table]),
+        stages=[GeometricControlStage()],
+    )
+
+    control = next(
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    )
+    assert control.text == "[x] Bed Bath (WED)"
+    assert control.resolution == "resolved"
+    assert control.structure["selection_supported"] is True
+    assert control.structure["coverage_status"] == "detected"
+    assert control.text_provenance == {
+        "method": "table_cell_residual_ink",
+        "label_evidence_ids": ["row-label", "header-wed"],
+        "source_evidence_ids": ["table", "row-wed"],
+    }
+    assert control.structure["source_evidence_ids"] == ["table", "row-wed"]
+
+
+def test_control_stage_recovers_same_cell_controls_from_ruled_form(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "ruled-form-controls.png"
+    image = np.full((150, 620), 255, dtype=np.uint8)
+    for x in (20, 210, 400, 590):
+        cv2.line(image, (x, 30), (x, 120), 0, 2)
+    for y in (30, 120):
+        cv2.line(image, (20, y), (590, y), 0, 2)
+    _draw_grid_connected_control(image, 20, selected=True)
+    _draw_grid_connected_control(image, 210, selected=False)
+    cv2.putText(
+        image,
+        "Notes only",
+        (420, 82),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        0,
+        1,
+        cv2.LINE_8,
+    )
+    cv2.imwrite(str(source), image)
+    source_pixels = image.copy()
+    cells = [
+        _cell("inpatient", 0, 0, "[x] Inpatient", (20, 30, 210, 120)),
+        _cell("outpatient", 0, 1, "[ ] Outpatient", (210, 30, 400, 120)),
+        _cell("notes", 0, 2, "Notes only", (400, 30, 590, 120)),
+    ]
+    table = TextRegion(
+        id="form-table",
+        kind="table",
+        text="",
+        confidence=0.97,
+        bounding_box=BoundingBox(20, 30, 590, 120),
+        reading_order=7,
+        provider="table-transformer",
+        structure={"role": "table", "cells": cells},
+    )
+
+    result = process_document(
+        source,
+        FixedReader([table]),
+        stages=[GeometricControlStage()],
+    )
+
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert [control.text for control in controls] == [
+        "[x] Inpatient",
+        "[ ] Outpatient",
+    ]
+    assert [control.structure["label_evidence_ids"] for control in controls] == [
+        ["inpatient"],
+        ["outpatient"],
+    ]
+    assert [control.structure["source_evidence_ids"] for control in controls] == [
+        ["form-table", "inpatient"],
+        ["form-table", "outpatient"],
+    ]
+    assert [control.reading_order for control in controls] == [7, 7]
+    assert all(
+        control.text_provenance["method"] == "table_cell_residual_ink"
+        for control in controls
+    )
+    assert np.array_equal(cv2.imread(str(source), cv2.IMREAD_GRAYSCALE), source_pixels)
+
+
+def test_control_stage_rejects_multiple_boxes_in_same_table_cell(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "ambiguous-ruled-form-cell.png"
+    image = np.full((150, 240), 255, dtype=np.uint8)
+    cv2.rectangle(image, (20, 30), (220, 120), 0, 2)
+    cv2.rectangle(image, (35, 30), (53, 48), 0, 2)
+    cv2.rectangle(image, (65, 30), (83, 48), 0, 2)
+    cv2.putText(
+        image,
+        "Select one",
+        (95, 48),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.5,
+        0,
+        1,
+        cv2.LINE_8,
+    )
+    cv2.imwrite(str(source), image)
+    cell = _cell("ambiguous", 0, 0, "[ ] Select one", (20, 30, 220, 120))
+    table = TextRegion(
+        id="form-table",
+        kind="table",
+        text="",
+        confidence=0.97,
+        bounding_box=BoundingBox(20, 30, 220, 120),
+        reading_order=1,
+        provider="table-transformer",
+        structure={"role": "table", "cells": [cell]},
+    )
+
+    result = process_document(
+        source,
+        FixedReader([table]),
+        stages=[GeometricControlStage()],
+    )
+
+    assert not any(region.kind == "checkbox" for region in result.pages[0].regions)
+
+
+def test_control_stage_recovers_labeled_controls_from_rejected_table_candidate(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "rejected-form-table.png"
+    image = np.full((150, 620), 255, dtype=np.uint8)
+    for x in (20, 210, 400, 590):
+        cv2.line(image, (x, 30), (x, 120), 0, 2)
+    for y in (30, 55, 120):
+        cv2.line(image, (20, y), (590, y), 0, 2)
+    labels = []
+    for index, (left, text) in enumerate(
+        ((20, "Bed mobility"), (210, "Gait training"), (400, "Home exercise")),
+        start=1,
+    ):
+        cv2.rectangle(image, (left + 8, 55), (left + 26, 73), 0, 2)
+        cv2.putText(
+            image,
+            text,
+            (left + 30, 72),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            0,
+            1,
+            cv2.LINE_8,
+        )
+        labels.append(
+            _region(f"label-{index}", text, (left + 30, 58, left + 150, 75), index)
+        )
+    cv2.line(image, (32, 59), (42, 69), 0, 2)
+    cv2.line(image, (42, 59), (32, 69), 0, 2)
+    image[65:66, 415:421] = 210
+    cv2.imwrite(str(source), image)
+    source_pixels = image.copy()
+    candidate = TextRegion(
+        id="rejected-form",
+        kind="table_candidate",
+        text="",
+        confidence=None,
+        bounding_box=BoundingBox(20, 30, 590, 120),
+        reading_order=10,
+        provider="table-transformer",
+        text_provenance={
+            "method": "table_semantics_rejection",
+            "source_region_ids": [label.id for label in labels],
+        },
+        resolution="unreadable",
+        structure={
+            "role": "table_candidate",
+            "status": "rejected",
+            "reason": "unsupported_spanning_layout",
+        },
+    )
+
+    result = process_document(
+        source,
+        FixedReader([*labels, candidate]),
+        stages=[GeometricControlStage()],
+    )
+
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert [control.text for control in controls] == [
+        "[x] Bed mobility",
+        "[ ] Gait training",
+        "[?] Home exercise",
+    ]
+    assert [control.resolution for control in controls] == [
+        "resolved",
+        "resolved",
+        "unreadable",
+    ]
+    assert [control.structure["label_evidence_ids"] for control in controls] == [
+        ["label-1"],
+        ["label-2"],
+        ["label-3"],
+    ]
+    assert all(
+        control.structure["source_evidence_ids"] == ["rejected-form"]
+        for control in controls
+    )
+    assert np.array_equal(cv2.imread(str(source), cv2.IMREAD_GRAYSCALE), source_pixels)
+
+
+def test_control_stage_rejects_ambiguous_and_repeated_candidate_labels(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "rejected-numeric-grid.png"
+    image = np.full((180, 260), 255, dtype=np.uint8)
+    for y in (20, 60, 100, 140):
+        cv2.line(image, (20, y), (240, y), 0, 2)
+    cv2.line(image, (20, 20), (20, 140), 0, 2)
+    cv2.line(image, (240, 20), (240, 140), 0, 2)
+    labels = []
+    for index, top in enumerate((20, 60, 100), start=1):
+        cv2.rectangle(image, (30, top), (48, top + 18), 0, 2)
+        cv2.putText(
+            image,
+            "Max",
+            (52, top + 17),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            0,
+            1,
+            cv2.LINE_8,
+        )
+        labels.append(
+            _region(f"max-{index}", "Max", (52, top + 3, 85, top + 20), index)
+        )
+    cv2.rectangle(image, (110, 100), (128, 118), 0, 2)
+    unique = _region("unique", "Transfer", (132, 103, 205, 120), 4)
+    cv2.imwrite(str(source), image)
+    candidate = TextRegion(
+        id="numeric-grid",
+        kind="table_candidate",
+        text="",
+        confidence=None,
+        bounding_box=BoundingBox(20, 20, 240, 140),
+        reading_order=10,
+        provider="table-transformer",
+        text_provenance={
+            "method": "table_semantics_rejection",
+            "source_region_ids": [region.id for region in [*labels, unique]],
+        },
+        resolution="unreadable",
+        structure={"role": "table_candidate", "status": "rejected"},
+    )
+
+    result = process_document(
+        source,
+        FixedReader([*labels, unique, candidate]),
+        stages=[GeometricControlStage()],
+    )
+
+    assert not any(region.kind == "checkbox" for region in result.pages[0].regions)
+
+
+def test_control_stage_does_not_treat_short_table_text_as_a_mark(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "short-cell-text.png"
+    image = Image.new("L", (600, 260), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((355, 92), "ST", fill="black")
+    image.save(source)
+    cells = [
+        _cell("header-task", 0, 0, "TASK", (20, 40, 180, 80)),
+        _cell("header-mon", 0, 1, "MON", (180, 40, 260, 80)),
+        _cell("header-tues", 0, 2, "TUES", (260, 40, 340, 80)),
+        _cell("header-wed", 0, 3, "WED", (340, 40, 420, 80)),
+        _cell("row-label", 1, 0, "Bed Bath", (20, 80, 180, 125)),
+        _cell("row-wed", 1, 3, "ST", (340, 80, 420, 125)) | {"confidence": 0.95},
+    ]
+    table = TextRegion(
+        id="table",
+        kind="table",
+        text="",
+        confidence=0.96,
+        bounding_box=BoundingBox(20, 40, 420, 125),
+        reading_order=10,
+        provider="table-transformer",
+        structure={"role": "table", "cells": cells},
+    )
+
+    result = process_document(
+        source,
+        FixedReader([table]),
+        stages=[GeometricControlStage()],
+    )
+
+    assert not any(region.kind == "checkbox" for region in result.pages[0].regions)
+
+
+def test_control_stage_rejects_diagonal_stroke_in_generic_results_table(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "lab-results.png"
+    image = Image.new("L", (600, 240), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line((245, 106, 254, 115), fill="black", width=3)
+    draw.line((254, 115, 274, 88), fill="black", width=3)
+    image.save(source)
+    cells = [
+        _cell("test-header", 0, 0, "TEST", (20, 40, 220, 80)),
+        _cell("result-header", 0, 1, "RESULT", (220, 40, 300, 80)),
+        _cell("unit-header", 0, 2, "UNIT", (300, 40, 420, 80)),
+        _cell("test", 1, 0, "Hemoglobin", (20, 80, 220, 125)),
+        _cell("result", 1, 1, "", (220, 80, 300, 125)) | {"confidence": 0.2},
+        _cell("unit", 1, 2, "g/dL", (300, 80, 420, 125)),
+    ]
+    table = TextRegion(
+        id="lab-table",
+        kind="table",
+        text="",
+        confidence=0.98,
+        bounding_box=BoundingBox(20, 40, 420, 125),
+        reading_order=1,
+        provider="table-transformer",
+        structure={"role": "table", "cells": cells},
+    )
+
+    result = process_document(
+        source,
+        FixedReader([table]),
+        stages=[GeometricControlStage()],
+    )
+
+    assert not any(region.kind == "checkbox" for region in result.pages[0].regions)
+
+
 def _control_image(tmp_path: Path, *, selected: bool) -> Path:
     source = tmp_path / "page.png"
     image = Image.new("L", (180, 80), "white")
@@ -801,6 +1499,44 @@ def _region(
         bounding_box=BoundingBox(*box),
         reading_order=order,
         provider="fixed",
+    )
+
+
+def _cell(
+    cell_id: str,
+    row: int,
+    column: int,
+    text: str,
+    box: tuple[int, int, int, int],
+) -> dict[str, object]:
+    return {
+        "id": cell_id,
+        "bbox": dict(zip(("left", "top", "right", "bottom"), box, strict=True)),
+        "row_nums": [row],
+        "column_nums": [column],
+        "text": text,
+    }
+
+
+def _draw_grid_connected_control(
+    image: np.ndarray,
+    cell_left: int,
+    *,
+    selected: bool,
+) -> None:
+    cv2.rectangle(image, (cell_left, 62), (cell_left + 18, 80), 0, 2)
+    if selected:
+        cv2.line(image, (cell_left + 4, 66), (cell_left + 14, 76), 0, 2)
+        cv2.line(image, (cell_left + 14, 66), (cell_left + 4, 76), 0, 2)
+    cv2.putText(
+        image,
+        "Inpatient" if selected else "Outpatient",
+        (cell_left + 28, 78),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        0,
+        1,
+        cv2.LINE_8,
     )
 
 

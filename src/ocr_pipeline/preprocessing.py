@@ -6,12 +6,15 @@ import re
 import statistics
 import tempfile
 import threading
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
+from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import asdict, replace
 from difflib import SequenceMatcher
 from math import ceil, floor
 from pathlib import Path
+from typing import Any, Iterator
 
 from PIL import Image, ImageStat, UnidentifiedImageError
 
@@ -29,6 +32,185 @@ MIN_AREA_RATIO = 0.35
 WIDE_BAND_SCALE = 3
 CONFIRMATION_RECALL = 0.98
 CONFIRMATION_SIMILARITY = 0.98
+MIN_PAGE_AREA_RATIO = 0.12
+MIN_PAGE_HEIGHT_RATIO = 0.5
+MIN_PAGE_WIDTH_RATIO = 0.25
+MIN_PAGE_FILL_RATIO = 0.75
+MIN_PAGE_MARGIN_RATIO = 0.01
+MIN_PAGE_RING_CONTRAST = 25
+MIN_PARTIAL_PAGE_HEIGHT_RATIO = 0.08
+
+
+class PageFrameReader:
+    """Run the complete OCR pipeline on one confidently isolated page canvas."""
+
+    def __init__(
+        self,
+        reader: LocalReader,
+        *,
+        locator: Callable[[Path], BoundingBox | None] | None = None,
+    ) -> None:
+        self.reader = reader
+        self.name = f"{reader.name}-page-frame"
+        self.locator = locator
+        self.executable = getattr(reader, "executable", None)
+        self.batch_size = 1
+        self._assessments: dict[int, dict[str, object]] = {}
+        self._lock = threading.Lock()
+
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        crop, partial_page = self._locate(image_path)
+        assessment: dict[str, object] = {
+            "page_number": page_number,
+            "status": "not_routed" if crop is None else "frame_isolated",
+            "partial_page_visible": partial_page,
+            "recovery_status": "not_routed" if crop is None else "pending",
+        }
+        if crop is not None:
+            assessment["crop"] = asdict(crop)
+        self._save_assessment(page_number, assessment)
+        if crop is None:
+            return self.reader.read(image_path, page_number)
+        with _cropped_page(image_path, crop, "ocr-page-frame-") as crop_path:
+            regions = self.reader.read(crop_path, page_number)
+        self._update_assessment(
+            page_number,
+            cropped_reader_review=_reader_needs_review(self.reader, page_number),
+            cropped_reader=_reader_page_assessment(self.reader, page_number),
+        )
+        return regions
+
+    @contextmanager
+    def stage_view(self, image_path: Path, page_number: int) -> Iterator[Path]:
+        with self._lock:
+            assessment = dict(self._assessments.get(page_number, {}))
+        crop = _assessment_box(assessment.get("crop"))
+        if crop is None:
+            with _reader_stage_view(self.reader, image_path, page_number) as path:
+                yield path
+            return
+        with _cropped_page(image_path, crop, "ocr-page-stage-") as crop_path:
+            with _reader_stage_view(self.reader, crop_path, page_number) as path:
+                yield path
+
+    def restore_regions(
+        self,
+        regions: list[TextRegion],
+        page_number: int,
+    ) -> list[TextRegion]:
+        restore = getattr(self.reader, "restore_regions", None)
+        restored = restore(regions, page_number) if callable(restore) else regions
+        with self._lock:
+            assessment = dict(self._assessments.get(page_number, {}))
+        crop = _assessment_box(assessment.get("crop"))
+        if crop is None:
+            return restored
+        return [_translate_page_region(region, crop) for region in restored]
+
+    def recover_regions(
+        self,
+        image_path: Path,
+        page_number: int,
+        regions: list[TextRegion],
+    ) -> list[TextRegion]:
+        with self._lock:
+            assessment = dict(self._assessments.get(page_number, {}))
+        crop = _assessment_box(assessment.get("crop"))
+        if crop is None:
+            return regions
+
+        full_page = self.reader.read(image_path, page_number)
+        restore = getattr(self.reader, "restore_regions", None)
+        if callable(restore):
+            full_page = restore(full_page, page_number)
+        with Image.open(image_path) as source:
+            page_size = source.size
+
+        recovered, recovery = _recover_outside_frame(
+            full_page,
+            regions,
+            crop,
+            page_number,
+            page_size,
+            self.reader.name,
+        )
+        self._update_assessment(
+            page_number,
+            recovery_status=("recovered" if recovered else "no_outside_evidence"),
+            full_page_reader_review=_reader_needs_review(self.reader, page_number),
+            **recovery,
+        )
+        return _page_reading_order([*regions, *recovered])
+
+    def record_recovery_failure(self, page_number: int, error: ReaderError) -> None:
+        self._update_assessment(
+            page_number,
+            recovery_status="failed",
+            recovery_failure={"code": error.code, "message": str(error)},
+        )
+
+    def page_needs_review(self, page_number: int) -> bool:
+        nested_review = getattr(self.reader, "page_needs_review", None)
+        with self._lock:
+            assessment = dict(self._assessments.get(page_number, {}))
+        return bool(
+            assessment.get("status") == "frame_isolated"
+            or assessment.get("partial_page_visible")
+            or assessment.get("cropped_reader_review")
+            or assessment.get("full_page_reader_review")
+            or (callable(nested_review) and nested_review(page_number))
+        )
+
+    def coverage_assessment(self, page_count: int) -> dict[str, object]:
+        with self._lock:
+            pages = [
+                dict(
+                    self._assessments.get(
+                        page_number,
+                        {"page_number": page_number, "status": "not_run"},
+                    )
+                )
+                for page_number in range(1, page_count + 1)
+            ]
+        isolated = sum(page.get("status") == "frame_isolated" for page in pages)
+        partial = sum(bool(page.get("partial_page_visible")) for page in pages)
+        nested = getattr(self.reader, "coverage_assessment", None)
+        nested_assessment = nested(page_count) if callable(nested) else None
+        recovered = sum(int(page.get("recovered_regions", 0)) for page in pages)
+        recovery_failures = sum(
+            page.get("recovery_status") == "failed" for page in pages
+        )
+        status = "review_recommended" if isolated else "not_assessed"
+        message = (
+            f"Isolated {isolated} document canvas(es), recovered {recovered} "
+            f"outside-frame region(s), and observed {recovery_failures} recovery "
+            f"failure(s); {partial} contained a visible partial neighboring page."
+            if isolated
+            else "No single embedded document canvas was isolated."
+        )
+        result: dict[str, object] = {
+            "status": status,
+            "message": message,
+            "pages": pages,
+        }
+        if isinstance(nested_assessment, dict):
+            result["nested_reader"] = nested_assessment
+        return result
+
+    def _locate(self, image_path: Path) -> tuple[BoundingBox | None, bool]:
+        if self.locator is not None:
+            return self.locator(image_path), False
+        return _locate_document_frame(image_path)
+
+    def _save_assessment(self, page_number: int, value: dict[str, object]) -> None:
+        with self._lock:
+            self._assessments[page_number] = value
+
+    def _update_assessment(self, page_number: int, **values: object) -> None:
+        with self._lock:
+            assessment = dict(self._assessments.get(page_number, {}))
+            assessment.update(values)
+            self._assessments[page_number] = assessment
 
 
 class RoutedTesseractReader:
@@ -145,7 +327,31 @@ class TiledReader:
         self._lock = threading.Lock()
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
-        baseline = self.reader.read(image_path, page_number)
+        started = {
+            "page_number": page_number,
+            "reader": self.name,
+            "ran": True,
+            "status": "running",
+            "selected_view": "baseline",
+            "tile_reader": self.reader.name,
+            "tile_views_run": 0,
+            "tiled_candidates": 0,
+            "review_reasons": [],
+        }
+        self._save_assessment(page_number, started)
+        try:
+            baseline = self.reader.read(image_path, page_number)
+        except ReaderError as error:
+            self._save_assessment(
+                page_number,
+                {
+                    **started,
+                    "status": "failed",
+                    "failure": {"code": error.code, "message": str(error)},
+                    "review_reasons": ["baseline_reader_failed"],
+                },
+            )
+            raise
         heights = [
             region.bounding_box.bottom - region.bounding_box.top for region in baseline
         ]
@@ -155,9 +361,15 @@ class TiledReader:
                 page_number,
                 {
                     "page_number": page_number,
+                    "reader": self.name,
+                    "ran": True,
                     "status": "not_routed",
                     "selected_view": "baseline",
+                    "tile_reader": self.reader.name,
+                    "tile_views_run": 0,
+                    "tiled_candidates": 0,
                     "median_region_height": median_height,
+                    "review_reasons": [],
                 },
             )
             return baseline
@@ -166,16 +378,54 @@ class TiledReader:
             with Image.open(image_path) as source:
                 width, height = source.size
                 tiled = self._read_tiles(source, width, height, page_number)
+        except ReaderError as error:
+            self._save_assessment(
+                page_number,
+                {
+                    **started,
+                    "status": "failed",
+                    "failure": {"code": error.code, "message": str(error)},
+                    "review_reasons": ["tile_reader_failed"],
+                },
+            )
+            raise
         except (OSError, UnidentifiedImageError, ValueError) as error:
+            self._save_assessment(
+                page_number,
+                {
+                    **started,
+                    "status": "failed",
+                    "failure": {"code": "preprocess_failed", "message": str(error)},
+                    "review_reasons": ["tile_preprocessing_failed"],
+                },
+            )
             raise ReaderError("preprocess_failed", str(error)) from error
 
         selected, assessment = _fuse_tiled_view(baseline, tiled)
         assessment.update(
             {
                 "page_number": page_number,
+                "reader": self.name,
+                "ran": True,
+                "tile_reader": self.reader.name,
+                "tile_views_run": self.tile_count,
                 "median_region_height": median_height,
                 "tile_count": self.tile_count,
                 "overlap_fraction": self.overlap_fraction,
+                "review_reasons": [
+                    reason
+                    for present, reason in (
+                        (
+                            bool(assessment["conflicting_candidates"]),
+                            "conflicting_tile_candidates",
+                        ),
+                        (
+                            bool(assessment["unresolved_tile_only_regions"]),
+                            "unsupported_tile_only_candidates",
+                        ),
+                    )
+                    if present
+                ],
             }
         )
         self._save_assessment(page_number, assessment)
@@ -324,8 +574,45 @@ class WideBandFallbackReader:
         self._lock = threading.Lock()
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
-        baseline = self.reader.read(image_path, page_number)
+        started = {
+            "page_number": page_number,
+            "reader": self.name,
+            "ran": True,
+            "status": "running",
+            "selected_view": "baseline",
+            "baseline_reader": self.reader.name,
+            "fallback_reader": self.fallback_reader.name,
+            "fallback_reader_runs": 0,
+            "fallback_candidates": 0,
+            "confirmation_reader": (
+                self.confirmation_reader.name
+                if self.confirmation_reader is not None
+                else None
+            ),
+            "confirmation_reader_runs": 0,
+            "review_reasons": [],
+        }
+        self._save_assessment(page_number, started)
+        try:
+            baseline = self.reader.read(image_path, page_number)
+        except ReaderError as error:
+            nested_reader = _reader_page_assessment(self.reader, page_number)
+            self._save_assessment(
+                page_number,
+                {
+                    **started,
+                    "status": "failed",
+                    "failure": {"code": error.code, "message": str(error)},
+                    "nested_reader": nested_reader,
+                    "review_reasons": ["baseline_reader_failed"],
+                },
+            )
+            raise
+        nested_reader = _reader_page_assessment(self.reader, page_number)
         baseline_needs_review = _reader_needs_review(self.reader, page_number)
+        fallback_reader_runs = 0
+        fallback_candidates = 0
+        confirmation_reader_runs = 0
         try:
             with Image.open(image_path) as source:
                 width, height = source.size
@@ -344,12 +631,30 @@ class WideBandFallbackReader:
                         page_number,
                         {
                             "page_number": page_number,
+                            "reader": self.name,
+                            "ran": True,
                             "status": "not_routed",
                             "selected_view": "baseline",
+                            "baseline_reader": self.reader.name,
+                            "fallback_reader": self.fallback_reader.name,
+                            "fallback_reader_runs": 0,
+                            "fallback_candidates": 0,
+                            "confirmation_reader": (
+                                self.confirmation_reader.name
+                                if self.confirmation_reader is not None
+                                else None
+                            ),
+                            "confirmation_reader_runs": 0,
                             "qualifying_regions": 0,
                             "band_count": 0,
                             "replaced_bands": 0,
                             "nested_reader_review": baseline_needs_review,
+                            "nested_reader": nested_reader,
+                            "review_reasons": (
+                                ["nested_reader_review"]
+                                if baseline_needs_review
+                                else []
+                            ),
                             "bands": [],
                         },
                     )
@@ -376,6 +681,7 @@ class WideBandFallbackReader:
                             ),
                             Image.Resampling.LANCZOS,
                         ).save(crop_path, format="PNG")
+                        fallback_reader_runs += 1
                         try:
                             fallback = self.fallback_reader.read(crop_path, page_number)
                         except ReaderError as error:
@@ -393,6 +699,7 @@ class WideBandFallbackReader:
                             )
                             continue
 
+                        fallback_candidates += len(fallback)
                         fallback_needs_review = _reader_needs_review(
                             self.fallback_reader,
                             page_number,
@@ -425,6 +732,7 @@ class WideBandFallbackReader:
                             and self.confirmation_reader is not None
                             and assessment["confirmation_candidate"]
                         ):
+                            confirmation_reader_runs += 1
                             try:
                                 confirmation = self.confirmation_reader.read(
                                     crop_path,
@@ -476,7 +784,7 @@ class WideBandFallbackReader:
                                             "selected_view": "fallback",
                                             "reason": "evidence_confirmed",
                                             "selection_reason": (
-                                                "independent_view_confirmation"
+                                                "same_engine_view_confirmation"
                                             ),
                                         }
                                     )
@@ -515,6 +823,16 @@ class WideBandFallbackReader:
                                 {region.id: region for region in evidence_regions}
                             )
         except (OSError, UnidentifiedImageError, ValueError) as error:
+            self._save_assessment(
+                page_number,
+                {
+                    **started,
+                    "status": "failed",
+                    "failure": {"code": "preprocess_failed", "message": str(error)},
+                    "nested_reader": nested_reader,
+                    "review_reasons": ["wide_band_preprocessing_failed"],
+                },
+            )
             raise ReaderError("preprocess_failed", str(error)) from error
 
         replaced_ids = {
@@ -526,8 +844,20 @@ class WideBandFallbackReader:
         replaced_bands = len(selected_groups)
         assessment = {
             "page_number": page_number,
+            "reader": self.name,
+            "ran": True,
             "status": "recovered" if replaced_bands else "uncertain",
             "selected_view": "fused" if replaced_bands else "baseline",
+            "baseline_reader": self.reader.name,
+            "fallback_reader": self.fallback_reader.name,
+            "fallback_reader_runs": fallback_reader_runs,
+            "fallback_candidates": fallback_candidates,
+            "confirmation_reader": (
+                self.confirmation_reader.name
+                if self.confirmation_reader is not None
+                else None
+            ),
+            "confirmation_reader_runs": confirmation_reader_runs,
             "qualifying_regions": qualifying_count,
             "band_count": len(groups),
             "replaced_bands": replaced_bands,
@@ -536,6 +866,20 @@ class WideBandFallbackReader:
                 bool(band.get("fallback_review"))
                 or bool(band.get("confirmation_review"))
                 for band in band_assessments
+            ),
+            "nested_reader": nested_reader,
+            "review_reasons": list(
+                dict.fromkeys(
+                    [
+                        *(["nested_reader_review"] if baseline_needs_review else []),
+                        *(
+                            str(band["reason"])
+                            for band in band_assessments
+                            if band.get("selected_view") == "baseline"
+                            and band.get("reason")
+                        ),
+                    ]
+                )
             ),
             "bands": band_assessments,
         }
@@ -592,6 +936,381 @@ class WideBandFallbackReader:
     def _save_assessment(self, page_number: int, value: dict[str, object]) -> None:
         with self._lock:
             self._assessments[page_number] = value
+
+
+def locate_document_frame(image_path: Path) -> BoundingBox | None:
+    """Locate one complete bright document page inside a screenshot."""
+    box, _ = _locate_document_frame(image_path)
+    return box
+
+
+def _locate_document_frame(image_path: Path) -> tuple[BoundingBox | None, bool]:
+    dark_frame = locate_dark_frame(image_path)
+    if dark_frame is not None:
+        return dark_frame, False
+    try:
+        with Image.open(image_path) as source:
+            width, height = source.size
+            if width < 80 or height < 80:
+                return None, False
+            grayscale = source.convert("L")
+            scale = min(1.0, MAX_LOCATOR_SIZE / max(width, height))
+            reduced = grayscale.resize(
+                (max(1, round(width * scale)), max(1, round(height * scale))),
+                Image.Resampling.BOX,
+            )
+    except (OSError, UnidentifiedImageError):
+        return None, False
+
+    small_width, small_height = reduced.size
+    pixels = list(reduced.getdata())
+    components = _bright_components(pixels, small_width, small_height)
+    candidates = [
+        component
+        for component in components
+        if _complete_page_candidate(component, pixels, small_width, small_height)
+    ]
+    if not candidates:
+        return None, False
+    selected = max(candidates, key=lambda item: item["area"])
+    if any(
+        candidate is not selected and _similar_page(candidate, selected)
+        for candidate in candidates
+    ):
+        return None, False
+
+    partial_page = any(
+        _partial_page_candidate(
+            component,
+            selected,
+            pixels,
+            small_width,
+            small_height,
+        )
+        for component in components
+        if component is not selected
+    )
+    scale_x = width / small_width
+    scale_y = height / small_height
+    box = BoundingBox(
+        left=max(0, floor(int(selected["left"]) * scale_x) - 1),
+        top=max(0, floor(int(selected["top"]) * scale_y) - 1),
+        right=min(width, ceil((int(selected["right"]) + 1) * scale_x) + 1),
+        bottom=min(height, ceil((int(selected["bottom"]) + 1) * scale_y) + 1),
+    )
+    return box, partial_page
+
+
+def _bright_components(
+    pixels: list[int],
+    width: int,
+    height: int,
+) -> list[dict[str, int]]:
+    bright = bytearray(value >= 230 for value in pixels)
+    visited = bytearray(width * height)
+    components: list[dict[str, int]] = []
+    for start, is_bright in enumerate(bright):
+        if not is_bright or visited[start]:
+            continue
+        visited[start] = 1
+        pending = deque([start])
+        left = right = start % width
+        top = bottom = start // width
+        count = 0
+        while pending:
+            index = pending.popleft()
+            x = index % width
+            y = index // width
+            left = min(left, x)
+            right = max(right, x)
+            top = min(top, y)
+            bottom = max(bottom, y)
+            count += 1
+            neighbors = []
+            if x:
+                neighbors.append(index - 1)
+            if x + 1 < width:
+                neighbors.append(index + 1)
+            if y:
+                neighbors.append(index - width)
+            if y + 1 < height:
+                neighbors.append(index + width)
+            for neighbor in neighbors:
+                if bright[neighbor] and not visited[neighbor]:
+                    visited[neighbor] = 1
+                    pending.append(neighbor)
+        box_area = (right - left + 1) * (bottom - top + 1)
+        components.append(
+            {
+                "left": left,
+                "top": top,
+                "right": right,
+                "bottom": bottom,
+                "pixels": count,
+                "area": box_area,
+            }
+        )
+    return components
+
+
+def _complete_page_candidate(
+    component: dict[str, int],
+    pixels: list[int],
+    width: int,
+    height: int,
+) -> bool:
+    component_width = component["right"] - component["left"] + 1
+    component_height = component["bottom"] - component["top"] + 1
+    margin_x = width * MIN_PAGE_MARGIN_RATIO
+    margin_y = height * MIN_PAGE_MARGIN_RATIO
+    return bool(
+        component["area"] >= width * height * MIN_PAGE_AREA_RATIO
+        and component_width >= width * MIN_PAGE_WIDTH_RATIO
+        and component_height >= height * MIN_PAGE_HEIGHT_RATIO
+        and component["pixels"] / component["area"] >= MIN_PAGE_FILL_RATIO
+        and component["left"] >= margin_x
+        and component["right"] <= width - margin_x
+        and component["top"] >= margin_y
+        and component["bottom"] <= height - margin_y
+        and _ring_contrast(component, pixels, width, height) >= MIN_PAGE_RING_CONTRAST
+    )
+
+
+def _partial_page_candidate(
+    component: dict[str, int],
+    selected: dict[str, int],
+    pixels: list[int],
+    width: int,
+    height: int,
+) -> bool:
+    component_width = component["right"] - component["left"] + 1
+    component_height = component["bottom"] - component["top"] + 1
+    selected_width = selected["right"] - selected["left"] + 1
+    horizontal_overlap = max(
+        0,
+        min(component["right"], selected["right"])
+        - max(component["left"], selected["left"])
+        + 1,
+    )
+    touches_edge = component["top"] <= 1 or component["bottom"] >= height - 2
+    return bool(
+        touches_edge
+        and component_height >= height * MIN_PARTIAL_PAGE_HEIGHT_RATIO
+        and 0.8 <= component_width / selected_width <= 1.2
+        and horizontal_overlap / min(component_width, selected_width) >= 0.8
+        and component["pixels"] / component["area"] >= MIN_PAGE_FILL_RATIO
+        and _ring_contrast(component, pixels, width, height) >= MIN_PAGE_RING_CONTRAST
+    )
+
+
+def _ring_contrast(
+    component: dict[str, int],
+    pixels: list[int],
+    width: int,
+    height: int,
+) -> float:
+    left = component["left"]
+    top = component["top"]
+    right = component["right"]
+    bottom = component["bottom"]
+    ring = []
+    if top:
+        ring.extend(pixels[(top - 1) * width + left : (top - 1) * width + right + 1])
+    if bottom + 1 < height:
+        ring.extend(
+            pixels[(bottom + 1) * width + left : (bottom + 1) * width + right + 1]
+        )
+    if left:
+        ring.extend(pixels[y * width + left - 1] for y in range(top, bottom + 1))
+    if right + 1 < width:
+        ring.extend(pixels[y * width + right + 1] for y in range(top, bottom + 1))
+    if not ring:
+        return 0.0
+    inside = [
+        pixels[y * width + x]
+        for y in range(top, bottom + 1)
+        for x in range(left, right + 1)
+    ]
+    return statistics.mean(inside) - statistics.mean(ring)
+
+
+def _similar_page(left: dict[str, int], right: dict[str, int]) -> bool:
+    left_width = left["right"] - left["left"] + 1
+    right_width = right["right"] - right["left"] + 1
+    left_height = left["bottom"] - left["top"] + 1
+    right_height = right["bottom"] - right["top"] + 1
+    return bool(
+        0.8 <= left_width / right_width <= 1.2
+        and 0.8 <= left_height / right_height <= 1.2
+    )
+
+
+@contextmanager
+def _cropped_page(
+    image_path: Path,
+    crop: BoundingBox,
+    prefix: str,
+) -> Iterator[Path]:
+    try:
+        with Image.open(image_path) as source:
+            with tempfile.TemporaryDirectory(prefix=prefix) as directory:
+                path = Path(directory) / "page.png"
+                source.crop((crop.left, crop.top, crop.right, crop.bottom)).save(
+                    path,
+                    format="PNG",
+                )
+                yield path
+    except (OSError, UnidentifiedImageError, ValueError) as error:
+        raise ReaderError("page_frame_failed", str(error)) from error
+
+
+@contextmanager
+def _reader_stage_view(
+    reader: LocalReader,
+    image_path: Path,
+    page_number: int,
+) -> Iterator[Path]:
+    stage_view = getattr(reader, "stage_view", None)
+    if callable(stage_view):
+        with stage_view(image_path, page_number) as path:
+            yield path
+        return
+    yield image_path
+
+
+def _assessment_box(value: object) -> BoundingBox | None:
+    if not isinstance(value, dict):
+        return None
+    keys = ("left", "top", "right", "bottom")
+    if not all(isinstance(value.get(key), int) for key in keys):
+        return None
+    return BoundingBox(*(int(value[key]) for key in keys))
+
+
+def _translate_page_region(region: TextRegion, crop: BoundingBox) -> TextRegion:
+    provenance = dict(region.text_provenance or {})
+    provenance["source_crop"] = asdict(crop)
+    return replace(
+        region,
+        bounding_box=_translate_page_box(region.bounding_box, crop),
+        text_provenance=provenance,
+        alternatives=list(region.alternatives),
+        structure=_translate_page_structure(region.structure, crop),
+    )
+
+
+def _translate_page_structure(value: Any, crop: BoundingBox) -> Any:
+    if isinstance(value, list):
+        return [_translate_page_structure(item, crop) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if set(value) == {"left", "top", "right", "bottom"} and all(
+        isinstance(value[key], int) and not isinstance(value[key], bool)
+        for key in value
+    ):
+        translated = _translate_page_box(BoundingBox(**value), crop)
+        return asdict(translated)
+    return {key: _translate_page_structure(item, crop) for key, item in value.items()}
+
+
+def _translate_page_box(box: BoundingBox, crop: BoundingBox) -> BoundingBox:
+    return BoundingBox(
+        left=box.left + crop.left,
+        top=box.top + crop.top,
+        right=box.right + crop.left,
+        bottom=box.bottom + crop.top,
+    )
+
+
+def _recover_outside_frame(
+    candidates: list[TextRegion],
+    canonical: list[TextRegion],
+    crop: BoundingBox,
+    page_number: int,
+    page_size: tuple[int, int],
+    reader_name: str,
+) -> tuple[list[TextRegion], dict[str, int]]:
+    recovered: list[TextRegion] = []
+    inside_frame = 0
+    invalid = 0
+    duplicates = 0
+    for candidate in candidates:
+        if not _valid_page_region(candidate, page_size):
+            invalid += 1
+            continue
+        if _boxes_intersect(candidate.bounding_box, crop):
+            inside_frame += 1
+            continue
+        if any(
+            _same_region(candidate, existing) for existing in [*canonical, *recovered]
+        ):
+            duplicates += 1
+            continue
+        provenance = dict(candidate.text_provenance or {})
+        provenance["page_frame_recovery"] = {
+            "method": "residual_full_original",
+            "source_region_id": candidate.id,
+            "source_reader": reader_name,
+            "isolated_frame": asdict(crop),
+        }
+        recovered.append(
+            replace(
+                candidate,
+                id=f"p{page_number}-frame-recovery-{len(recovered) + 1}",
+                text_provenance=provenance,
+                alternatives=list(candidate.alternatives),
+                structure=deepcopy(candidate.structure),
+            )
+        )
+    return recovered, {
+        "full_page_regions": len(candidates),
+        "inside_frame_regions": inside_frame,
+        "invalid_full_page_regions": invalid,
+        "duplicate_full_page_regions": duplicates,
+        "recovered_regions": len(recovered),
+        "preserved_canonical_regions": len(canonical),
+    }
+
+
+def _valid_page_region(region: TextRegion, page_size: tuple[int, int]) -> bool:
+    width, height = page_size
+    box = region.bounding_box
+    return bool(
+        region.resolution == "resolved"
+        and region.text.strip()
+        and 0 <= box.left < box.right <= width
+        and 0 <= box.top < box.bottom <= height
+    )
+
+
+def _boxes_intersect(first: BoundingBox, second: BoundingBox) -> bool:
+    return bool(
+        min(first.right, second.right) > max(first.left, second.left)
+        and min(first.bottom, second.bottom) > max(first.top, second.top)
+    )
+
+
+def _same_region(first: TextRegion, second: TextRegion) -> bool:
+    return bool(
+        " ".join(first.text.casefold().split())
+        == " ".join(second.text.casefold().split())
+        and _overlap_ratio(first.bounding_box, second.bounding_box) >= AGREEMENT_OVERLAP
+    )
+
+
+def _page_reading_order(regions: list[TextRegion]) -> list[TextRegion]:
+    ordered = sorted(
+        regions,
+        key=lambda region: (
+            region.bounding_box.top,
+            region.bounding_box.left,
+            region.reading_order,
+            region.id,
+        ),
+    )
+    return [
+        replace(region, reading_order=order) for order, region in enumerate(ordered, 1)
+    ]
 
 
 def locate_dark_frame(image_path: Path) -> BoundingBox | None:
@@ -1431,6 +2150,23 @@ def _attach_fallbacks(
 def _reader_needs_review(reader: LocalReader, page_number: int) -> bool:
     check = getattr(reader, "page_needs_review", None)
     return bool(callable(check) and check(page_number))
+
+
+def _reader_page_assessment(
+    reader: LocalReader,
+    page_number: int,
+) -> dict[str, object] | None:
+    coverage = getattr(reader, "coverage_assessment", None)
+    if not callable(coverage):
+        return None
+    assessment = coverage(page_number)
+    if not isinstance(assessment, dict):
+        return None
+    pages = assessment.get("pages")
+    if not isinstance(pages, list) or len(pages) < page_number:
+        return None
+    page = pages[page_number - 1]
+    return deepcopy(page) if isinstance(page, dict) else None
 
 
 def _band_token_counts(regions: list[TextRegion]) -> Counter[str]:
