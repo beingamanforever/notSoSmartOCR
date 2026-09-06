@@ -17,8 +17,10 @@ from .evidence_layout import refresh_layout_owners
 from .providers import ReaderError
 
 ABSTENTION_OUTPUTS = frozenset({"<no_handwriting>", "<unreadable>"})
-TROCR_MODEL_ID = "microsoft/trocr-base-handwritten"
-TROCR_MODEL_REVISION = "eaacaf452b06415df8f10bb6fad3a4c11e609406"
+# Large beats base on both held-out line splits: IAM 3.40% vs 4.72% CER over 2915
+# lines, RIMES 22.97% vs 27.35% over 778, for +24ms per crop and +900 MiB.
+TROCR_MODEL_ID = "microsoft/trocr-large-handwritten"
+TROCR_MODEL_REVISION = "e68501f437cd2587ae5d68ee457964cac824ddee"
 TROCR_MODEL_ORIGIN = "Microsoft"
 TROCR_MODEL_LICENSE = "MIT"
 TROCR_REQUIRED_FILES = ("config.json", "preprocessor_config.json")
@@ -68,6 +70,7 @@ class TrOCRHandwritingReader:
         max_new_tokens: int = 128,
         max_batch_items: int = 16,
         batch_size: int = 4,
+        binarize: bool = True,
         processor: object | None = None,
         model: object | None = None,
         torch_module: object | None = None,
@@ -92,6 +95,7 @@ class TrOCRHandwritingReader:
         self.max_new_tokens = max_new_tokens
         self.max_batch_items = max_batch_items
         self.batch_size = batch_size
+        self.binarize = binarize
         self._processor = processor
         self._model = model
         self._torch = torch_module
@@ -126,9 +130,12 @@ class TrOCRHandwritingReader:
             )
         with self._lock:
             processor, model, torch_module = self._initialize_components()
+            prepared = (
+                [_binarize(image) for image in images] if self.binarize else images
+            )
             texts: list[str] = []
-            for start in range(0, len(images), self.batch_size):
-                batch = images[start : start + self.batch_size]
+            for start in range(0, len(prepared), self.batch_size):
+                batch = prepared[start : start + self.batch_size]
                 try:
                     inputs = processor(images=list(batch), return_tensors="pt")
                     pixel_values = getattr(inputs, "pixel_values", None)
@@ -249,6 +256,29 @@ class TrOCRHandwritingReader:
         self._model = model
         self._torch = torch
         return processor, model, torch
+
+
+def _binarize(image: Image.Image) -> Image.Image:
+    """Adaptive threshold to flatten page shading before the square resize.
+
+    On by default. It cuts photographed-notebook prose CER from 17.3% to 13.1% on
+    three reviewed lines, and is within noise on clean scans: IAM (2915 lines) 3.35%
+    vs 3.40% CER, RIMES (778) 23.29% vs 22.97%. The one real cost is IAM exact-match
+    lines falling from 1553 to 1539.
+    """
+    import cv2
+    import numpy as np
+
+    gray = cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2GRAY)
+    mask = cv2.adaptiveThreshold(
+        gray,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        10,
+    )
+    return Image.fromarray(cv2.cvtColor(mask, cv2.COLOR_GRAY2RGB))
 
 
 def is_verified_trocr_model_provenance(value: Any) -> bool:

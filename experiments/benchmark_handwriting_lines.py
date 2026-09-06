@@ -88,6 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--batch-size", type=_positive_int, default=1)
     run.add_argument("--max-new-tokens", type=_positive_int, default=128)
     run.add_argument("--limit", type=_positive_int)
+    run.add_argument("--binarize", action="store_true")
     return parser
 
 
@@ -261,11 +262,14 @@ def _load_reader(args: argparse.Namespace) -> object:
     if args.reader == "trocr":
         from ocr_pipeline.handwriting import TrOCRHandwritingReader
 
+        overrides = {"model_name_or_path": args.model_path} if args.model_path else {}
+        overrides["binarize"] = bool(getattr(args, "binarize", False))
         reader = TrOCRHandwritingReader(
             device=args.device,
             max_new_tokens=args.max_new_tokens,
             max_batch_items=max(16, args.batch_size),
             batch_size=args.batch_size,
+            **overrides,
         )
         reader.check_health()
         return reader

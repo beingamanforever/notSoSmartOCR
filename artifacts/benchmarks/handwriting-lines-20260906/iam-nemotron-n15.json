@@ -1,0 +1,87 @@
+{
+  "status": "complete",
+  "dataset": {
+    "repository": "Teklia/IAM-line",
+    "revision": "fbdad97500ce54635c0d1ba306bf535cb40656cf",
+    "split": "test",
+    "expected_lines": 2915,
+    "language": "English",
+    "name": "iam",
+    "full_test_split": false
+  },
+  "reader": {
+    "name": "nemotron",
+    "provenance": {
+      "id": "unresolved",
+      "loaded_from": "/opt/dlami/nvme/aman/models/nemotron-ocr-v2/v2_multilingual",
+      "repository_remote": "https://huggingface.co/nvidia/nemotron-ocr-v2",
+      "repository_revision": "0e83e83f17943524b90afa6c0fd82ac2bc1a40ca",
+      "weight_revision": "unresolved",
+      "weights_tracked_and_clean": false,
+      "weight_revision_reason": "The code checkout revision does not identify every file under v2_multilingual.",
+      "identity_verified": false
+    },
+    "generation": null,
+    "model_path": "/opt/dlami/nvme/aman/models/nemotron-ocr-v2/v2_multilingual",
+    "adapter_path": null
+  },
+  "configuration": {
+    "batch_size": 1,
+    "task_mode": "direct_complete_text_line",
+    "reader_contract": {
+      "language": "multi",
+      "merge_level": "paragraph",
+      "device": "library_default_unexposed",
+      "decoding": "library_default_unexposed",
+      "max_new_tokens": "not_configurable_by_reader"
+    },
+    "preprocessing": "dataset_decoded_pixels_converted_to_rgb_png",
+    "model_input_dimensions": "recorded_per_row_or_explicitly_unexposed",
+    "output_boundary": "ocr_pipeline_reader_public_output",
+    "text_correction": false
+  },
+  "progress": {
+    "completed": 15,
+    "expected": 15
+  },
+  "latency": {
+    "model_load_ms": 3552.099,
+    "warmup": {
+      "sample_id": "iam-test-000000",
+      "status": "success",
+      "failure": null,
+      "latency_ms": 1648.54,
+      "sample_is_scored_in_benchmark": true
+    },
+    "benchmark_wall_ms": 1470.287,
+    "basis": "amortized_batch_wall_time_per_line",
+    "p50_ms": 97.265,
+    "p95_ms": 100.666,
+    "lines_per_second": 10.281
+  },
+  "metrics": {
+    "literal": {
+      "cer": 0.23253493,
+      "wer": 0.65198238,
+      "exact": 0,
+      "exact_rate": 0.0,
+      "reference_characters": 1002,
+      "reference_words": 227,
+      "character_edits": {
+        "insertions": 21,
+        "deletions": 95,
+        "substitutions": 117
+      },
+      "word_edits": {
+        "insertions": 0,
+        "deletions": 62,
+        "substitutions": 86
+      }
+    },
+    "failed_lines": 0,
+    "empty_predictions": 0,
+    "failures_remain_in_denominators": true
+  },
+  "peak_cuda_memory_mib": 1837.643,
+  "rows": "iam-nemotron-n15.rows.jsonl"
+}

@@ -591,7 +591,7 @@ def test_verified_gpu_app_wires_cached_trocr_for_field_candidate_rereading() -> 
             tatr_detection_model=Path("/models/detection.pth"),
             tatr_structure_model=Path("/models/structure.pth"),
             tesseract_executable=Path("/tools/tesseract"),
-            trocr_handwriting_model="microsoft/trocr-base-handwritten",
+            trocr_handwriting_model=TROCR_MODEL_ID,
             trocr_model_revision=TROCR_MODEL_REVISION,
             trocr_max_regions=3,
             trocr_max_new_tokens=64,
@@ -606,7 +606,7 @@ def test_verified_gpu_app_wires_cached_trocr_for_field_candidate_rereading() -> 
 
     assert reader_calls == [
         {
-            "model_name_or_path": "microsoft/trocr-base-handwritten",
+            "model_name_or_path": TROCR_MODEL_ID,
             "model_revision": TROCR_MODEL_REVISION,
             "device": "cuda",
             "max_new_tokens": 64,
