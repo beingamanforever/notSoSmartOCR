@@ -1030,6 +1030,66 @@ def test_handwriting_recovery_rejects_matching_text_outside_annotated_box(
     }
 
 
+def test_handwriting_recovery_expands_canonical_layout_block_evidence(
+    tmp_path: Path,
+) -> None:
+    annotations = tmp_path / "annotations"
+    outputs = tmp_path / "outputs"
+    _write(
+        annotations / "case.json",
+        _annotation(
+            "C07-D003-P001",
+            "Drug Jardiance",
+            handwriting=[
+                {
+                    "text": "Jardiance",
+                    "legibility": "legible",
+                    "bbox": [40, 40, 80, 60],
+                }
+            ],
+        ),
+    )
+    output = _output(
+        "C07-D003-P001.png",
+        "Drug Jardiance",
+        regions=[
+            {
+                "id": "field",
+                "kind": "layout_block",
+                "text": "Drug Jardiance",
+                "bounding_box": {"left": 0, "top": 0, "right": 100, "bottom": 80},
+                "structure": {
+                    "role": "layout_block",
+                    "block_type": "form_row",
+                    "child_evidence_ids": ["label", "value"],
+                },
+            },
+            {
+                "id": "label",
+                "kind": "text",
+                "text": "Drug",
+                "bounding_box": {"left": 0, "top": 40, "right": 30, "bottom": 60},
+            },
+            {
+                "id": "value",
+                "kind": "text",
+                "text": "Jardiance",
+                "bounding_box": {"left": 40, "top": 40, "right": 80, "bottom": 60},
+            },
+        ],
+    )
+    output["result"]["pages"][0]["text"]["evidence_ids"] = ["field"]
+    _write(outputs / "case.json", output)
+
+    handwriting = evaluate_challenge_set(annotations, outputs)["handwriting"]
+
+    assert handwriting["legible_exact_recovery"] == {
+        "eligible": 1,
+        "recovered": 1,
+        "rate": 1.0,
+    }
+
+
 def test_handwriting_bbox_metrics_use_optimal_one_to_one_assignment(
     tmp_path: Path,
 ) -> None:

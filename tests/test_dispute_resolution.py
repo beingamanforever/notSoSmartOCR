@@ -135,6 +135,8 @@ def test_two_eligible_models_resolve_many_region_and_table_conflicts_in_one_call
     assert [(item.text, item.provider) for item in result[0].alternatives] == [
         ("Alpha", "reader-a")
     ]
+    assert result[0].alternatives[0].decision_state == "superseded"
+    assert result[0].text_provenance["accepted_correction"]["provider"] == "reader-b"
     assert result[1].text == "Gamma"
     assert result[1].resolution == "unreadable"
     assert result[1].structure["dispute_resolution"]["decision"] == "review_required"
@@ -143,6 +145,8 @@ def test_two_eligible_models_resolve_many_region_and_table_conflicts_in_one_call
     assert cell["source"] == "reader-b"
     assert cell["resolution"] == "resolved"
     assert [item["text"] for item in cell["alternatives"]] == ["43"]
+    assert cell["alternatives"][0]["decision_state"] == "superseded"
+    assert cell["text_provenance"]["accepted_correction"]["provider"] == "reader-b"
     assert cell["dispute_resolution"]["primary"] == {
         "model": "local-primary",
         "provider": "local-runtime",
@@ -153,6 +157,69 @@ def test_two_eligible_models_resolve_many_region_and_table_conflicts_in_one_call
     }
     with Image.open(source) as unchanged:
         assert np.array_equal(np.asarray(unchanged), image)
+
+
+def test_selected_correction_preserves_history_without_permanent_conflict(
+    tmp_path: Path,
+) -> None:
+    source = _page(tmp_path)
+    region = _region("field", "Alpha", "conflicting", BoundingBox(5, 5, 50, 20))
+    region.text_provenance = {"method": "initial-reader"}
+    region.alternatives = [
+        TextAlternative(
+            "Old",
+            0.4,
+            "old-reader",
+            {"method": "old-reader"},
+            "rejected",
+        ),
+        TextAlternative(
+            "Beta",
+            0.8,
+            "correcting-reader",
+            {"method": "targeted-reread"},
+        ),
+        TextAlternative("Delta", 0.7, "other-reader"),
+    ]
+    decision = _decision(
+        "region:field",
+        "select",
+        "region:field:candidate:2",
+    )
+    primary = RecordingCall(_result([decision], model="local-primary"))
+    verifier = RecordingCall(_result([decision], model="local-verifier"))
+
+    document = process_document(
+        source,
+        FixedReader([region]),
+        stages=[
+            DisputeResolutionStage(
+                primary,
+                verifier,
+                eligible_local_models={"local-primary", "local-verifier"},
+            )
+        ],
+    )
+
+    selected = document.pages[0].regions[0]
+    assert "Old" not in primary.prompts[0]
+    assert selected.text == "Beta"
+    assert selected.provider == "correcting-reader"
+    assert selected.resolution == "resolved"
+    assert document.pages[0].route == "accept_local"
+    assert [(item.text, item.decision_state) for item in selected.alternatives] == [
+        ("Old", "rejected"),
+        ("Alpha", "superseded"),
+        ("Delta", "rejected"),
+    ]
+    assert selected.alternatives[1].text_provenance == {"method": "initial-reader"}
+    assert selected.text_provenance["method"] == "targeted-reread"
+    assert selected.text_provenance["accepted_correction"]["provider"] == (
+        "correcting-reader"
+    )
+    assert selected.text_provenance["accepted_correction"]["decision_state"] == (
+        "accepted"
+    )
 
 
 def test_table_cell_selection_swaps_complete_candidate_evidence_atomically(
@@ -206,11 +273,13 @@ def test_table_cell_selection_swaps_complete_candidate_evidence_atomically(
     ]
     assert selected["decision"] == "independent_dispute_agreement"
     assert selected["resolution"] == "resolved"
-    assert selected["text_provenance"] == {
-        "method": "challenger_cell_text",
-        "evidence_ids": ["challenger-48"],
-    }
-    assert selected["dispute_resolution"]["decision"] == ("selected_existing_candidate")
+    assert selected["text_provenance"]["method"] == "challenger_cell_text"
+    assert selected["text_provenance"]["evidence_ids"] == ["challenger-48"]
+    assert selected["text_provenance"]["accepted_correction"]["provider"] == "reader-b"
+    assert (
+        selected["text_provenance"]["accepted_correction"]["resolution"]["decision"]
+        == "selected_existing_candidate"
+    )
     assert selected["alternatives"] == [
         {
             "text": "43",
@@ -224,6 +293,7 @@ def test_table_cell_selection_swaps_complete_candidate_evidence_atomically(
             "supporters": [{"provider": "reader-a", "evidence_ids": ["primary-43"]}],
             "decision": "strong_disagreement",
             "resolution": "conflicting",
+            "decision_state": "superseded",
         }
     ]
 

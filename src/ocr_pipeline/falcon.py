@@ -106,8 +106,8 @@ class FalconOCRReader:
             raise ValueError("Falcon-OCR device_map must select CUDA")
         if max_new_tokens <= 0 or max_new_tokens > 3072:
             raise ValueError("Falcon-OCR max_new_tokens must be from 1 to 3072")
-        if temperature < 0:
-            raise ValueError("Falcon-OCR temperature must not be negative")
+        if temperature < 0 or not math.isfinite(temperature):
+            raise ValueError("Falcon-OCR temperature must not be negative or infinite")
         if max_dimension <= 0 or max_dimension % FALCON_SPATIAL_PATCH_SIZE != 0:
             raise ValueError(
                 "Falcon-OCR max_dimension must be a positive multiple of 16"
@@ -131,13 +131,14 @@ class FalconOCRReader:
     @property
     def provenance(self) -> dict[str, Any]:
         official_model = self.model_name_or_path == FALCON_MODEL_ID
+        verified_identity = official_model and self.local_model_path is None
         return {
             "id": FALCON_MODEL_ID if official_model else None,
             "loaded_from": self.local_model_path or self.model_name_or_path,
-            "revision": self.model_revision if official_model else "unverified",
-            "origin": FALCON_MODEL_ORIGIN if official_model else "unverified",
-            "license": FALCON_MODEL_LICENSE if official_model else "unverified",
-            "identity_verified": official_model,
+            "revision": self.model_revision if verified_identity else "unverified",
+            "origin": FALCON_MODEL_ORIGIN if verified_identity else "unverified",
+            "license": FALCON_MODEL_LICENSE if verified_identity else "unverified",
+            "identity_verified": verified_identity,
             "local_files_only": True,
             "inference_repository_audit_reference": {
                 "url": FALCON_INFERENCE_REPOSITORY,
@@ -260,6 +261,11 @@ class FalconOCRReader:
             texts.append(text)
         return texts
 
+    def check_health(self) -> None:
+        with self._lock:
+            if self._model is None:
+                self._initialize_model()
+
     def _initialize_model(self) -> object:
         try:
             import torch
@@ -335,6 +341,30 @@ class FalconOCRServiceReader:
     @property
     def generation(self) -> dict[str, object]:
         return {"category": self.category, **self._generation_config}
+
+    def check_health(self) -> None:
+        request = Request(f"{self.service_url}/health", method="GET")
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                body = response.read(FALCON_SERVICE_MAX_RESPONSE_BYTES + 1)
+            if len(body) > FALCON_SERVICE_MAX_RESPONSE_BYTES:
+                raise ValueError("service response exceeded its limit")
+            result = json.loads(body)
+            if (
+                not isinstance(result, dict)
+                or set(result) != {"generation_config", "provenance", "status"}
+                or result["status"] != "ready"
+            ):
+                raise ValueError("service health did not match its contract")
+            self._record_service_metadata(
+                result["provenance"],
+                result["generation_config"],
+            )
+        except (HTTPError, URLError, OSError, ValueError) as error:
+            raise ReaderError(
+                "falcon_service_failed",
+                "The local Falcon-OCR service is not ready",
+            ) from error
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
         try:
@@ -420,18 +450,25 @@ class FalconOCRServiceReader:
                 or any(_is_exact_repetition_loop(text) for text in texts)
             ):
                 raise ValueError("service returned invalid text")
-            if not _valid_service_provenance(provenance):
-                raise ValueError("service model provenance was invalid")
-            if not isinstance(generation_config, dict):
-                raise ValueError("service generation config was invalid")
+            self._record_service_metadata(provenance, generation_config)
         except (HTTPError, URLError, OSError, ValueError) as error:
             raise ReaderError(
                 "falcon_service_failed",
                 "The local Falcon-OCR service did not return a valid result",
             ) from error
+        return texts
+
+    def _record_service_metadata(
+        self,
+        provenance: object,
+        generation_config: object,
+    ) -> None:
+        if not _valid_service_provenance(provenance):
+            raise ValueError("service model provenance was invalid")
+        if not _valid_service_generation_config(generation_config):
+            raise ValueError("service generation config was invalid")
         self._provenance = {**provenance, "source": "loopback_service"}
         self._generation_config = dict(generation_config)
-        return texts
 
 
 def _is_exact_repetition_loop(text: str) -> bool:
@@ -502,14 +539,34 @@ def _encode_png(image: Image.Image) -> str:
 
 
 def _valid_service_provenance(value: Any) -> bool:
-    if not isinstance(value, dict) or value.get("local_files_only") is not True:
-        return False
-    loaded_from = value.get("loaded_from")
-    if not isinstance(loaded_from, str) or not loaded_from:
-        return False
-    if value.get("identity_verified") is not True:
-        return value.get("id") is None
     return is_verified_falcon_model_provenance(value)
+
+
+def _valid_service_generation_config(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "max_new_tokens",
+        "temperature",
+        "max_dimension",
+        "compile",
+    }:
+        return False
+    max_new_tokens = value["max_new_tokens"]
+    temperature = value["temperature"]
+    max_dimension = value["max_dimension"]
+    if not isinstance(max_new_tokens, int) or isinstance(max_new_tokens, bool):
+        return False
+    if not isinstance(temperature, (int, float)) or isinstance(temperature, bool):
+        return False
+    if not isinstance(max_dimension, int) or isinstance(max_dimension, bool):
+        return False
+    return (
+        0 < max_new_tokens <= 3072
+        and temperature >= 0
+        and math.isfinite(temperature)
+        and max_dimension > 0
+        and max_dimension % FALCON_SPATIAL_PATCH_SIZE == 0
+        and isinstance(value["compile"], bool)
+    )
 
 
 def is_verified_falcon_model_provenance(value: Any) -> bool:

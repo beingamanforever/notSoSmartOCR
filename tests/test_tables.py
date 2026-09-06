@@ -92,7 +92,9 @@ def test_table_stage_builds_markdown_and_preserves_nested_evidence(
     assert regions[2].structure is None
 
 
-def test_agreed_challengers_replace_low_confidence_primary(tmp_path: Path) -> None:
+def test_agreed_uncalibrated_challengers_do_not_replace_primary(
+    tmp_path: Path,
+) -> None:
     image_path = _image(tmp_path)
     primary = [_region("value", "4Z", 1, (55, 10, 90, 30), 0.55)]
     stage = TatrTableStage(
@@ -113,25 +115,13 @@ def test_agreed_challengers_replace_low_confidence_primary(tmp_path: Path) -> No
 
     table = next(region for region in output if region.kind == "table")
     cell = table.structure["cells"][0]
-    assert cell["text"] == "42"
-    assert cell["source"] == "sauvola"
-    assert cell["decision"] == "low_primary_confidence"
-    assert cell["resolution"] == "resolved"
-    assert cell["alternatives"][0]["text"] == "4Z"
-    assert cell["evidence_ids"] == [
-        "p1-tables-tesseract-raw-t1-source-1",
-        "p1-tables-sauvola-t1-source-1",
-    ]
-    assert cell["supporters"] == [
-        {
-            "provider": "tesseract_raw",
-            "evidence_ids": ["p1-tables-tesseract-raw-t1-source-1"],
-        },
-        {
-            "provider": "sauvola",
-            "evidence_ids": ["p1-tables-sauvola-t1-source-1"],
-        },
-    ]
+    assert cell["text"] == "4Z"
+    assert cell["source"] == "base"
+    assert cell["decision"] == "strong_disagreement"
+    assert cell["resolution"] == "conflicting"
+    assert cell["alternatives"][0]["text"] == "42"
+    assert cell["evidence_ids"] == ["value"]
+    assert cell["supporters"] == [{"provider": "base", "evidence_ids": ["value"]}]
     sources = [
         region
         for region in output
@@ -142,6 +132,472 @@ def test_agreed_challengers_replace_low_confidence_primary(tmp_path: Path) -> No
         "p1-tables-tesseract-raw-t1-source-1",
         "p1-tables-sauvola-t1-source-1",
     }
+
+
+def test_selective_cell_reread_resolves_risky_numeric_cell(tmp_path: Path) -> None:
+    image_path = _image(tmp_path)
+    cell_reader = FixedReader([_region("cell", "$1,805", 1, (12, 12, 120, 60), 0.81)])
+    stage = TatrTableStage(
+        OneCellExtractor(),
+        challengers=[
+            TableChallenger(
+                "raw",
+                FixedReader([_region("raw", "1805.", 1, (10, 10, 45, 30), 0.5)]),
+            ),
+            TableChallenger("cell", cell_reader, scope="cell"),
+        ],
+    )
+
+    output = stage.apply(
+        image_path,
+        1,
+        [_region("primary", "$1.05", 1, (55, 10, 90, 30), 0.82)],
+    )
+
+    table = next(region for region in output if region.kind == "table")
+    cell = table.structure["cells"][0]
+    assert cell["text"] == "$1,805"
+    assert cell["source"] == "cell"
+    assert cell["decision"] == "cell_reread"
+    assert cell["resolution"] == "resolved"
+    assert cell_reader.image_sizes == [(135, 105)]
+    assert cell["evidence_ids"] == [
+        "p1-tables-cell-t1-c1-source-1",
+        "p1-tables-raw-t1-source-1",
+    ]
+
+
+def test_agreed_standard_numeric_readers_skip_cell_reread(tmp_path: Path) -> None:
+    image_path = _image(tmp_path)
+    with Image.open(image_path) as source:
+        image = source.copy()
+    ImageDraw.Draw(image).text((55, 10), "1805", fill="black")
+    image.save(image_path)
+    image.close()
+    cell_reader = FixedReader([_region("cell", "1,805", 1, (1, 1, 20, 10), 0.9)])
+    stage = TatrTableStage(
+        OneCellExtractor(),
+        challengers=[
+            TableChallenger(
+                "raw",
+                FixedReader([_region("raw", "$1,805", 1, (10, 10, 45, 30), 0.93)]),
+            ),
+            TableChallenger(
+                "enhanced",
+                FixedReader(
+                    [_region("enhanced", "$ 1,805", 1, (10, 10, 45, 30), 0.94)]
+                ),
+            ),
+            TableChallenger("cell", cell_reader, scope="cell"),
+        ],
+    )
+
+    output = stage.apply(image_path, 1, [])
+
+    cell = next(region for region in output if region.kind == "table").structure[
+        "cells"
+    ][0]
+    assert cell_reader.image_sizes == []
+    assert cell["text"].replace(" ", "") == "$1,805"
+    assert cell["resolution"] == "resolved"
+    assert [supporter["provider"] for supporter in cell["supporters"]] == [
+        "raw",
+        "enhanced",
+    ]
+
+
+def test_conflicting_primary_keeps_cell_reread_despite_challenger_agreement() -> None:
+    primary = table_module._candidate(
+        [_region("primary", "$1.05", 1, (10, 10, 40, 20), 0.82)],
+        "primary",
+    )
+    challengers = [
+        table_module._candidate(
+            [_region("raw", "$1,805", 1, (10, 10, 40, 20), 0.93)],
+            "raw",
+        ),
+        table_module._candidate(
+            [_region("enhanced", "$ 1,805", 1, (10, 10, 40, 20), 0.94)],
+            "enhanced",
+        ),
+    ]
+
+    assert table_module._needs_cell_reread(
+        primary,
+        challengers,
+        0.9,
+        [],
+    )
+
+
+def test_selective_cell_rereads_have_a_page_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(table_module, "MAX_CELL_REREADS_PER_PAGE", 2)
+    monkeypatch.setattr(table_module, "_needs_cell_reread", lambda *args: True)
+    image_path = _image(tmp_path)
+    extractor = GridExtractor(2, 3, BoundingBox(10, 10, 90, 70))
+    cells = extractor.extract(image_path, [])[0].cells
+    reader = FixedReader([_region("cell", "42", 1, (1, 1, 20, 10), 0.8)])
+    primary = [
+        _region(
+            f"primary-{index}",
+            "42",
+            index,
+            (
+                cell.bounding_box.left + 2,
+                cell.bounding_box.top + 2,
+                cell.bounding_box.right - 2,
+                cell.bounding_box.bottom - 2,
+            ),
+            0.4,
+        )
+        for index, cell in enumerate(cells, start=1)
+    ]
+
+    TatrTableStage(
+        extractor,
+        challengers=[TableChallenger("cell", reader, scope="cell")],
+    ).apply(image_path, 1, primary)
+
+    assert len(reader.image_sizes) == 2
+
+
+def test_cell_reread_routing_preserves_supported_decimal_style() -> None:
+    primary = table_module._candidate(
+        [_region("primary", "53.8", 1, (10, 10, 40, 20), 0.886)],
+        "primary",
+    )
+    correlated = table_module._candidate(
+        [_region("raw", "538", 1, (10, 10, 40, 20), 0.91)],
+        "raw",
+    )
+    missing_decimal = table_module._candidate(
+        [_region("missing", "5788", 1, (10, 10, 40, 20), 0.83)],
+        "primary",
+    )
+    row_peers = [
+        table_module._candidate(
+            [_region("left", "19.1", 1, (10, 10, 40, 20), 0.9)],
+            "primary",
+        ),
+        table_module._candidate(
+            [_region("right", "57.8", 1, (10, 10, 40, 20), 0.9)],
+            "primary",
+        ),
+    ]
+
+    assert not table_module._needs_cell_reread(
+        primary,
+        [correlated],
+        0.88,
+        row_peers,
+    )
+    assert table_module._needs_cell_reread(
+        missing_decimal,
+        [],
+        0.88,
+        row_peers,
+    )
+
+
+def test_cell_reread_keeps_primary_that_matches_numeric_row_style() -> None:
+    primary = table_module._candidate(
+        [_region("primary", "8.6%", 1, (10, 10, 40, 20), 0.92)],
+        "primary",
+    )
+    reread_region = _region("cell", "86%", 1, (10, 10, 40, 20), 0.71)
+    reread_region.text_provenance = {"challenger_scope": "cell"}
+    reread = table_module._candidate([reread_region], "cell")
+    row_peers = [
+        table_module._candidate(
+            [_region("left", "8.2%", 1, (10, 10, 40, 20), 0.9)],
+            "primary",
+        ),
+        table_module._candidate(
+            [_region("right", "9.3%", 1, (10, 10, 40, 20), 0.9)],
+            "primary",
+        ),
+    ]
+
+    resolved = table_module._resolve_cell(primary, [reread], 0.88, row_peers)
+
+    assert resolved["selected"].text == "8.6%"
+    assert resolved["decision"] == "cell_disagreement"
+    assert resolved["resolution"] == "conflicting"
+
+
+def test_formatting_score_cannot_replace_different_uncorroborated_value() -> None:
+    primary = table_module._candidate(
+        [_region("primary", "$1128", 1, (10, 10, 40, 20), 0.99)],
+        "primary",
+    )
+    reread_region = _region("cell", "$1,127", 1, (10, 10, 40, 20), 0.51)
+    reread_region.text_provenance = {"challenger_scope": "cell"}
+    reread = table_module._candidate([reread_region], "cell")
+    row_peers = [
+        table_module._candidate(
+            [_region("left", "$1,064", 1, (10, 10, 40, 20), 0.9)],
+            "primary",
+        ),
+        table_module._candidate(
+            [_region("right", "$1,805", 1, (10, 10, 40, 20), 0.9)],
+            "primary",
+        ),
+    ]
+
+    resolved = table_module._resolve_cell(primary, [reread], 0.88, row_peers)
+
+    assert resolved["selected"].text == "$1128"
+    assert resolved["decision"] == "cell_disagreement"
+    assert resolved["resolution"] == "conflicting"
+
+
+def test_cell_reread_uses_only_observed_numeric_fragment() -> None:
+    primary = table_module._candidate([], "primary")
+    reread_region = _region("cell", "C #1.", 1, (10, 10, 40, 20), 0.9)
+    reread_region.text_provenance = {"challenger_scope": "cell"}
+    reread_region.provider = "cell-reader"
+    reread = table_module._candidate([reread_region], "cell")
+    confirmation_region = _region("raw", "#1", 1, (10, 10, 40, 20), 0.92)
+    confirmation_region.provider = "independent-reader"
+    confirmation = table_module._candidate([confirmation_region], "raw")
+    row_peers = [
+        table_module._candidate(
+            [_region("left", "#8", 1, (10, 10, 40, 20), 0.9)],
+            "primary",
+        ),
+        table_module._candidate(
+            [_region("right", "#1", 1, (10, 10, 40, 20), 0.9)],
+            "primary",
+        ),
+    ]
+
+    resolved = table_module._resolve_cell(
+        primary,
+        [reread, confirmation],
+        0.88,
+        row_peers,
+    )
+
+    assert resolved["selected"].text == "#1"
+    assert resolved["selected"].evidence_ids == ("cell", "raw")
+    assert resolved["decision"] == "cell_reread"
+    assert resolved["resolution"] == "resolved"
+
+
+def test_cell_reread_drops_only_trailing_numeric_noise() -> None:
+    reread_region = _region("cell", "#1,", 1, (10, 10, 40, 20), 0.9)
+    reread_region.text_provenance = {"challenger_scope": "cell"}
+    reread_region.provider = "cell-reader"
+    reread = table_module._candidate([reread_region], "cell")
+    confirmation_region = _region("raw", "#1", 1, (10, 10, 40, 20), 0.92)
+    confirmation_region.provider = "independent-reader"
+    confirmation = table_module._candidate([confirmation_region], "raw")
+
+    resolved = table_module._resolve_cell(
+        table_module._candidate([], "primary"),
+        [reread, confirmation],
+        0.88,
+    )
+
+    assert resolved["selected"].text == "#1"
+    assert resolved["selected"].evidence_ids == ("cell", "raw")
+
+
+def test_blank_cell_rejects_lone_low_confidence_numeric_reread() -> None:
+    reread_region = _region("cell", "42", 1, (10, 10, 40, 20), 0.64)
+    reread_region.text_provenance = {"challenger_scope": "cell"}
+
+    resolved = table_module._resolve_cell(
+        table_module._candidate([], "primary"),
+        [table_module._candidate([reread_region], "cell")],
+        0.88,
+    )
+
+    assert resolved["selected"].text == ""
+    assert resolved["decision"] == "no_cell_evidence"
+    assert resolved["resolution"] == "unreadable"
+    assert [candidate.text for candidate in resolved["alternatives"]] == ["42"]
+
+
+def test_visible_ink_ignores_cell_borders_but_keeps_interior_glyphs() -> None:
+    border_only = Image.new("L", (50, 30), "white")
+    ImageDraw.Draw(border_only).rectangle((0, 0, 49, 29), outline="black", width=2)
+    with_glyph = border_only.copy()
+    ImageDraw.Draw(with_glyph).rectangle((20, 10, 21, 11), fill="black")
+
+    assert not table_module._has_visible_ink(border_only)
+    assert table_module._has_visible_ink(with_glyph)
+
+
+@pytest.mark.parametrize(("interior_mark", "expected_calls"), [(False, 0), (True, 1)])
+def test_cell_borders_do_not_trigger_blank_rereads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    interior_mark: bool,
+    expected_calls: int,
+) -> None:
+    monkeypatch.setattr(table_module, "_needs_cell_reread", lambda *args: True)
+    image_path = _image(tmp_path)
+    with Image.open(image_path) as source:
+        image = source.copy()
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((50, 5, 95, 40), outline="black", width=2)
+    if interior_mark:
+        draw.rectangle((70, 20, 71, 21), fill="black")
+    image.save(image_path)
+    image.close()
+    reader = FixedReader([_region("cell", "1", 1, (1, 1, 5, 5), 0.9)])
+
+    TatrTableStage(
+        OneCellExtractor(),
+        challengers=[TableChallenger("cell", reader, scope="cell")],
+    ).apply(image_path, 1, [])
+
+    assert len(reader.image_sizes) == expected_calls
+
+
+def test_agreed_text_views_repair_similar_row_label() -> None:
+    primary = table_module._candidate(
+        [
+            _region(
+                "primary",
+                "Business Banking primmar market share*",
+                1,
+                (10, 10, 80, 20),
+                0.86,
+            )
+        ],
+        "primary",
+    )
+    raw = table_module._candidate(
+        [
+            _region(
+                "raw",
+                "Business Banking primary market share*",
+                1,
+                (10, 10, 80, 20),
+                0.91,
+            )
+        ],
+        "raw",
+    )
+    enhanced = table_module._candidate(
+        [
+            _region(
+                "enhanced",
+                "Business Banking primary market share*",
+                1,
+                (10, 10, 80, 20),
+                0.91,
+            )
+        ],
+        "enhanced",
+    )
+
+    resolved = table_module._resolve_cell(primary, [raw, enhanced], 0.88)
+
+    assert resolved["selected"].text == "Business Banking primary market share*"
+    assert resolved["decision"] == "supported_text_repair"
+    assert resolved["selected"].evidence_ids == ("raw", "enhanced")
+
+
+def test_cell_reread_repairs_only_observed_repeated_label_unit() -> None:
+    primary = table_module._candidate(
+        [
+            _region(
+                "primary",
+                "Credit card loans ($8, EOP)",
+                1,
+                (10, 10, 80, 20),
+                0.92,
+            )
+        ],
+        "primary",
+    )
+    reread_region = _region(
+        "cell",
+        "Credit caad loans ($B, EOP)",
+        1,
+        (10, 10, 80, 20),
+        0.85,
+    )
+    reread_region.text_provenance = {"challenger_scope": "cell"}
+    reread = table_module._candidate([reread_region], "cell")
+    label_peers = [
+        table_module._candidate(
+            [
+                _region(
+                    "left",
+                    "Credit card sales ($B)",
+                    1,
+                    (10, 10, 80, 20),
+                    0.9,
+                )
+            ],
+            "primary",
+        ),
+        table_module._candidate(
+            [
+                _region(
+                    "right",
+                    "Debit card sales ($B)",
+                    1,
+                    (10, 10, 80, 20),
+                    0.9,
+                )
+            ],
+            "primary",
+        ),
+    ]
+    label_unit = table_module._expected_label_unit(label_peers)
+
+    assert label_unit == "$b"
+    assert table_module._needs_cell_reread(
+        primary,
+        [],
+        0.88,
+        [],
+        False,
+        label_unit,
+    )
+    resolved = table_module._resolve_cell(
+        primary,
+        [reread],
+        0.88,
+        label_unit=label_unit,
+    )
+    assert resolved["selected"].text == "Credit card loans ($B, EOP)"
+    assert resolved["selected"].evidence_ids == ("primary", "cell")
+    assert resolved["decision"] == "supported_unit_repair"
+
+
+def test_cell_reread_view_follows_observed_peer_punctuation() -> None:
+    decimal_peers = [
+        table_module._candidate(
+            [_region("left", "$2.3", 1, (10, 10, 40, 20), 0.9)],
+            "primary",
+        ),
+        table_module._candidate(
+            [_region("right", "$5.0", 1, (10, 10, 40, 20), 0.9)],
+            "primary",
+        ),
+    ]
+    grouped_peers = [
+        table_module._candidate(
+            [_region("left", "3,090", 1, (10, 10, 40, 20), 0.9)],
+            "primary",
+        ),
+        table_module._candidate(
+            [_region("right", "5,456", 1, (10, 10, 40, 20), 0.9)],
+            "primary",
+        ),
+    ]
+
+    assert table_module._cell_reread_view(decimal_peers) == (0, 6)
+    assert table_module._cell_reread_view(grouped_peers) == (2, 3)
 
 
 def test_parallel_challengers_preserve_ordered_table_evidence(tmp_path: Path) -> None:
@@ -173,12 +629,8 @@ def test_parallel_challengers_preserve_ordered_table_evidence(tmp_path: Path) ->
 
     table = next(region for region in output if region.kind == "table")
     cell = table.structure["cells"][0]
-    assert cell["text"] == "42"
-    assert cell["source"] == "enhanced"
-    assert [item["provider"] for item in cell["supporters"]] == [
-        "raw",
-        "enhanced",
-    ]
+    assert cell["text"] == "4Z"
+    assert cell["source"] == "base"
 
 
 def test_parallel_challengers_reuse_one_crop_per_table(
@@ -227,13 +679,10 @@ def test_parallel_challengers_reuse_one_crop_per_table(
     assert raw.image_sizes == [(50, 45), (50, 45)]
     assert enhanced.image_sizes == [(50, 45), (50, 45)]
     assert prepare_calls == [(50, 45), (50, 45)]
-    assert [
-        [
-            supporter["provider"]
-            for supporter in table.structure["cells"][0]["supporters"]
-        ]
-        for table in tables
-    ] == [["raw", "enhanced"], ["raw", "enhanced"]]
+    assert [table.structure["cells"][0]["supporters"] for table in tables] == [
+        [{"provider": "base", "evidence_ids": ["left"]}],
+        [{"provider": "base", "evidence_ids": ["right"]}],
+    ]
 
 
 def test_strong_disagreement_is_explicit_and_routes_review(tmp_path: Path) -> None:
@@ -628,6 +1077,153 @@ def test_invalid_broad_detection_is_reparsed_as_horizontal_table_panels(
         prediction.model["proposal"]["parent_topology_conflicts"] == 1
         for prediction in predictions
     )
+
+
+def test_dense_numeric_panels_reparse_the_table_core_before_cell_assignment(
+    tmp_path: Path,
+) -> None:
+    image = Image.new("RGB", (1133, 1540), "white")
+    draw = ImageDraw.Draw(image)
+    for y in (145, 625, 1131, 1346):
+        draw.line((70, y, 1028, y), fill="black", width=2)
+    image_path = tmp_path / "financial-table.png"
+    image.save(image_path)
+
+    regions = [_region("title", "Client Franchises", 1, (70, 116, 422, 134), 0.98)]
+    order = 2
+    for panel, top in enumerate((145, 625, 1131), start=1):
+        rows = (
+            ("", "2005", "2014", "2023", "2024"),
+            ("Average deposits ($B)", "$187", "$487", "$1,127", "$1,064"),
+            ("Deposits market share", "4.5%", "7.9%", "11.4%", "11.3%"),
+            (
+                "# of top 50 markets where we are #1 (top 3)",
+                "6 (12)",
+                "7 (22)",
+                "12 (25)",
+                "14 (25)",
+            ),
+        )
+        regions.append(
+            _region(
+                f"category-{panel}",
+                f"Business segment {panel}",
+                order,
+                (90, top + 70, 175, top + 100),
+                0.96,
+            )
+        )
+        order += 1
+        for row, values in enumerate(rows):
+            y = top + 10 + row * 30
+            for column, (left, right) in enumerate(
+                ((198, 418), (440, 471), (510, 542), (580, 613), (650, 683))
+            ):
+                if not values[column]:
+                    continue
+                if panel == 1 and row == 1 and column == 1:
+                    continue
+                if row == 3 and column == 0:
+                    regions.extend(
+                        [
+                            _region(
+                                f"panel-{panel}-cell-{row}-{column}-line-1",
+                                "# of top 50 markets where",
+                                order,
+                                (215, y - 18, 366, y - 4),
+                                0.95,
+                            ),
+                            _region(
+                                f"panel-{panel}-cell-{row}-{column}-line-2",
+                                "we are #1 (top 3)",
+                                order + 1,
+                                (215, y, 330, y + 14),
+                                0.95,
+                            ),
+                        ]
+                    )
+                    order += 2
+                    continue
+                regions.append(
+                    _region(
+                        f"panel-{panel}-cell-{row}-{column}",
+                        values[column],
+                        order,
+                        (left, y, right, y + 14),
+                        0.95,
+                    )
+                )
+                order += 1
+        regions.append(
+            _region(
+                f"narrative-{panel}",
+                "Independent customer narrative",
+                order,
+                (735, top + 40, 1000, top + 55),
+                0.97,
+            )
+        )
+        order += 1
+
+    extractor = TatrTableExtractor(
+        tmp_path,
+        tmp_path / "detection.pth",
+        tmp_path / "structure.pth",
+        device="cpu",
+        crop_padding=0,
+        enable_ruled_table_proposals=True,
+        pipeline=DenseFinancialPanelPipeline(),
+    )
+
+    result = process_document(
+        image_path,
+        FixedReader(regions),
+        stages=[TatrTableStage(extractor)],
+    )
+
+    tables = [region for region in result.pages[0].regions if region.kind == "table"]
+    assert [
+        (table.structure["row_count"], table.structure["column_count"])
+        for table in tables
+    ] == [
+        (4, 5),
+        (4, 5),
+        (4, 5),
+    ]
+    assert tables[0].text.splitlines() == [
+        "|  | 2005 | 2014 | 2023 | 2024 |",
+        "| --- | --- | --- | --- | --- |",
+        "| Average deposits ($B) |  | $487 | $1,127 | $1,064 |",
+        "| Deposits market share | 4.5% | 7.9% | 11.4% | 11.3% |",
+        "| # of top 50 markets where we are #1 (top 3) | 6 (12) | 7 (22) | 12 (25) | 14 (25) |",
+    ]
+    assert tables[0].structure["model"]["proposal"]["column_core"] == {
+        "source": "numeric_column_core",
+        "parent_column_count": 7,
+        "column_count": 5,
+        "row_alignment": {
+            "source": "ocr_aligned_numeric_bands",
+            "model_row_count": 5,
+            "aligned_band_count": 4,
+            "row_count": 4,
+        },
+    }
+    missing = next(
+        cell
+        for cell in tables[0].structure["cells"]
+        if cell["row_nums"] == [1] and cell["column_nums"] == [1]
+    )
+    assert missing["text"] == ""
+    assert missing["decision"] == "no_cell_evidence"
+    assert missing["evidence_ids"] == []
+    table_source_ids = {
+        region.id
+        for region in result.pages[0].regions
+        if (region.structure or {}).get("role") == "table_source"
+    }
+    assert "panel-1-cell-1-2" in table_source_ids
+    assert "category-1" not in table_source_ids
+    assert "narrative-1" not in table_source_ids
 
 
 def test_horizontal_panel_recovery_rolls_back_when_a_child_is_invalid(
@@ -1761,6 +2357,98 @@ class PanelTatrPipeline(RuledTatrPipeline):
                 ]
             ]
         }
+
+
+class DenseFinancialPanelPipeline:
+    det_class_thresholds = {"table": 0.5, "table rotated": 0.5}
+
+    def detect(
+        self,
+        image: Image.Image,
+        **options: object,
+    ) -> dict[str, object]:
+        return {
+            "objects": [
+                {
+                    "label": "table",
+                    "score": 0.98,
+                    "bbox": [81, 145, 1018, 1374],
+                }
+            ],
+            "crops": [
+                {
+                    "image": image.crop((81, 145, 1018, 1374)),
+                    "tokens": options["tokens"],
+                }
+            ],
+        }
+
+    def recognize(
+        self,
+        image: Image.Image,
+        tokens: list[dict[str, object]],
+        **options: object,
+    ) -> dict[str, object]:
+        if image.height > 600:
+            return {
+                "cells": [
+                    [
+                        {
+                            "bbox": [0, 0, image.width, image.height],
+                            "row_nums": [0],
+                            "column_nums": [0],
+                        },
+                        {
+                            "bbox": [0, 0, image.width, image.height],
+                            "row_nums": [1],
+                            "column_nums": [1],
+                        },
+                    ]
+                ]
+            }
+        if image.width > 800:
+            column_edges = (0, 110, 358, 390, 462, 532, 602, image.width)
+            row_edges = (0, 35, 65, image.height)
+        else:
+            column_edges = (0, 248, 280, 352, 422, image.width)
+            row_edges = (0, 25, 55, 85, 100, image.height)
+
+        cells = []
+        for row, (top, bottom) in enumerate(zip(row_edges, row_edges[1:])):
+            if image.width <= 800 and row == 3:
+                spans = [
+                    token
+                    for token in tokens
+                    if top <= (token["bbox"][1] + token["bbox"][3]) / 2 <= bottom
+                    and (token["bbox"][0] + token["bbox"][2]) / 2 < column_edges[1]
+                ]
+                cells.append(
+                    {
+                        "bbox": [0, top, image.width, bottom],
+                        "row_nums": [row],
+                        "column_nums": list(range(5)),
+                        "projected row header": True,
+                        "spans": spans,
+                    }
+                )
+                continue
+            for column, (left, right) in enumerate(zip(column_edges, column_edges[1:])):
+                spans = [
+                    token
+                    for token in tokens
+                    if left <= (token["bbox"][0] + token["bbox"][2]) / 2 <= right
+                    and top <= (token["bbox"][1] + token["bbox"][3]) / 2 <= bottom
+                ]
+                cells.append(
+                    {
+                        "bbox": [left, top, right, bottom],
+                        "row_nums": [row],
+                        "column_nums": [column],
+                        "column header": row == 0,
+                        "spans": spans,
+                    }
+                )
+        return {"cells": [cells]}
 
 
 def _ruled_extractor(tmp_path: Path, pipeline: object) -> TatrTableExtractor:

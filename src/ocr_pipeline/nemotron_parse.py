@@ -48,9 +48,11 @@ class NemotronParseReader:
         self,
         *,
         generator: OutputGenerator | None = None,
+        model_name_or_path: str | Path = MODEL_ID,
         device: str = "cuda:0",
         local_files_only: bool = True,
     ) -> None:
+        self.model_name_or_path = str(model_name_or_path)
         self.device = device
         self.local_files_only = local_files_only
         self._generator = generator
@@ -89,6 +91,7 @@ class NemotronParseReader:
     def _initialize_generator(self) -> OutputGenerator:
         try:
             self._generator = _TransformersGenerator(
+                model_name_or_path=self.model_name_or_path,
                 device=self.device,
                 local_files_only=self.local_files_only,
             )
@@ -105,6 +108,7 @@ class _TransformersGenerator:
     def __init__(
         self,
         *,
+        model_name_or_path: str,
         device: str,
         local_files_only: bool,
     ) -> None:
@@ -124,10 +128,15 @@ class _TransformersGenerator:
         }
 
         dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
-        self.processor = AutoProcessor.from_pretrained(MODEL_ID, **load_options)
+        model_revision = load_options.pop("revision")
+        if model_name_or_path == MODEL_ID:
+            load_options["revision"] = model_revision
+        self.processor = AutoProcessor.from_pretrained(
+            model_name_or_path, **load_options
+        )
         self.model = (
             AutoModel.from_pretrained(
-                MODEL_ID,
+                model_name_or_path,
                 torch_dtype=dtype,
                 **load_options,
             )
@@ -135,7 +144,7 @@ class _TransformersGenerator:
             .eval()
         )
         self.generation_config = GenerationConfig.from_pretrained(
-            MODEL_ID,
+            model_name_or_path,
             **load_options,
         )
         self.device = device

@@ -13,7 +13,13 @@ from fastapi.testclient import TestClient
 
 from ocr_pipeline.contracts import BoundingBox, TextAlternative, TextRegion
 from ocr_pipeline.demo import create_app
-from ocr_pipeline.handwriting import HandwritingStage
+from ocr_pipeline.evidence_layout import EvidenceLayoutStage
+from ocr_pipeline.handwriting import (
+    TROCR_MODEL_ID,
+    TROCR_MODEL_REVISION,
+    HandwritingStage,
+    TrOCRHandwritingReader,
+)
 from ocr_pipeline.pipeline import process_document
 from ocr_pipeline.providers import (
     PHI4_ADAPTER_FORMAT,
@@ -21,6 +27,7 @@ from ocr_pipeline.providers import (
     ReaderError,
     _force_phi4_sdpa,
 )
+from ocr_pipeline.rendering import render_page_markdown
 
 
 class FixedReader:
@@ -39,6 +46,8 @@ class CropReader:
     provenance = {
         "id": "microsoft/Phi-4-multimodal-instruct",
         "revision": "pinned",
+        "source": "microsoft/Phi-4-multimodal-instruct",
+        "identity_verified": True,
         "adapter": {"format": PHI4_ADAPTER_FORMAT, "validated": True},
     }
 
@@ -53,6 +62,138 @@ class CropReader:
         self.crop_sizes = [image.size for image in images]
         self.crop_modes = [image.mode for image in images]
         return self.outputs
+
+
+def test_trocr_stays_uninitialized_until_a_nonempty_batch() -> None:
+    reader = TrOCRHandwritingReader()
+
+    assert reader.transcribe_batch([]) == []
+    assert reader._processor is None
+    assert reader._model is None
+
+
+def test_mutable_official_trocr_revision_is_not_identity_verified() -> None:
+    reader = TrOCRHandwritingReader(model_revision="main")
+
+    assert reader.provenance["revision"] == "main"
+    assert reader.provenance["identity_verified"] is False
+
+
+def test_trocr_health_loads_cached_runtime_before_reporting_ready(
+    tmp_path: Path,
+) -> None:
+    model_dir = tmp_path / "trocr"
+    model_dir.mkdir()
+    for filename in ("config.json", "preprocessor_config.json", "model.safetensors"):
+        (model_dir / filename).write_text("fixture", encoding="utf-8")
+    reader = TrOCRHandwritingReader(model_name_or_path=model_dir, device="cpu")
+    initialized = []
+    reader._initialize_components = lambda: initialized.append(True)  # type: ignore[method-assign]
+
+    reader.check_health()
+
+    assert initialized == [True]
+    assert reader._processor is None
+    assert reader._model is None
+    (model_dir / "model.safetensors").unlink()
+    with pytest.raises(ReaderError) as raised:
+        reader.check_health()
+    assert raised.value.code == "trocr_handwriting_unavailable"
+
+
+def test_trocr_batches_real_line_crops_without_inventing_geometry_or_confidence(
+    tmp_path: Path,
+) -> None:
+    class PixelValues:
+        def __init__(self, count: int) -> None:
+            self.count = count
+
+        def to(self, device: str) -> PixelValues:
+            assert device == "cuda:0"
+            return self
+
+    class Processor:
+        def __init__(self) -> None:
+            self.crop_sizes: list[list[tuple[int, int]]] = []
+
+        def __call__(self, **options: object) -> object:
+            images = options["images"]
+            assert options["return_tensors"] == "pt"
+            self.crop_sizes.append([image.size for image in images])
+            return SimpleNamespace(pixel_values=PixelValues(len(images)))
+
+        def batch_decode(self, generated: object, **options: object) -> list[str]:
+            assert generated == [101, 101]
+            assert options == {
+                "skip_special_tokens": True,
+                "clean_up_tokenization_spaces": False,
+            }
+            return ["Take 5 mg every morning.", "Take 5 mg every morning."]
+
+    class Model:
+        def generate(self, **options: object) -> list[int]:
+            assert options["pixel_values"].count == 2
+            assert options["max_new_tokens"] == 64
+            assert options["do_sample"] is False
+            assert options["num_beams"] == 1
+            return [101, 101]
+
+    source = tmp_path / "page.png"
+    Image.new("RGB", (120, 80), "white").save(source)
+    processor = Processor()
+    reader = TrOCRHandwritingReader(
+        max_new_tokens=64,
+        max_batch_items=2,
+        batch_size=2,
+        processor=processor,
+        model=Model(),
+        torch_module=SimpleNamespace(inference_mode=nullcontext),
+    )
+    stage = HandwritingStage(reader, text_provider="incumbent", max_regions=1)
+
+    result = process_document(
+        source,
+        FixedReader(
+            [
+                _region(
+                    "dose",
+                    "Take S mg every morning.",
+                    0.4,
+                    BoundingBox(20, 20, 90, 36),
+                    1,
+                    kind="handwriting",
+                )
+            ]
+        ),
+        stages=[stage],
+    )
+
+    region = result.pages[0].regions[0]
+    assert processor.crop_sizes == [[(70, 16), (94, 40)]]
+    assert region.text == "Take S mg every morning."
+    assert region.bounding_box == BoundingBox(20, 20, 90, 36)
+    assert [
+        (item.text, item.confidence, item.provider) for item in region.alternatives
+    ] == [("Take 5 mg every morning.", None, "trocr-handwriting")]
+    assert region.alternatives[0].text_provenance == {
+        "method": "dual_crop_exact_agreement",
+        "page_number": 1,
+        "crops": {
+            "tight": {"bounding_box": [20, 20, 90, 36]},
+            "context": {"bounding_box": [8, 8, 102, 48]},
+        },
+        "model": {
+            "id": TROCR_MODEL_ID,
+            "source": TROCR_MODEL_ID,
+            "revision": TROCR_MODEL_REVISION,
+            "origin": "Microsoft",
+            "license": "MIT",
+            "identity_verified": True,
+            "local_files_only": True,
+            "scope": "single_text_line",
+        },
+        "view": "agreed",
+    }
 
 
 def test_stage_batches_only_explicit_bounded_handwriting_regions(
@@ -81,7 +222,29 @@ def test_stage_batches_only_explicit_bounded_handwriting_regions(
         _region("strong", "strong", 0.95, BoundingBox(5, 60, 25, 70), 3),
     ]
     regions[1].alternatives.append(
-        TextAlternative("corrected", 0.7, "tesseract", {"method": "fixture"})
+        TextAlternative(
+            "corrected",
+            0.7,
+            "tesseract",
+            {
+                "method": "fixture",
+                "model": {
+                    "id": "tesseract",
+                    "revision": "5.3",
+                    "source": "system",
+                    "identity_verified": True,
+                },
+            },
+        )
+    )
+    regions[1].alternatives.append(
+        TextAlternative(
+            "older",
+            0.6,
+            "older-reader",
+            {"method": "prior-review"},
+            "accepted",
+        )
     )
     crop_reader = CropReader(["corrected", "corrected"])
     stage = HandwritingStage(
@@ -102,11 +265,16 @@ def test_stage_batches_only_explicit_bounded_handwriting_regions(
     replaced = page.regions[1]
     assert replaced.text == "corrected"
     assert replaced.provider == "phi4-handwriting"
-    assert replaced.confidence == 0.7
+    assert replaced.confidence is None
     assert replaced.resolution == "resolved"
     assert [
-        (item.text, item.confidence, item.provider) for item in replaced.alternatives
-    ] == [("weakest", 0.2, "incumbent")]
+        (item.text, item.confidence, item.provider, item.decision_state)
+        for item in replaced.alternatives
+    ] == [
+        ("weakest", 0.2, "incumbent", "superseded"),
+        ("corrected", 0.7, "tesseract", "accepted"),
+        ("older", 0.6, "older-reader", "accepted"),
+    ]
     assert replaced.text_provenance == {
         "method": "dual_crop_exact_agreement",
         "page_number": 1,
@@ -117,12 +285,98 @@ def test_stage_batches_only_explicit_bounded_handwriting_regions(
         "model": crop_reader.provenance,
         "decision": "independently_corroborated_replacement",
         "supporting_provider": "tesseract",
+        "supporting_provenance": {
+            "method": "fixture",
+            "model": {
+                "id": "tesseract",
+                "revision": "5.3",
+                "source": "system",
+                "identity_verified": True,
+            },
+        },
     }
     assert replaced.structure["handwriting_review"]["reason"] == (
         "corroborated_replacement"
     )
+    assert replaced.structure["handwriting_attempt"]["outcome"] == "corrected"
     assert page.route == "review"
     assert "corrected" in page.text.value
+
+
+def test_handwriting_correction_refreshes_owning_form_row_and_exports(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (420, 80), "white").save(source)
+    value = _region(
+        "value",
+        "S3",
+        0.2,
+        BoundingBox(165, 10, 180, 22),
+        2,
+        structure={"handwriting_candidate": True},
+    )
+    value.alternatives = [
+        TextAlternative(
+            "53",
+            0.8,
+            "tesseract",
+            {
+                "model": {
+                    "id": "tesseract",
+                    "revision": "5.3",
+                    "source": "system",
+                    "identity_verified": True,
+                }
+            },
+        )
+    ]
+
+    result = process_document(
+        source,
+        FixedReader(
+            [
+                _region(
+                    "label",
+                    "Estimated GFR:",
+                    0.98,
+                    BoundingBox(10, 10, 100, 22),
+                    1,
+                ),
+                value,
+            ]
+        ),
+        stages=[
+            EvidenceLayoutStage(),
+            HandwritingStage(
+                CropReader(["53", "53"]),
+                text_provider="incumbent",
+                max_regions=1,
+            ),
+        ],
+    )
+
+    page = result.pages[0]
+    owner = next(region for region in page.regions if region.kind == "layout_block")
+    corrected = next(region for region in page.regions if region.id == "value")
+    assert corrected.text == "53"
+    assert corrected.provider == "phi4-handwriting"
+    assert owner.text == "Estimated GFR: 53"
+    [field] = owner.structure["fields"]
+    assert field["raw_value"] == "53"
+    assert field["recognition_evidence"][1]["raw_text"] == "53"
+    assert field["recognition_evidence"][1]["provider"] == "phi4-handwriting"
+    assert page.text.value == "Estimated GFR: 53"
+    payload = result.to_dict()
+    exported_owner = next(
+        region for region in payload["pages"][0]["regions"] if region["id"] == owner.id
+    )
+    assert exported_owner["text"] == "Estimated GFR: 53"
+    assert exported_owner["structure"]["fields"][0]["raw_value"] == "53"
+    assert "Estimated GFR: 53" in render_page_markdown(
+        payload["pages"][0]["regions"],
+        payload["pages"][0]["text"]["evidence_ids"],
+    )
 
 
 def test_crop_disagreement_keeps_incumbent_and_marks_conflict(tmp_path: Path) -> None:
@@ -157,8 +411,52 @@ def test_crop_disagreement_keeps_incumbent_and_marks_conflict(tmp_path: Path) ->
         ("context result", "phi4-handwriting:context"),
     ]
     assert region.structure["handwriting_review"]["reason"] == "crop_disagreement"
+    assert region.structure["handwriting_attempt"] == {
+        "outcome": "unresolved",
+        "reason": "crop_disagreement",
+        "provenance": region.structure["handwriting_review"]["provenance"],
+    }
     assert result.pages[0].route == "review"
     assert result.pages[0].text.value == "incumbent"
+
+
+def test_rejected_history_cannot_authorize_handwriting_replacement(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (60, 40), "white").save(source)
+    region = _region(
+        "field",
+        "incumbent",
+        0.1,
+        BoundingBox(5, 5, 30, 20),
+        1,
+        kind="handwriting",
+    )
+    region.alternatives.append(
+        TextAlternative(
+            "candidate",
+            0.8,
+            "other-reader",
+            {"method": "old-review"},
+            "rejected",
+        )
+    )
+    stage = HandwritingStage(
+        CropReader(["candidate", "candidate"]),
+        text_provider="incumbent",
+    )
+
+    result = process_document(source, FixedReader([region]), stages=[stage])
+
+    reviewed = result.pages[0].regions[0]
+    assert reviewed.text == "incumbent"
+    assert reviewed.provider == "incumbent"
+    assert [item.decision_state for item in reviewed.alternatives] == [
+        "rejected",
+        "pending",
+    ]
+    assert reviewed.structure["handwriting_attempt"]["outcome"] == ("candidate_pending")
 
 
 def test_agreed_specialist_candidate_preserves_incumbent_without_support(
@@ -196,6 +494,7 @@ def test_agreed_specialist_candidate_preserves_incumbent_without_support(
         ("candidate", "phi4-handwriting")
     ]
     assert region.structure["handwriting_review"]["reason"] == ("specialist_candidate")
+    assert region.structure["handwriting_attempt"]["outcome"] == "candidate_pending"
     assert result.pages[0].route == "review"
     assert result.pages[0].text.value == "incumbent"
 
@@ -263,6 +562,100 @@ def test_no_eligible_region_does_not_initialize_specialist(tmp_path: Path) -> No
 
     assert crop_reader.calls == 0
     assert result.pages[0].route == "accept_local"
+
+
+def test_handwritten_math_owned_by_formula_never_routes_to_text_reader(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (100, 80), "white").save(source)
+    crop_reader = CropReader([])
+    stage = HandwritingStage(crop_reader, text_provider="incumbent")
+    formula_ink = _region(
+        "formula-ink",
+        "x squared plus y squared",
+        0.2,
+        BoundingBox(10, 10, 80, 30),
+        1,
+        kind="handwriting",
+        structure={
+            "handwriting_candidate": True,
+            "layout_owner_id": "formula-owner",
+            "layout_owner_type": "formula",
+        },
+    )
+
+    result = process_document(
+        source,
+        FixedReader([formula_ink]),
+        stages=[stage],
+    )
+
+    assert crop_reader.calls == 0
+    assert result.pages[0].regions[0] == formula_ink
+
+
+def test_matching_reread_records_unchanged_outcome(tmp_path: Path) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (60, 40), "white").save(source)
+    region = _region(
+        "field",
+        "same text",
+        0.2,
+        BoundingBox(5, 5, 30, 20),
+        1,
+        kind="handwriting",
+    )
+
+    result = process_document(
+        source,
+        FixedReader([region]),
+        stages=[
+            HandwritingStage(
+                CropReader(["same text", "same text"]),
+                text_provider="incumbent",
+            )
+        ],
+    )
+
+    processed = result.pages[0].regions[0]
+    assert processed.structure["handwriting_attempt"]["outcome"] == (
+        "unchanged_after_reread"
+    )
+    assert "handwriting_review" not in processed.structure
+
+
+def test_automatic_reader_failure_is_stored_without_losing_candidate(
+    tmp_path: Path,
+) -> None:
+    class FailingCropReader(CropReader):
+        def transcribe_batch(self, images: list[Image.Image]) -> list[str]:
+            raise ReaderError("handwriting_reader_failed", "controlled failure")
+
+    source = tmp_path / "page.png"
+    Image.new("RGB", (60, 40), "white").save(source)
+    proposal = _anchored_proposal(BoundingBox(5, 5, 30, 20))
+
+    result = process_document(
+        source,
+        FixedReader([proposal]),
+        stages=[
+            HandwritingStage(
+                FailingCropReader([]),
+                text_provider="incumbent",
+            )
+        ],
+    )
+
+    processed = result.pages[0].regions[0]
+    assert processed.id == proposal.id
+    assert processed.text == ""
+    assert processed.resolution == "unreadable"
+    assert processed.structure["handwriting_attempt"]["outcome"] == "failed"
+    assert processed.structure["handwriting_attempt"]["reason"] == (
+        "handwriting_reader_failed"
+    )
+    assert processed.structure["handwriting_review"]["required"] is True
 
 
 def test_tall_low_confidence_printed_text_is_not_routed(tmp_path: Path) -> None:
@@ -394,8 +787,165 @@ def test_anchored_residual_proposal_is_reread_as_unresolved_evidence(
             if key != "view"
         },
     }
+    assert processed.structure["handwriting_attempt"]["outcome"] == (
+        "candidate_pending"
+    )
     assert unrelated_unreadable.alternatives == []
     assert "handwriting_review" not in unrelated_unreadable.structure
+
+
+def test_duplicate_candidate_crops_are_read_once(tmp_path: Path) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (100, 80), "white").save(source)
+    first = _anchored_proposal(BoundingBox(20, 20, 60, 36))
+    second = _anchored_proposal(BoundingBox(20, 20, 60, 36))
+    second.id = "second-anchored-proposal"
+    crop_reader = CropReader(["candidate", "candidate"])
+
+    result = process_document(
+        source,
+        FixedReader([first, second]),
+        stages=[HandwritingStage(crop_reader, text_provider="incumbent")],
+    )
+
+    assert crop_reader.calls == 1
+    assert crop_reader.crop_sizes == [(40, 16), (64, 40)]
+    assert all(
+        region.structure["handwriting_attempt"]["outcome"] == "candidate_pending"
+        for region in result.pages[0].regions
+    )
+
+
+def test_same_model_alias_is_not_independent_support(tmp_path: Path) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (80, 60), "white").save(source)
+    crop_reader = CropReader(["corrected", "corrected"])
+    region = _region(
+        "field",
+        "incumbent",
+        0.2,
+        BoundingBox(20, 20, 50, 35),
+        1,
+        kind="handwriting",
+    )
+    region.alternatives = [
+        TextAlternative(
+            "corrected",
+            0.9,
+            "renamed-reader",
+            {
+                "model": {
+                    **crop_reader.provenance,
+                    "source": "loopback-service-alias",
+                }
+            },
+        )
+    ]
+
+    result = process_document(
+        source,
+        FixedReader([region]),
+        stages=[HandwritingStage(crop_reader, text_provider="incumbent")],
+    )
+
+    processed = result.pages[0].regions[0]
+    assert processed.text == "incumbent"
+    assert processed.provider == "incumbent"
+    assert processed.structure["handwriting_attempt"]["outcome"] == (
+        "candidate_pending"
+    )
+
+
+@pytest.mark.parametrize(
+    ("specialist_model", "supporting_model"),
+    [
+        (
+            {
+                **CropReader.provenance,
+                "identity_verified": False,
+            },
+            {
+                "id": "supporting-reader",
+                "revision": "pinned",
+                "source": "local",
+                "identity_verified": True,
+            },
+        ),
+        (
+            {
+                "id": "specialist-reader",
+                "revision": "pinned",
+                "identity_verified": True,
+            },
+            {
+                "id": "supporting-reader",
+                "revision": "pinned",
+                "source": "local",
+                "identity_verified": True,
+            },
+        ),
+        (
+            CropReader.provenance,
+            {
+                "id": "supporting-reader",
+                "revision": "pinned",
+                "source": "local",
+                "identity_verified": False,
+            },
+        ),
+        (
+            CropReader.provenance,
+            {
+                "id": "supporting-reader",
+                "revision": "pinned",
+                "identity_verified": True,
+            },
+        ),
+    ],
+)
+def test_unverified_or_incomplete_model_identity_is_not_independent_support(
+    tmp_path: Path,
+    specialist_model: dict[str, object],
+    supporting_model: dict[str, object],
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (80, 60), "white").save(source)
+    crop_reader = CropReader(["corrected", "corrected"])
+    crop_reader.provenance = specialist_model
+    region = _region(
+        "field",
+        "incumbent",
+        0.2,
+        BoundingBox(20, 20, 50, 35),
+        1,
+        kind="handwriting",
+    )
+    region.alternatives = [
+        TextAlternative(
+            "corrected",
+            0.9,
+            "renamed-reader",
+            {"model": supporting_model},
+        )
+    ]
+
+    result = process_document(
+        source,
+        FixedReader([region]),
+        stages=[
+            HandwritingStage(
+                crop_reader,
+                text_provider="incumbent",
+            )
+        ],
+    )
+
+    processed = result.pages[0].regions[0]
+    assert processed.text == "incumbent"
+    assert processed.provider == "incumbent"
+    assert processed.structure["handwriting_attempt"]["outcome"] == (
+        "candidate_pending"
+    )
 
 
 @pytest.mark.parametrize(
@@ -493,7 +1043,10 @@ def test_manual_review_routes_high_confidence_text_inside_a_form_grid(
     )
 
 
-def test_demo_rereads_an_explicit_form_region_end_to_end() -> None:
+@pytest.mark.parametrize("specialist_name", ["phi4-handwriting", "trocr-handwriting"])
+def test_demo_rereads_an_explicit_form_region_end_to_end(
+    specialist_name: str,
+) -> None:
     class FormReader:
         name = "incumbent"
         version = "test-1"
@@ -514,6 +1067,7 @@ def test_demo_rereads_an_explicit_form_region_end_to_end() -> None:
     image = io.BytesIO()
     Image.new("RGB", (120, 80), "white").save(image, format="PNG")
     crop_reader = CropReader(["handwritten", "handwritten"])
+    crop_reader.name = specialist_name
     app = create_app(
         FormReader(),
         handwriting_stage=HandwritingStage(crop_reader, text_provider="incumbent"),
@@ -527,10 +1081,16 @@ def test_demo_rereads_an_explicit_form_region_end_to_end() -> None:
         assert processed.status_code == 200
         assert crop_reader.calls == 0
         session_id = processed.json()["session_id"]
+        revision = processed.json()["revision"]
 
         reread = client.post(
             f"/api/sessions/{session_id}/handwriting",
-            json={"page_number": 1, "region_id": "form-value"},
+            json={
+                "page_number": 1,
+                "region_id": "form-value",
+                "revision": revision,
+                "request_id": f"reread-{specialist_name}",
+            },
         )
 
         assert reread.status_code == 200
@@ -545,7 +1105,7 @@ def test_demo_rereads_an_explicit_form_region_end_to_end() -> None:
         assert region["structure"]["handwriting_candidate_source"] == "manual"
         assert [
             (item["text"], item["provider"]) for item in region["alternatives"]
-        ] == [("handwritten", "phi4-handwriting")]
+        ] == [("handwritten", specialist_name)]
         exported = client.get(f"/api/sessions/{session_id}/result.json")
         assert exported.json() == payload["result"]
 

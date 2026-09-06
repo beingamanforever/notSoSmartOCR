@@ -6,8 +6,16 @@ from pathlib import Path
 from PIL import Image
 import pytest
 
+from experiments import serve_falcon_ocr
 from ocr_pipeline import falcon as falcon_module
-from ocr_pipeline.falcon import FalconOCRServiceReader
+from ocr_pipeline.falcon import (
+    FALCON_MODEL_ID,
+    FALCON_MODEL_LICENSE,
+    FALCON_MODEL_ORIGIN,
+    FALCON_MODEL_REVISION,
+    FalconOCRReader,
+    FalconOCRServiceReader,
+)
 from ocr_pipeline.providers import ReaderError
 
 
@@ -28,12 +36,12 @@ class FakeResponse:
 
 def _provenance() -> dict[str, object]:
     return {
-        "id": None,
+        "id": FALCON_MODEL_ID,
         "loaded_from": "/models/falcon-ocr",
-        "revision": "unverified",
-        "origin": "unverified",
-        "license": "unverified",
-        "identity_verified": False,
+        "revision": FALCON_MODEL_REVISION,
+        "origin": FALCON_MODEL_ORIGIN,
+        "license": FALCON_MODEL_LICENSE,
+        "identity_verified": True,
         "local_files_only": True,
         "inference_repository_audit_reference": {
             "url": "https://github.com/tiiuae/Falcon-Perception",
@@ -41,6 +49,40 @@ def _provenance() -> dict[str, object]:
             "loaded_code_match": "unverified",
         },
     }
+
+
+def _generation_config(max_new_tokens: int = 1536) -> dict[str, object]:
+    return {
+        "max_new_tokens": max_new_tokens,
+        "temperature": 0.0,
+        "max_dimension": 1536,
+        "compile": False,
+    }
+
+
+def test_falcon_service_initializes_model_before_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = FalconOCRReader()
+    calls: list[str] = []
+    monkeypatch.setattr(
+        reader,
+        "_initialize_model",
+        lambda: calls.append("initialize") or object(),
+    )
+
+    class FakeServer:
+        daemon_threads = False
+
+        def __init__(self, address: object, handler: object) -> None:
+            del address, handler
+            calls.append("bind")
+
+    monkeypatch.setattr(serve_falcon_ocr, "ThreadingHTTPServer", FakeServer)
+
+    serve_falcon_ocr.create_server(reader, "127.0.0.1", 8085)
+
+    assert calls == ["initialize", "bind"]
 
 
 def test_service_reader_batches_categories_and_preserves_raw_text(
@@ -54,12 +96,7 @@ def test_service_reader_batches_categories_and_preserves_raw_text(
             {
                 "texts": ["  Heading\n", "<table><tr><td>1</td></tr></table>"],
                 "provenance": _provenance(),
-                "generation_config": {
-                    "max_new_tokens": 3072,
-                    "temperature": 0.0,
-                    "max_dimension": 1540,
-                    "compile": False,
-                },
+                "generation_config": _generation_config(3072),
             }
         )
 
@@ -81,9 +118,55 @@ def test_service_reader_batches_categories_and_preserves_raw_text(
         "category": "plain",
         "max_new_tokens": 3072,
         "temperature": 0.0,
-        "max_dimension": 1540,
+        "max_dimension": 1536,
         "compile": False,
     }
+
+
+def test_service_reader_health_requires_ready_initialized_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests = []
+
+    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
+        requests.append((request, timeout))
+        return FakeResponse(
+            {
+                "status": "ready",
+                "provenance": _provenance(),
+                "generation_config": _generation_config(),
+            }
+        )
+
+    monkeypatch.setattr(falcon_module, "urlopen", fake_urlopen)
+    reader = FalconOCRServiceReader("http://127.0.0.1:8085", timeout_seconds=19)
+
+    reader.check_health()
+
+    request, timeout = requests[0]
+    assert request.full_url == "http://127.0.0.1:8085/health"
+    assert timeout == 19
+    assert reader.provenance == {**_provenance(), "source": "loopback_service"}
+    assert reader.generation["max_new_tokens"] == 1536
+
+
+def test_service_reader_rejects_false_ready_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        falcon_module,
+        "urlopen",
+        lambda request, timeout: FakeResponse(
+            {
+                "status": "starting",
+                "provenance": _provenance(),
+                "generation_config": {},
+            }
+        ),
+    )
+
+    with pytest.raises(ReaderError, match="not ready"):
+        FalconOCRServiceReader("http://127.0.0.1:8085").check_health()
 
 
 def test_service_reader_full_page_region_keeps_service_provenance(
@@ -98,7 +181,7 @@ def test_service_reader_full_page_region_keeps_service_provenance(
             {
                 "texts": ["raw page"],
                 "provenance": _provenance(),
-                "generation_config": {"max_new_tokens": 100},
+                "generation_config": _generation_config(100),
             }
         ),
     )
@@ -142,8 +225,39 @@ def test_service_reader_rejects_invalid_response(
         lambda request, timeout: FakeResponse(
             {
                 "texts": ["value"],
-                "provenance": {"local_files_only": False},
-                "generation_config": {},
+                "provenance": {
+                    **_provenance(),
+                    "id": None,
+                    "identity_verified": False,
+                },
+                "generation_config": _generation_config(),
+            }
+        ),
+    )
+
+    with pytest.raises(ReaderError, match="did not return a valid result"):
+        FalconOCRServiceReader("http://127.0.0.1:8085").transcribe_crops(
+            [Image.new("RGB", (1, 1))],
+            ["text"],
+        )
+
+
+@pytest.mark.parametrize(
+    "generation_config",
+    ({}, {**_generation_config(), "temperature": float("inf")}),
+)
+def test_service_reader_rejects_invalid_generation_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    generation_config: dict[str, object],
+) -> None:
+    monkeypatch.setattr(
+        falcon_module,
+        "urlopen",
+        lambda request, timeout: FakeResponse(
+            {
+                "texts": ["value"],
+                "provenance": _provenance(),
+                "generation_config": generation_config,
             }
         ),
     )

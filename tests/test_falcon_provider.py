@@ -261,7 +261,7 @@ def test_local_directory_has_unverified_identity_and_no_revision_claim(
     }
 
 
-def test_official_model_identity_is_independent_of_local_storage_path(
+def test_official_model_identity_is_not_proven_by_local_storage_path(
     tmp_path: Path,
 ) -> None:
     model_dir = tmp_path / "falcon-ocr"
@@ -274,8 +274,8 @@ def test_official_model_identity_is_independent_of_local_storage_path(
 
     assert reader.provenance["id"] == FALCON_MODEL_ID
     assert reader.provenance["loaded_from"] == str(model_dir)
-    assert reader.provenance["revision"] == FALCON_MODEL_REVISION
-    assert reader.provenance["identity_verified"] is True
+    assert reader.provenance["revision"] == "unverified"
+    assert reader.provenance["identity_verified"] is False
 
 
 def test_official_model_can_load_from_local_storage(
@@ -327,6 +327,7 @@ def test_official_model_can_load_from_local_storage(
         ({"max_new_tokens": 0}, ValueError, "from 1 to 3072"),
         ({"max_new_tokens": 3073}, ValueError, "from 1 to 3072"),
         ({"temperature": -0.1}, ValueError, "must not be negative"),
+        ({"temperature": float("inf")}, ValueError, "infinite"),
         ({"max_dimension": 0}, ValueError, "positive multiple of 16"),
         ({"max_dimension": 1540}, ValueError, "positive multiple of 16"),
         (

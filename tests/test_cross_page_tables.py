@@ -124,6 +124,7 @@ def test_process_document_adds_cross_page_table_without_mutating_sources(
 ) -> None:
     source = _multi_page_tiff(tmp_path, 2)
     tables = [_table(1, "Aspirin"), _table(2, "Metformin")]
+    tables[1].structure["cells"][-1]["evidence_ids"] = ["p2-dose-word"]  # type: ignore[index]
     baseline = process_document(source, _TableReader(tables))
     classifier = _Classifier([0.93])
 
@@ -164,6 +165,8 @@ def test_process_document_adds_cross_page_table_without_mutating_sources(
     assert continuation.cells[-1]["continuation_source"] == {
         "page_number": 2,
         "table_id": "p2-table",
+        "cell_id": "p2-cell-4",
+        "evidence_ids": ["p2-dose-word"],
         "row_nums": [1],
     }
     assert continuation.provenance["guards"] == {
@@ -252,6 +255,8 @@ def test_headerless_continuation_reaches_classifier_and_retains_first_data_row(
     assert continuation.cells[4]["continuation_source"] == {
         "page_number": 2,
         "table_id": "p2-table",
+        "cell_id": "p2-cell-1",
+        "evidence_ids": [],
         "row_nums": [0],
     }
 
@@ -537,10 +542,20 @@ def test_demo_renders_stitched_table_once_and_retains_source_evidence(
     assert continuation["source_page_numbers"] == [1, 2]
     assert continuation["provenance"]["classifier"] == classifier.name
     assert all("continuation_source" in cell for cell in continuation["cells"])
+    assert continuation["cells"][-1]["continuation_source"] == {
+        "page_number": 2,
+        "table_id": "p2-table",
+        "cell_id": "p2-cell-4",
+        "evidence_ids": [],
+        "row_nums": [1],
+    }
     assert markdown.count("| Medication | Dose |") == 1
     assert markdown.count("Aspirin") == 1
     assert markdown.count("Metformin") == 1
     assert "pagesWithTableContinuations" in index
+    assert "cell.continuation_source?.page_number" in index
+    assert "cell.continuation_source?.cell_id" in index
+    assert "evidencePageNumber(target)" in index
 
 
 def test_demo_keeps_stitched_table_in_corrected_presentation_order(

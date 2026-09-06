@@ -92,6 +92,144 @@ def test_resolved_region_with_conflicting_alternative_routes_review(
     assert result.pages[0].text.value == "base"
 
 
+@pytest.mark.parametrize(
+    ("structure", "expected_route"),
+    [
+        ({"block_type": "formula", "formula_recognition": "heuristic"}, "review"),
+        (
+            {
+                "block_type": "formula",
+                "formula_attempt": {"outcome": "invalid_output"},
+            },
+            "review",
+        ),
+        (
+            {
+                "block_type": "formula",
+                "formula_attempt": {
+                    "outcome": "same_reader_repeat",
+                    "reason": "reader_not_independent",
+                },
+            },
+            "review",
+        ),
+        (
+            {
+                "block_type": "formula",
+                "formula_recognition": "specialist_supported",
+                "formula_attempt": {"outcome": "supported"},
+            },
+            "accept_local",
+        ),
+        (
+            {
+                "block_type": "formula",
+                "formula_recognition": "human_accepted",
+                "formula_attempt": {"outcome": "same_reader_repeat"},
+            },
+            "accept_local",
+        ),
+    ],
+)
+def test_formula_route_requires_specialist_support_or_human_acceptance(
+    tmp_path: Path,
+    structure: dict[str, object],
+    expected_route: str,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (40, 20), "white").save(source)
+
+    class FormulaStage:
+        name = "formula"
+
+        def apply(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            regions[0].kind = "layout_block"
+            regions[0].structure = structure
+            return regions
+
+    result = process_document(source, FixedReader(), stages=[FormulaStage()])
+
+    assert result.pages[0].route == expected_route
+
+
+def test_resolved_region_and_cell_history_do_not_route_review(tmp_path: Path) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (40, 20), "white").save(source)
+
+    class HistoryStage:
+        name = "history"
+
+        def apply(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            regions[0].alternatives.extend(
+                [
+                    TextAlternative(
+                        "old", 0.7, "reader-a", decision_state="superseded"
+                    ),
+                    TextAlternative("bad", 0.6, "reader-b", decision_state="rejected"),
+                ]
+            )
+            regions[0].structure = {
+                "cells": [
+                    {
+                        "text": "base",
+                        "resolution": "resolved",
+                        "alternatives": [
+                            {"text": "older", "decision_state": "superseded"},
+                            {"text": "wrong", "decision_state": "rejected"},
+                        ],
+                    }
+                ]
+            }
+            return regions
+
+    result = process_document(source, FixedReader(), stages=[HistoryStage()])
+
+    assert result.pages[0].route == "accept_local"
+
+
+def test_resolved_table_cell_with_pending_alternative_routes_review(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (40, 20), "white").save(source)
+
+    class CellConflictStage:
+        name = "cell-conflict"
+
+        def apply(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            regions[0].structure = {
+                "cells": [
+                    {
+                        "text": "base",
+                        "resolution": "resolved",
+                        "alternatives": [
+                            {"text": "different", "decision_state": "pending"}
+                        ],
+                    }
+                ]
+            }
+            return regions
+
+    result = process_document(source, FixedReader(), stages=[CellConflictStage()])
+
+    assert result.pages[0].route == "review"
+
+
 def test_nested_table_cell_conflict_routes_review_without_hiding_table(
     tmp_path: Path,
 ) -> None:

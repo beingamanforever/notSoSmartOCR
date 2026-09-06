@@ -11,7 +11,13 @@ from typing import Any, Callable, Collection, Mapping
 
 from PIL import Image, ImageDraw, UnidentifiedImageError
 
-from .contracts import BoundingBox, TextAlternative, TextRegion
+from .contracts import (
+    ALTERNATIVE_DECISION_STATES,
+    AlternativeDecision,
+    BoundingBox,
+    TextAlternative,
+    TextRegion,
+)
 from .openrouter import OpenRouterError
 
 BulkImageCall = Callable[[Path, str, Mapping[str, Any]], Any]
@@ -223,16 +229,20 @@ def _region_dispute(region: TextRegion, region_index: int) -> _Dispute | None:
             provenance=copy.deepcopy(region.text_provenance),
         )
     ]
-    readings.extend(
-        _Reading(
-            id=f"{item_id}:candidate:{index}",
-            text=alternative.text,
-            confidence=alternative.confidence,
-            provider=alternative.provider,
-            provenance=copy.deepcopy(alternative.text_provenance),
+    for index, alternative in enumerate(region.alternatives, start=1):
+        if alternative.decision_state not in ALTERNATIVE_DECISION_STATES:
+            return None
+        if alternative.decision_state != "pending":
+            continue
+        readings.append(
+            _Reading(
+                id=f"{item_id}:candidate:{index}",
+                text=alternative.text,
+                confidence=alternative.confidence,
+                provider=alternative.provider,
+                provenance=copy.deepcopy(alternative.text_provenance),
+            )
         )
-        for index, alternative in enumerate(region.alternatives, start=1)
-    )
     readings = [reading for reading in readings if reading.text]
     if region.resolution == "conflicting" and not readings:
         return None
@@ -280,6 +290,11 @@ def _cell_dispute(
             )
         )
     for index, alternative in enumerate(alternatives, start=1):
+        decision_state = alternative.get("decision_state", "pending")
+        if decision_state not in ALTERNATIVE_DECISION_STATES:
+            return None
+        if decision_state != "pending":
+            continue
         alternative_text = alternative.get("text")
         provider = alternative.get("provider")
         if not isinstance(alternative_text, str) or not alternative_text:
@@ -660,30 +675,63 @@ def _select_reading(
     selected: _Reading,
     provenance: dict[str, Any],
 ) -> None:
-    alternatives = [
-        reading for reading in dispute.readings if reading.id != selected.id
-    ]
+    incumbent_id = f"{dispute.id}:candidate:0"
+    correction_selected = selected.id != incumbent_id
     if dispute.cell_index is None:
         region = regions[dispute.region_index]
+        historical = [
+            copy.deepcopy(alternative)
+            for alternative in region.alternatives
+            if alternative.decision_state != "pending"
+        ]
+        alternatives = [
+            _text_alternative(
+                reading,
+                "superseded" if reading.id == incumbent_id else "rejected",
+            )
+            for reading in dispute.readings
+            if reading.id != selected.id
+        ]
         region.text = selected.text
         region.confidence = selected.confidence
         region.provider = selected.provider
-        region.text_provenance = copy.deepcopy(selected.provenance)
-        region.alternatives = [_text_alternative(reading) for reading in alternatives]
+        region.text_provenance = _accepted_provenance(
+            selected,
+            provenance,
+            correction_selected,
+        )
+        region.alternatives = [*historical, *alternatives]
         region.resolution = "resolved"
         _record_region_decision(region, provenance)
         return
     cell = _target_cell(regions, dispute)
+    historical = [
+        copy.deepcopy(alternative)
+        for alternative in cell.get("alternatives", [])
+        if alternative.get("decision_state", "pending") != "pending"
+    ]
+    alternatives = [
+        _cell_alternative(
+            reading,
+            "superseded" if reading.id == incumbent_id else "rejected",
+        )
+        for reading in dispute.readings
+        if reading.id != selected.id
+    ]
     cell["text"] = selected.text
     cell["confidence"] = selected.confidence
     cell["source"] = selected.provider
-    cell["alternatives"] = [_cell_alternative(reading) for reading in alternatives]
+    cell["alternatives"] = [*historical, *alternatives]
     evidence = selected.cell_evidence
     assert evidence is not None
     cell["evidence_ids"] = list(evidence.evidence_ids)
     cell["supporters"] = copy.deepcopy(list(evidence.supporters))
     cell["decision"] = "independent_dispute_agreement"
-    cell["text_provenance"] = copy.deepcopy(selected.provenance)
+    cell["text_provenance"] = _accepted_provenance(
+        selected,
+        provenance,
+        correction_selected,
+    )
     cell["resolution"] = "resolved"
     cell["dispute_resolution"] = provenance
 
@@ -762,7 +810,9 @@ def _append_transcription(
     provider = _provider_label(metadata)
     if dispute.cell_index is None:
         region = regions[dispute.region_index]
-        region.alternatives.append(TextAlternative(text, None, provider, provenance))
+        region.alternatives.append(
+            TextAlternative(text, None, provider, provenance, "pending")
+        )
         return
     cell = _target_cell(regions, dispute)
     alternatives = cell.setdefault("alternatives", [])
@@ -772,6 +822,7 @@ def _append_transcription(
             "confidence": None,
             "provider": provider,
             "text_provenance": provenance,
+            "decision_state": "pending",
         }
     )
 
@@ -793,21 +844,29 @@ def _target_cell(regions: list[TextRegion], dispute: _Dispute) -> dict[str, Any]
     return cells[dispute.cell_index]
 
 
-def _text_alternative(reading: _Reading) -> TextAlternative:
+def _text_alternative(
+    reading: _Reading,
+    decision_state: AlternativeDecision,
+) -> TextAlternative:
     return TextAlternative(
         reading.text,
         reading.confidence,
         reading.provider,
         copy.deepcopy(reading.provenance),
+        decision_state,
     )
 
 
-def _cell_alternative(reading: _Reading) -> dict[str, Any]:
+def _cell_alternative(
+    reading: _Reading,
+    decision_state: AlternativeDecision,
+) -> dict[str, Any]:
     alternative = {
         "text": reading.text,
         "confidence": reading.confidence,
         "provider": reading.provider,
         "text_provenance": copy.deepcopy(reading.provenance),
+        "decision_state": decision_state,
     }
     if reading.cell_evidence is None:
         return alternative
@@ -820,6 +879,23 @@ def _cell_alternative(reading: _Reading) -> dict[str, Any]:
         }
     )
     return alternative
+
+
+def _accepted_provenance(
+    reading: _Reading,
+    resolution: dict[str, Any],
+    correction_selected: bool,
+) -> dict[str, Any] | None:
+    provenance = copy.deepcopy(reading.provenance)
+    if not correction_selected:
+        return provenance
+    provenance = provenance or {}
+    provenance["accepted_correction"] = {
+        "decision_state": "accepted",
+        "provider": reading.provider,
+        "resolution": copy.deepcopy(resolution),
+    }
+    return provenance
 
 
 def _record_region_decision(

@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from ocr_pipeline.contracts import BoundingBox, TextRegion
 from ocr_pipeline.orientation import (
@@ -172,6 +172,154 @@ class ResidualAngleReader:
         ]
 
 
+class MarginCropReader:
+    name = "margin-crop-reader"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, tuple[int, int]]] = []
+
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        with Image.open(image_path) as image:
+            size = image.size
+        parts = image_path.stem.split("-")
+        angle = int(parts[-1])
+        if "margin" not in parts:
+            self.calls.append(("page", angle, size))
+            return [
+                _region(
+                    f"p{page_number}-body-{index + 1}",
+                    f"canonical body line {index + 1}",
+                    BoundingBox(25, 12 + index * 10, 85, 18 + index * 10),
+                    index + 1,
+                    0.95,
+                    self.name,
+                )
+                for index in range(12)
+            ]
+
+        side = parts[-2]
+        self.calls.append((side, angle, size))
+        local_left, local_right = (3, 10) if side == "left" else (10, 17)
+        box = (
+            BoundingBox(20, 20 - local_right, 150, 20 - local_left)
+            if angle == 90
+            else BoundingBox(50, local_left, 180, local_right)
+        )
+        return [
+            _region(
+                f"p{page_number}-{side}-{angle}",
+                f"vertical publication identifier {side}",
+                box,
+                1,
+                0.96,
+                self.name,
+            ),
+            _region(
+                f"p{page_number}-duplicate-{side}-{angle}",
+                "canonical body line 1",
+                box,
+                2,
+                0.99,
+                self.name,
+            ),
+            _region(
+                f"p{page_number}-low-confidence-{side}-{angle}",
+                "low confidence margin noise",
+                box,
+                3,
+                0.5,
+                self.name,
+            ),
+            _region(
+                f"p{page_number}-wrong-shape-{side}-{angle}",
+                "rotated crop body noise",
+                BoundingBox(3, 2, 10, 18),
+                4,
+                0.99,
+                self.name,
+            ),
+            _region(
+                f"p{page_number}-invalid-geometry-{side}-{angle}",
+                "invalid crop geometry",
+                BoundingBox(0, 0, 201, 5),
+                5,
+                0.99,
+                self.name,
+            ),
+        ]
+
+
+class ShortMarginWordReader(MarginCropReader):
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        if "margin" not in image_path.stem.split("-"):
+            return super().read(image_path, page_number)
+        with Image.open(image_path) as image:
+            size = image.size
+        parts = image_path.stem.split("-")
+        side = parts[-2]
+        angle = int(parts[-1])
+        self.calls.append((side, angle, size))
+        if angle != 270:
+            return []
+        return [
+            _region(
+                f"p{page_number}-margin-{index}",
+                text,
+                BoundingBox(left, 3, right, 10),
+                index,
+                0.96,
+                self.name,
+            )
+            for index, (text, left, right) in enumerate(
+                (
+                    ("[cs.CL]", 20, 70),
+                    ("2", 74, 84),
+                    ("Aug", 88, 120),
+                    ("2023", 124, 164),
+                ),
+                start=1,
+            )
+        ]
+
+
+class UnsupportedMarginReader(MarginCropReader):
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        if "margin" not in image_path.stem.split("-"):
+            return super().read(image_path, page_number)
+        with Image.open(image_path) as image:
+            size = image.size
+        parts = image_path.stem.split("-")
+        side = parts[-2]
+        angle = int(parts[-1])
+        self.calls.append((side, angle, size))
+        if angle != 90:
+            return []
+        return [
+            _region(
+                f"p{page_number}-unsupported-margin",
+                "uncorroborated margin candidate",
+                BoundingBox(20, 10, 150, 17),
+                1,
+                0.96,
+                self.name,
+            )
+        ]
+
+
+class FailedMarginReader(MarginCropReader):
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        if "margin" not in image_path.stem.split("-"):
+            return super().read(image_path, page_number)
+        raise ReaderError("margin_failed", "controlled margin failure")
+
+
+class EmptyMarginReader(MarginCropReader):
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        if "margin" not in image_path.stem.split("-"):
+            return super().read(image_path, page_number)
+        return []
+
+
 class StructureStage:
     name = "structure"
 
@@ -316,10 +464,7 @@ def test_orientation_preserves_nested_execution_for_every_scored_view(
             },
         },
     }
-    assert (
-        regions[0].text_provenance["orientation"]["reader_execution"]
-        == page["view_reader_execution"]["0"]
-    )
+    assert "reader_execution" not in regions[0].text_provenance["orientation"]
 
 
 def test_horizontal_word_geometry_breaks_a_narrow_confidence_tie(
@@ -430,6 +575,139 @@ def test_recovers_high_confidence_vertical_margin_from_scored_view(
         "recovered_regions": 1,
         "source_view_angles": [90],
     }
+
+
+@pytest.mark.parametrize("side", ["left", "right"])
+@pytest.mark.parametrize("defer_restore", [False, True])
+def test_confident_upright_page_routes_only_uncovered_side_margin(
+    tmp_path: Path,
+    side: str,
+    defer_restore: bool,
+) -> None:
+    source = MarginCropReader()
+    reader = OrientationReader(
+        source,
+        orientation_detector=lambda _: {"angle": 0, "confidence": 0.99},
+        defer_restore=defer_restore,
+    )
+
+    regions = reader.read(_large_image_with_vertical_margin(tmp_path, side), 1)
+
+    assert source.calls == [
+        ("page", 0, (100, 200)),
+        (side, 90, (200, 20)),
+        (side, 270, (200, 20)),
+    ]
+    assert len(regions) == 13
+    assert regions[-1].text == f"vertical publication identifier {side}"
+    expected = (
+        BoundingBox(3, 20, 10, 150) if side == "left" else BoundingBox(90, 20, 97, 150)
+    )
+    assert regions[-1].bounding_box == expected
+    assert reader.restore_regions(regions, 1)[-1].bounding_box == expected
+    assert regions[-1].provider == source.name
+    assert regions[-1].text_provenance["orientation_residual"] == {
+        "method": "side_margin_crop_rotation",
+        "source_view_angle": 90,
+        "selected_view_angle": 0,
+        "source_margin": side,
+        "source_crop": [0, 0, 20, 200] if side == "left" else [80, 0, 100, 200],
+        "original_provider": source.name,
+    }
+    assert all(region.text != "rotated crop body noise" for region in regions)
+    assert all(region.text != "low confidence margin noise" for region in regions)
+    assert all(region.text != "invalid crop geometry" for region in regions)
+    page = reader.coverage_assessment(1)["pages"][0]
+    assert page["angle"] == 0
+    assert page["vertical_margin_router"]["routed"] is True
+    assert page["vertical_margin_router"]["reason"] == ("uncovered_side_margin_ink")
+    assert page["vertical_margin_router"]["routed_sides"] == [side]
+    assert page["vertical_residual_recovery"]["recovered_regions"] == 0
+    assert page["side_margin_recovery"] == {
+        "method": "side_margin_crop_rotation",
+        "recovered_regions": 1,
+        "source_margins": [side],
+    }
+
+
+def test_side_margin_uses_its_configured_lightweight_reader(tmp_path: Path) -> None:
+    source = MarginCropReader()
+    margin = MarginCropReader()
+    reader = OrientationReader(
+        source,
+        orientation_detector=lambda _: {"angle": 0, "confidence": 0.99},
+        margin_reader=margin,
+    )
+
+    regions = reader.read(_large_image_with_vertical_margin(tmp_path, "left"), 1)
+
+    assert source.calls == [("page", 0, (100, 200))]
+    assert margin.calls == [
+        ("left", 90, (200, 20)),
+        ("left", 270, (200, 20)),
+    ]
+    assert regions[-1].text == "vertical publication identifier left"
+
+
+def test_short_side_margin_words_recover_as_one_supported_sequence(
+    tmp_path: Path,
+) -> None:
+    source = MarginCropReader()
+    margin = ShortMarginWordReader()
+    reader = OrientationReader(
+        source,
+        orientation_detector=lambda _: {"angle": 0, "confidence": 0.99},
+        margin_reader=margin,
+    )
+
+    regions = reader.read(_large_image_with_vertical_margin(tmp_path, "left"), 1)
+
+    assert [region.text for region in regions[-4:]] == ["[cs.CL]", "2", "Aug", "2023"]
+    assert all(
+        region.text_provenance["orientation_residual"]["source_view_angle"] == 270
+        for region in regions[-4:]
+    )
+
+
+def test_side_margin_candidate_does_not_corroborate_itself(tmp_path: Path) -> None:
+    source = UnsupportedMarginReader()
+    reader = OrientationReader(
+        source,
+        orientation_detector=lambda _: {"angle": 0, "confidence": 0.99},
+    )
+
+    regions = reader.read(_large_image_with_vertical_margin(tmp_path, "left"), 1)
+
+    assert all(region.text != "uncorroborated margin candidate" for region in regions)
+    page = reader.coverage_assessment(1)["pages"][0]
+    assert page["side_margin_recovery"]["recovered_regions"] == 0
+    assert page["review_reasons"][-1] == "side_margin_recovery_unsupported"
+    assert reader.page_needs_review(1)
+
+
+@pytest.mark.parametrize(
+    ("margin_reader", "reason"),
+    [
+        (FailedMarginReader, "side_margin_recovery_failed"),
+        (EmptyMarginReader, "side_margin_recovery_empty"),
+    ],
+)
+def test_failed_or_empty_side_margin_recovery_requires_review(
+    tmp_path: Path,
+    margin_reader: type[MarginCropReader],
+    reason: str,
+) -> None:
+    reader = OrientationReader(
+        MarginCropReader(),
+        orientation_detector=lambda _: {"angle": 0, "confidence": 0.99},
+        margin_reader=margin_reader(),
+    )
+
+    reader.read(_large_image_with_vertical_margin(tmp_path, "left"), 1)
+
+    page = reader.coverage_assessment(1)["pages"][0]
+    assert page["review_reasons"][-1] == reason
+    assert reader.page_needs_review(1)
 
 
 def test_does_not_recover_central_wrong_orientation_body_text(
@@ -883,6 +1161,17 @@ def _image(tmp_path: Path) -> Path:
 def _large_image(tmp_path: Path) -> Path:
     path = tmp_path / "large-page.png"
     Image.new("RGB", (100, 200), "white").save(path)
+    return path
+
+
+def _large_image_with_vertical_margin(tmp_path: Path, side: str) -> Path:
+    path = tmp_path / "large-page.png"
+    image = Image.new("RGB", (100, 200), "white")
+    draw = ImageDraw.Draw(image)
+    left, right = (3, 10) if side == "left" else (90, 97)
+    for top in range(20, 150, 10):
+        draw.rectangle((left, top, right, top + 5), fill="black")
+    image.save(path)
     return path
 
 

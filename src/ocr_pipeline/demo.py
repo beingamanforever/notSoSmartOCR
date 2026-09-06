@@ -16,6 +16,7 @@ from collections import Counter
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from secrets import token_urlsafe
@@ -23,7 +24,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .contracts import BoundingBox, PageResult, RegionStage, TextRegion
+from .contracts import BoundingBox, PageResult, RegionStage, TextAlternative, TextRegion
 from .cross_page_tables import CrossPageTableStage
 from .falcon import is_verified_falcon_model_provenance
 from .pipeline import (
@@ -31,6 +32,7 @@ from .pipeline import (
     PipelineError,
     _PreparedPages,
     _prepare_pages,
+    _region_needs_review,
     _source_kind,
 )
 from .pipeline import process_document
@@ -65,11 +67,12 @@ MULTIPART_OVERHEAD_BYTES = 64 * 1024
 EXAMPLE_FILES = {
     "architecture": "artifacts/ocr-pipeline-architecture.pdf",
     "hard-case-routing": "artifacts/hard-case-routing.pdf",
-    "handwriting": "data/public/GLM-OCR/examples/source/handwritten.png",
-    "academic-paper": "data/public/GLM-OCR/examples/source/paper.png",
-    "code": "data/public/GLM-OCR/examples/source/code.png",
-    "photographed-table": "data/public/GLM-OCR/examples/source/table.png",
-    "multi-column-page": "data/public/GLM-OCR/examples/source/page.png",
+    "handwriting": "artifacts/demo/handwriting_notes.png",
+    "formula-scan": "artifacts/demo/formula_scan.png",
+    "academic-paper": "artifacts/demo/academic_paper.png",
+    "code": "artifacts/demo/code_document.png",
+    "financial-table": "artifacts/demo/financial_table.png",
+    "scanned-form": "artifacts/demo/scanned_form.png",
 }
 TABLE_EXAMPLE_NAME = "clinical-table"
 PRESENTATION_CATEGORIES = {
@@ -297,6 +300,7 @@ class CompositionDescriptor:
     stages: tuple[str, ...]
     handwriting: str
     note: str
+    build_label: str = "local-workbench"
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -521,6 +525,7 @@ def create_app(
     max_decoded_pixels: int = MAX_DECODED_PIXELS,
     max_presentation_pages: int = 4,
     katex_asset_root: Path | None = None,
+    warmup_completed: bool = False,
 ) -> Any:
     """Create the local demo app with an injectable OCR reader."""
     if FastAPI is None:
@@ -545,6 +550,8 @@ def create_app(
         handwriting_stage,
     )
     composition_payload = active_composition.to_dict()
+    composition_payload["service_started_at"] = datetime.now(UTC).isoformat()
+    composition_payload["warmup_completed"] = warmup_completed
     active_handwriting_stage = handwriting_stage or next(
         (
             stage
@@ -559,6 +566,7 @@ def create_app(
     backend_version = _backend_version(active_reader)
     prepare_lock = threading.Lock()
     process_lock = threading.Lock()
+    recovery_lock = threading.Lock()
 
     @asynccontextmanager
     async def handle_lifespan(_: Any):
@@ -573,7 +581,9 @@ def create_app(
     app.state.sessions = sessions
     app.state.prepare_lock = prepare_lock
     app.state.process_lock = process_lock
+    app.state.recovery_lock = recovery_lock
     app.state.composition = active_composition
+    app.state.service_started_at = composition_payload["service_started_at"]
     app.add_middleware(
         RequestLimitMiddleware,
         max_body_bytes=max_upload_bytes + MULTIPART_OVERHEAD_BYTES,
@@ -588,20 +598,13 @@ def create_app(
     @app.get("/", response_class=HTMLResponse)
     def handle_index() -> Any:
         html = Path(__file__).with_name("demo.html").read_text(encoding="utf-8")
-        embedded = json.dumps(composition_payload, ensure_ascii=False).replace(
-            "<", "\\u003c"
-        )
         asset_tags = ""
         if katex_assets:
             asset_tags = (
                 '<link rel="stylesheet" href="/assets/katex/katex.css">\n'
                 '  <script defer src="/assets/katex/katex.js"></script>'
             )
-        return HTMLResponse(
-            html.replace("__OCR_COMPOSITION_JSON__", embedded).replace(
-                "__OCR_KATEX_ASSETS__", asset_tags
-            )
-        )
+        return HTMLResponse(html.replace("__OCR_KATEX_ASSETS__", asset_tags))
 
     @app.get("/assets/katex/katex.css")
     def handle_katex_css() -> Any:
@@ -721,6 +724,7 @@ def create_app(
             result = _sanitize_result(document.to_dict(), session_root)
             result["document_id"] = Path(original_name).stem
             result["source"]["name"] = original_name
+            result["revision"] = 1
             total_seconds = time.perf_counter() - total_started
             presentation_payload = _sanitize_result(
                 {
@@ -734,6 +738,7 @@ def create_app(
             )
             response = {
                 "session_id": session_id,
+                "revision": 1,
                 "filename": original_name,
                 "backend": active_reader.name,
                 "backend_version": backend_version,
@@ -785,6 +790,7 @@ def create_app(
                 "geometry": "pixel coordinates",
                 "coverage_assessment": coverage,
                 "uncertainty": _uncertainty_summary(result),
+                "recovery_outcome": None,
                 "presentation": presentation_payload,
                 "result": result,
                 "page_images": [
@@ -800,6 +806,7 @@ def create_app(
                     "document": document,
                     "pages": preview_paths,
                     "response": response,
+                    "revision": 1,
                 },
             )
             return JSONResponse(response)
@@ -825,11 +832,14 @@ def create_app(
         return FileResponse(pages[page_number - 1], media_type="image/png")
 
     @app.get("/api/sessions/{session_id}/result.json")
-    def handle_json_download(session_id: str) -> Any:
-        session = _get_session(sessions, session_id)
-        content = json.dumps(
-            session["response"]["result"], indent=2, ensure_ascii=False
-        )
+    def handle_json_download(session_id: str, revision: int | None = None) -> Any:
+        with process_lock:
+            session = _get_session(sessions, session_id)
+            if revision is not None and revision != session["revision"]:
+                raise HTTPException(409, "The requested revision is no longer current")
+            content = json.dumps(
+                session["response"]["result"], indent=2, ensure_ascii=False
+            )
         return Response(
             content,
             media_type="application/json",
@@ -837,9 +847,12 @@ def create_app(
         )
 
     @app.get("/api/sessions/{session_id}/result.md")
-    def handle_markdown_download(session_id: str) -> Any:
-        session = _get_session(sessions, session_id)
-        content = _result_markdown(session["response"])
+    def handle_markdown_download(session_id: str, revision: int | None = None) -> Any:
+        with process_lock:
+            session = _get_session(sessions, session_id)
+            if revision is not None and revision != session["revision"]:
+                raise HTTPException(409, "The requested revision is no longer current")
+            content = _result_markdown(session["response"])
         return Response(
             content,
             media_type="text/markdown; charset=utf-8",
@@ -853,56 +866,82 @@ def create_app(
     ) -> Any:
         if active_handwriting_stage is None:
             raise HTTPException(409, "Handwriting rereading is not configured")
-        page_number = payload.get("page_number")
-        region_id = payload.get("region_id")
-        if (
-            isinstance(page_number, bool)
-            or not isinstance(page_number, int)
-            or page_number < 1
-            or not isinstance(region_id, str)
-            or not region_id
-        ):
-            raise HTTPException(400, "page_number and region_id are required")
-
+        page_number, region_id, base_revision, request_id = _revision_request(payload)
         session = _get_session(sessions, session_id)
         with process_lock:
-            document = session["document"]
-            page = next(
-                (
-                    candidate
-                    for candidate in document.pages
-                    if candidate.page_number == page_number
-                ),
-                None,
-            )
-            if page is None:
-                raise HTTPException(404, "Page not found")
-            region_index = next(
-                (
-                    index
-                    for index, region in enumerate(page.regions)
-                    if region.id == region_id
-                ),
-                None,
-            )
-            if region_index is None:
-                raise HTTPException(404, "Region not found")
+            if session["revision"] != base_revision:
+                return _stale_recovery_response(
+                    request_id,
+                    page_number,
+                    region_id,
+                    base_revision,
+                    session["revision"],
+                    session["response"],
+                )
+            page, region_index = _session_page_region(session, page_number, region_id)
             if page_number > len(session["pages"]):
                 raise HTTPException(409, "Page preview is unavailable")
             original_region = copy.deepcopy(page.regions[region_index])
-            reread_started = time.perf_counter()
-            try:
+            image_path = session["pages"][page_number - 1]
+
+        reread_started = time.perf_counter()
+        try:
+            with recovery_lock:
                 reviewed = active_handwriting_stage.review_region(
-                    session["pages"][page_number - 1],
+                    image_path,
                     page_number,
-                    copy.deepcopy(page.regions[region_index]),
+                    copy.deepcopy(original_region),
                 )
-            except ReaderError as error:
-                raise HTTPException(422, str(error)) from error
-            reread_seconds = time.perf_counter() - reread_started
+        except ReaderError as error:
+            with process_lock:
+                current_session = _get_session(sessions, session_id)
+                current_revision = current_session["revision"]
+                current_response = copy.deepcopy(current_session["response"])
+            if current_revision != base_revision:
+                return _stale_recovery_response(
+                    request_id,
+                    page_number,
+                    region_id,
+                    base_revision,
+                    current_revision,
+                    current_response,
+                )
+            return JSONResponse(
+                {
+                    "revision": current_revision,
+                    "recovery_outcome": {
+                        "kind": "handwriting_reread",
+                        "status": "failed",
+                        "request_id": request_id,
+                        "page_number": page_number,
+                        "region_id": region_id,
+                        "base_revision": base_revision,
+                        "code": error.code,
+                        "message": str(error),
+                    },
+                },
+                status_code=422,
+            )
+        reread_seconds = time.perf_counter() - reread_started
+
+        with process_lock:
+            session = _get_session(sessions, session_id)
+            if session["revision"] != base_revision:
+                return _stale_recovery_response(
+                    request_id,
+                    page_number,
+                    region_id,
+                    base_revision,
+                    session["revision"],
+                    session["response"],
+                )
+            page, region_index = _session_page_region(session, page_number, region_id)
+            changed = page.regions[region_index] != reviewed
             page.regions[region_index] = reviewed
             page.text = render_evidence(page.regions)
             page.route = "review"
+            if changed:
+                session["revision"] += 1
 
             response = session["response"]
             reread_stage = f"{active_handwriting_stage.name}.manual-reread"
@@ -933,38 +972,234 @@ def create_app(
                 + elapsed_seconds,
                 3,
             )
-            result = _sanitize_result(document.to_dict(), session_root)
-            result["document_id"] = Path(response["filename"]).stem
-            result["source"]["name"] = response["filename"]
-            response["result"] = result
-            response["uncertainty"] = _uncertainty_summary(result)
-            refreshed = _read_presentations(
-                [page],
-                [session["pages"][page_number - 1]],
-                presentation_reader,
-                max_pages=1,
-                stage_execution=response["stage_execution"],
-            )
-            presentation_pages = [
-                item
-                for item in response.get("presentation", {}).get("pages", [])
-                if item.get("page_number") != page_number
-            ]
-            if page_number in refreshed:
-                presentation_pages.append(
-                    {"page_number": page_number, **refreshed[page_number]}
-                )
-            response["presentation"] = _sanitize_result(
-                {
-                    "schema_version": 2,
-                    "pages": sorted(
-                        presentation_pages,
-                        key=lambda item: item["page_number"],
-                    ),
-                },
+            _refresh_session_response(
+                session,
                 session_root,
+                page,
+                original_region,
+                reviewed,
+                presentation_reader,
             )
-        return JSONResponse(response)
+            attempt = (
+                reviewed.structure.get("handwriting_attempt")
+                if isinstance(reviewed.structure, dict)
+                else None
+            )
+            recorded_outcome = (
+                attempt.get("outcome") if isinstance(attempt, dict) else None
+            )
+            pending_candidate = any(
+                alternative.decision_state == "pending"
+                for alternative in reviewed.alternatives
+            )
+            recovery_status = (
+                recorded_outcome
+                if isinstance(recorded_outcome, str)
+                and recorded_outcome
+                in {
+                    "unchanged_after_reread",
+                    "candidate_pending",
+                    "corrected",
+                    "unresolved",
+                    "failed",
+                }
+                else (
+                    "corrected"
+                    if original_region.text != reviewed.text
+                    else (
+                        "candidate_pending"
+                        if pending_candidate
+                        else "unchanged_after_reread"
+                    )
+                )
+            )
+            response["recovery_outcome"] = {
+                "kind": "handwriting_reread",
+                "status": recovery_status,
+                "request_id": request_id,
+                "page_number": page_number,
+                "region_id": region_id,
+                "base_revision": base_revision,
+                "revision": session["revision"],
+            }
+            response_payload = copy.deepcopy(response)
+        return JSONResponse(response_payload)
+
+    @app.post("/api/sessions/{session_id}/corrections")
+    def handle_correction(session_id: str, payload: dict[str, Any]) -> Any:
+        page_number, region_id, base_revision, request_id = _revision_request(payload)
+        action = payload.get("action")
+        if action not in {"accept", "edit", "keep_unresolved"}:
+            raise HTTPException(400, "action must be accept, edit, or keep_unresolved")
+
+        session = _get_session(sessions, session_id)
+        with process_lock:
+            if session["revision"] != base_revision:
+                return _stale_recovery_response(
+                    request_id,
+                    page_number,
+                    region_id,
+                    base_revision,
+                    session["revision"],
+                    session["response"],
+                )
+            page, region_index = _session_page_region(session, page_number, region_id)
+            original_region = copy.deepcopy(page.regions[region_index])
+            pending_alternatives = [
+                alternative
+                for alternative in original_region.alternatives
+                if alternative.decision_state == "pending"
+            ]
+            if original_region.resolution == "resolved" and not pending_alternatives:
+                raise HTTPException(409, "Region has no pending alternatives")
+            reviewed = copy.deepcopy(original_region)
+            accepted_alternative: TextAlternative | None = None
+            accepted_index: int | None = None
+            if action == "accept":
+                alternative_index = payload.get("alternative_index", 0)
+                if (
+                    isinstance(alternative_index, bool)
+                    or not isinstance(alternative_index, int)
+                    or alternative_index < 0
+                    or alternative_index >= len(reviewed.alternatives)
+                ):
+                    raise HTTPException(400, "alternative_index is invalid")
+                accepted_alternative = reviewed.alternatives[alternative_index]
+                if accepted_alternative.decision_state != "pending":
+                    raise HTTPException(409, "Alternative is not pending")
+                if _region_semantic_kind(reviewed) == "formula":
+                    formula_failures = _validate_presentation_formula(
+                        accepted_alternative.text
+                    )
+                    if formula_failures:
+                        raise HTTPException(
+                            422,
+                            "Formula candidate failed syntax validation: "
+                            f"{formula_failures[0]['code']}",
+                        )
+                accepted_index = alternative_index
+                reviewed.text = accepted_alternative.text
+            elif action == "edit":
+                text = payload.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    raise HTTPException(400, "text is required for edit")
+                if _region_semantic_kind(reviewed) == "formula":
+                    formula_failures = _validate_presentation_formula(text)
+                    if formula_failures:
+                        raise HTTPException(
+                            422,
+                            "Formula edit failed syntax validation: "
+                            f"{formula_failures[0]['code']}",
+                        )
+                reviewed.text = text
+
+            review_record = {
+                "action": action,
+                "request_id": request_id,
+                "base_revision": base_revision,
+                "original_provider": original_region.provider,
+                "correcting_provider": (
+                    accepted_alternative.provider
+                    if accepted_alternative is not None
+                    else "human-review"
+                ),
+            }
+            if accepted_alternative is not None:
+                review_record["accepted_alternative"] = asdict(accepted_alternative)
+            reviewed_structure = {
+                **(reviewed.structure if isinstance(reviewed.structure, dict) else {}),
+                "human_review": review_record,
+            }
+            if action != "keep_unresolved":
+                for review_name in ("handwriting_review", "formula_review"):
+                    review = reviewed_structure.get(review_name)
+                    if isinstance(review, dict):
+                        reviewed_structure[review_name] = {
+                            **review,
+                            "required": False,
+                            "resolved_by": "human_review",
+                        }
+                if _region_semantic_kind(reviewed) == "formula":
+                    reviewed_structure["formula_recognition"] = "human_accepted"
+            reviewed.structure = reviewed_structure
+            if action != "keep_unresolved":
+                history = [
+                    TextAlternative(
+                        text=original_region.text,
+                        confidence=original_region.confidence,
+                        provider=original_region.provider,
+                        text_provenance=copy.deepcopy(original_region.text_provenance),
+                        decision_state="superseded",
+                    )
+                ]
+                for index, alternative in enumerate(original_region.alternatives):
+                    historical = copy.deepcopy(alternative)
+                    if historical.decision_state == "pending":
+                        historical.decision_state = (
+                            "accepted" if index == accepted_index else "rejected"
+                        )
+                    history.append(historical)
+                reviewed.resolution = "resolved"
+                reviewed.alternatives = history
+                if accepted_alternative is not None:
+                    reviewed.confidence = accepted_alternative.confidence
+                    reviewed.provider = accepted_alternative.provider
+                    reviewed.text_provenance = {
+                        **(
+                            copy.deepcopy(accepted_alternative.text_provenance)
+                            if isinstance(
+                                accepted_alternative.text_provenance,
+                                dict,
+                            )
+                            else {}
+                        ),
+                        "human_review": review_record,
+                    }
+                else:
+                    reviewed.confidence = None
+                    reviewed.provider = "human-review"
+                    reviewed.text_provenance = {"human_review": review_record}
+            else:
+                reviewed.text_provenance = {
+                    **(
+                        reviewed.text_provenance
+                        if isinstance(reviewed.text_provenance, dict)
+                        else {}
+                    ),
+                    "human_review": review_record,
+                }
+
+            page.regions[region_index] = reviewed
+            page.text = render_evidence(page.regions)
+            reader_review = getattr(active_reader, "page_needs_review", None)
+            page.route = (
+                "review"
+                if page.failure_ids
+                or bool(callable(reader_review) and reader_review(page.page_number))
+                or any(_region_needs_review(region) for region in page.regions)
+                else "accept_local"
+            )
+            session["revision"] += 1
+            _refresh_session_response(
+                session,
+                session_root,
+                page,
+                original_region,
+                reviewed,
+                presentation_reader,
+            )
+            response = session["response"]
+            response["recovery_outcome"] = {
+                "kind": "human_review",
+                "status": action,
+                "request_id": request_id,
+                "page_number": page_number,
+                "region_id": region_id,
+                "base_revision": base_revision,
+                "revision": session["revision"],
+            }
+            response_payload = copy.deepcopy(response)
+        return JSONResponse(response_payload)
 
     @app.delete("/api/sessions/{session_id}")
     def handle_clear(session_id: str) -> Any:
@@ -980,6 +1215,132 @@ def _get_session(sessions: SessionStore, session_id: str) -> dict[str, Any]:
         return sessions.get(session_id)
     except KeyError as error:
         raise HTTPException(404, "Session not found") from error
+
+
+def _revision_request(payload: dict[str, Any]) -> tuple[int, str, int, str]:
+    page_number = payload.get("page_number")
+    region_id = payload.get("region_id")
+    revision = payload.get("revision")
+    request_id = payload.get("request_id")
+    if (
+        isinstance(page_number, bool)
+        or not isinstance(page_number, int)
+        or page_number < 1
+        or not isinstance(region_id, str)
+        or not region_id
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 1
+        or not isinstance(request_id, str)
+        or not request_id
+    ):
+        raise HTTPException(
+            400,
+            "page_number, region_id, revision, and request_id are required",
+        )
+    return page_number, region_id, revision, request_id
+
+
+def _stale_recovery_response(
+    request_id: str,
+    page_number: int,
+    region_id: str,
+    base_revision: int,
+    revision: int,
+    response: dict[str, Any],
+) -> JSONResponse:
+    payload = copy.deepcopy(response)
+    payload["revision"] = revision
+    payload["recovery_outcome"] = {
+        "kind": "revision_conflict",
+        "status": "stale",
+        "request_id": request_id,
+        "page_number": page_number,
+        "region_id": region_id,
+        "base_revision": base_revision,
+        "revision": revision,
+    }
+    return JSONResponse(
+        payload,
+        status_code=409,
+    )
+
+
+def _session_page_region(
+    session: dict[str, Any],
+    page_number: int,
+    region_id: str,
+) -> tuple[PageResult, int]:
+    page = next(
+        (
+            candidate
+            for candidate in session["document"].pages
+            if candidate.page_number == page_number
+        ),
+        None,
+    )
+    if page is None:
+        raise HTTPException(404, "Page not found")
+    region_index = next(
+        (index for index, region in enumerate(page.regions) if region.id == region_id),
+        None,
+    )
+    if region_index is None:
+        raise HTTPException(404, "Region not found")
+    return page, region_index
+
+
+def _refresh_session_response(
+    session: dict[str, Any],
+    session_root: Path,
+    page: PageResult,
+    original_region: TextRegion,
+    reviewed: TextRegion,
+    presentation_reader: LocalReader | None,
+) -> None:
+    response = session["response"]
+    result = _sanitize_result(session["document"].to_dict(), session_root)
+    result["document_id"] = Path(response["filename"]).stem
+    result["source"]["name"] = response["filename"]
+    result["revision"] = session["revision"]
+    response["revision"] = session["revision"]
+    response["result"] = result
+    response["uncertainty"] = _uncertainty_summary(result)
+
+    if _visible_literal(
+        original_region.text,
+        original_region.resolution,
+    ) == _visible_literal(reviewed.text, reviewed.resolution):
+        return
+    if presentation_reader is None or page.page_number > len(session["pages"]):
+        return
+
+    refreshed = _read_presentations(
+        [page],
+        [session["pages"][page.page_number - 1]],
+        presentation_reader,
+        max_pages=1,
+        stage_execution=response["stage_execution"],
+    )
+    presentation_pages = [
+        item
+        for item in response.get("presentation", {}).get("pages", [])
+        if item.get("page_number") != page.page_number
+    ]
+    if page.page_number in refreshed:
+        presentation_pages.append(
+            {"page_number": page.page_number, **refreshed[page.page_number]}
+        )
+    response["presentation"] = _sanitize_result(
+        {
+            "schema_version": 2,
+            "pages": sorted(
+                presentation_pages,
+                key=lambda item: item["page_number"],
+            ),
+        },
+        session_root,
+    )
 
 
 def _safe_filename(filename: str | None) -> str:
@@ -1251,6 +1612,10 @@ def _assign_presentation_rendering(
                 "status": "selected",
                 "source_region_id": source_id,
             }
+            if block.get("category") in {"table", "formula"}:
+                block["rendering"].update(
+                    _presentation_source_metadata(page.page_number, source, sources)
+                )
             continue
         block["rendering"] = {
             "status": "canonical_fallback",
@@ -1316,6 +1681,7 @@ def _validate_presentation_source_alignment(
         return
     if failures:
         validation["status"] = "failed"
+    aligned_text = _presentation_alignment_text(block.get("category"), raw_text)
     if not _presentation_source_is_fully_resolved(source, sources):
         return
 
@@ -1333,8 +1699,6 @@ def _validate_presentation_source_alignment(
         validation["status"] = "failed"
         return
 
-    aligned_text = _presentation_alignment_text(block.get("category"), raw_text)
-
     supported_critical = Counter(_critical_presentation_tokens(supported_text))
     generated_critical = Counter(_critical_presentation_tokens(aligned_text))
     if generated_critical - supported_critical:
@@ -1348,6 +1712,7 @@ def _validate_presentation_source_alignment(
         )
 
     category = block.get("category")
+    generated_tokens = Counter(_presentation_tokens(aligned_text))
     source_tokens = (
         Counter(_presentation_tokens(supported_text))
         if category in {"table", "formula"}
@@ -1359,7 +1724,6 @@ def _validate_presentation_source_alignment(
             for token in _presentation_tokens(region.text)
         )
     )
-    generated_tokens = Counter(_presentation_tokens(aligned_text))
     if source_tokens:
         preserved = sum((source_tokens & generated_tokens).values())
         coverage = preserved / sum(source_tokens.values())
@@ -1378,13 +1742,16 @@ def _validate_presentation_source_alignment(
                     ),
                 }
             )
-    if category in {"table", "formula"} and generated_tokens - source_tokens:
+    if (
+        not failures
+        and (source.structure or {}).get("block_type") != "form_row"
+        and not (source.structure or {}).get("layout_owner_id")
+        and generated_tokens - Counter(_presentation_tokens(supported_text))
+    ):
         failures.append(
             {
                 "code": "unsupported_generated_content",
-                "message": (
-                    "Generated structured content is not present in canonical evidence"
-                ),
+                "message": "Generated content is not present in canonical evidence",
             }
         )
     if category == "table" and _presentation_tokens(
@@ -1463,10 +1830,7 @@ def _validate_presentation_table_alignment(
             "critical_content_changed",
             "Generated table did not preserve every canonical number and identifier",
         )
-    if (
-        _presentation_source_is_fully_resolved(source, sources)
-        and generated_tokens - supported_tokens
-    ):
+    if generated_tokens - supported_tokens:
         _append_presentation_failure(
             failures,
             "unsupported_generated_content",
@@ -1687,6 +2051,43 @@ def _presentation_source_evidence(
         key=lambda region: (region.reading_order, region.id),
     )
     return children or [source]
+
+
+def _presentation_source_metadata(
+    page_number: int,
+    source: TextRegion,
+    sources: dict[str, TextRegion],
+) -> dict[str, Any]:
+    evidence = _presentation_source_evidence(source, sources)
+    metadata: dict[str, Any] = {
+        "source_page_number": page_number,
+        "source_bounding_box": asdict(source.bounding_box),
+        "source_evidence_ids": [region.id for region in evidence],
+    }
+    structure = source.structure if isinstance(source.structure, dict) else {}
+    detection_confidence = structure.get("detection_confidence")
+    if (
+        _region_semantic_kind(source) == "table"
+        and isinstance(detection_confidence, int | float)
+        and not isinstance(detection_confidence, bool)
+        and 0 <= detection_confidence <= 1
+    ):
+        metadata.update(
+            {
+                "source_confidence": float(detection_confidence),
+                "source_confidence_kind": "Detection score",
+                "source_confidence_scope": "table detection",
+            }
+        )
+    elif source.confidence is not None:
+        metadata.update(
+            {
+                "source_confidence": source.confidence,
+                "source_confidence_kind": "Recognition score",
+                "source_confidence_scope": "source region",
+            }
+        )
+    return metadata
 
 
 def _presentation_canonical_text(
@@ -1963,11 +2364,15 @@ def _presentation_source_is_fully_resolved(
 
 def _region_semantic_kind(region: TextRegion) -> str:
     structure = region.structure if isinstance(region.structure, dict) else {}
-    value = f"{region.kind} {structure.get('role', '')}".casefold()
+    value = (
+        f"{region.kind} {structure.get('role', '')} {structure.get('block_type', '')}"
+    ).casefold()
     if "table" in value:
         return "table"
     if "figure" in value or "image" in value:
         return "figure"
+    if "formula" in value or "equation" in value:
+        return "formula"
     if "checkbox" in value or "radio" in value or "control" in value:
         return "control"
     return "text"
@@ -2154,6 +2559,13 @@ def _rectangular_table(rows: list[list[tuple[int, int]]]) -> bool:
 
 
 def _validate_presentation_formula(raw_text: str) -> list[dict[str, str]]:
+    if not raw_text.strip():
+        return [
+            {
+                "code": "empty_formula",
+                "message": "Formula output has no content",
+            }
+        ]
     if not _balanced_latex_braces(raw_text):
         return [
             {
@@ -2304,7 +2716,7 @@ def _page_uncertainty(page: dict[str, Any]) -> dict[str, Any]:
         ):
             risk_reasons.append("rejected_table_candidate")
         handwriting_review = structure.get("handwriting_review")
-        if isinstance(handwriting_review, dict):
+        if isinstance(handwriting_review, dict) and handwriting_review.get("required"):
             reason = handwriting_review.get("reason")
             if isinstance(reason, str) and reason:
                 risk_reasons.append(reason)
@@ -2362,6 +2774,7 @@ def _different_alternatives(text: str, alternatives: Any) -> int:
         " ".join(str(alternative.get("text", "")).casefold().split()) != normalized
         for alternative in alternatives
         if isinstance(alternative, dict)
+        and alternative.get("decision_state", "pending") == "pending"
     )
 
 
@@ -2523,6 +2936,7 @@ def _result_markdown(response: dict[str, Any]) -> str:
         "# OCR result",
         "",
         f"- File: {response['filename']}",
+        f"- Revision: {result['revision']}",
         f"- Status: {result['status']}",
         f"- Backend: {response['backend']}",
         f"- Backend version: {response['backend_version']}",
@@ -2753,6 +3167,8 @@ def _presentation_semantic_kind(region: dict[str, Any]) -> str:
         return "table"
     if "figure" in value or "image" in value:
         return "figure"
+    if "formula" in value or "equation" in value:
+        return "formula"
     if "checkbox" in value or "radio" in value or "control" in value:
         return "control"
     return "text"

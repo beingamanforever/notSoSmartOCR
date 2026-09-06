@@ -4,6 +4,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+import pytest
 from PIL import Image, ImageDraw
 
 from ocr_pipeline.contracts import BoundingBox, TextRegion
@@ -103,6 +104,11 @@ def test_tiny_selected_candidate_on_large_page_is_preserved_as_ambiguous(
     )
     assert control.text == "[?] Tiny option"
     assert control.structure["state"] == "ambiguous"
+    assert control.structure["state_confidence"] is None
+    assert control.structure["observed_mark_confidence"] == 0.5
+    assert control.confidence is None
+    assert control.structure["association_status"] == "linked"
+    assert control.structure["association_confidence"] is None
     assert control.resolution == "unreadable"
     assert result.pages[0].route == "review"
 
@@ -183,6 +189,89 @@ def test_small_control_group_keeps_readable_state_with_coverage_warning(
     assert control.structure["coverage_status"] == "insufficient_control_group"
     assert control.resolution == "resolved"
     assert result.pages[0].route == "review"
+
+
+def test_colon_rich_form_keeps_sparse_control_marks_for_review(
+    tmp_path: Path,
+) -> None:
+    source = _control_image(tmp_path, selected=True)
+    labels = [
+        _region(
+            f"field-{index}",
+            f"Field {index}:",
+            (45, 20, 120, 35),
+            index + 1,
+        )
+        for index in range(6)
+    ]
+
+    result = process_document(
+        source,
+        FixedReader(labels),
+        stages=[GeometricControlStage(minimum_group_size=6)],
+    )
+
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert len(controls) == 1
+    assert controls[0].resolution == "resolved"
+    assert controls[0].structure["coverage_status"] == "insufficient_control_group"
+
+
+def test_sparse_math_glyphs_are_not_promoted_to_selected_controls(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "math-glyphs.png"
+    image = Image.new("L", (400, 400), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((30, 40, 55, 65), outline="black", width=2)
+    draw.line((36, 46, 49, 59), fill="black", width=2)
+    draw.line((49, 46, 36, 59), fill="black", width=2)
+    image.save(source)
+    label = _region("math", "x x x", (65, 42, 115, 64), 1)
+
+    result = process_document(
+        source,
+        FixedReader([label]),
+        stages=[GeometricControlStage()],
+    )
+
+    assert all(region.kind != "checkbox" for region in result.pages[0].regions)
+
+
+@pytest.mark.parametrize(
+    ("selected_label", "other_label"), [("M", "F"), ("Y", "N"), ("1", "2")]
+)
+def test_selected_short_option_is_preserved_by_its_control_group(
+    tmp_path: Path,
+    selected_label: str,
+    other_label: str,
+) -> None:
+    source = tmp_path / f"short-options-{selected_label}.png"
+    image = Image.new("L", (220, 90), "white")
+    draw = ImageDraw.Draw(image)
+    for top, selected in ((15, True), (50, False)):
+        draw.rectangle((20, top, 34, top + 14), outline="black", width=2)
+        if selected:
+            draw.line((23, top + 3, 31, top + 11), fill="black", width=2)
+            draw.line((31, top + 3, 23, top + 11), fill="black", width=2)
+    image.save(source)
+    labels = [
+        _region("selected", selected_label, (42, 15, 58, 30), 1),
+        _region("other", other_label, (42, 50, 58, 65), 2),
+    ]
+
+    result = process_document(
+        source,
+        FixedReader(labels),
+        stages=[GeometricControlStage()],
+    )
+
+    assert any(
+        region.kind == "checkbox" and region.text == f"[x] {selected_label}"
+        for region in result.pages[0].regions
+    )
 
 
 def test_line_cleanup_rejects_square_letter_inside_word(tmp_path: Path) -> None:
@@ -1153,6 +1242,153 @@ def test_control_stage_recovers_selected_marks_inside_semantic_table_cells(
         "source_evidence_ids": ["table", "row-wed"],
     }
     assert control.structure["source_evidence_ids"] == ["table", "row-wed"]
+
+
+def test_control_stage_rejects_single_diagonal_table_text_fragments(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "table-text-fragments.png"
+    image = Image.new("L", (500, 180), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line((215, 100, 230, 116), fill="black", width=3)
+    draw.line((295, 100, 310, 116), fill="black", width=3)
+    image.save(source)
+    cells = [
+        _cell("header-task", 0, 0, "TASK", (20, 40, 180, 80)),
+        _cell("header-mon", 0, 1, "MON", (180, 40, 260, 80)),
+        _cell("header-tues", 0, 2, "TUES", (260, 40, 340, 80)),
+        _cell("header-wed", 0, 3, "WED", (340, 40, 420, 80)),
+        _cell("row-label", 1, 0, "Financial values", (20, 80, 180, 125)),
+        _cell("row-mon", 1, 1, "", (180, 80, 260, 125)),
+        _cell("row-tues", 1, 2, "", (260, 80, 340, 125)),
+        _cell("row-wed", 1, 3, "", (340, 80, 420, 125)),
+    ]
+    table = TextRegion(
+        id="table",
+        kind="table",
+        text="",
+        confidence=0.96,
+        bounding_box=BoundingBox(20, 40, 420, 125),
+        reading_order=10,
+        provider="table-transformer",
+        structure={"role": "table", "cells": cells},
+    )
+
+    result = process_document(
+        source,
+        FixedReader([table]),
+        stages=[GeometricControlStage()],
+    )
+
+    assert all(region.kind != "checkbox" for region in result.pages[0].regions)
+
+
+def test_control_stage_does_not_treat_financial_values_as_control_headers(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "financial-table.png"
+    image = Image.new("L", (760, 360), "white")
+    draw = ImageDraw.Draw(image)
+    for x, y in ((235, 155), (535, 155), (315, 305), (535, 305)):
+        draw.line((x, y, x + 8, y + 8), fill="black", width=3)
+        draw.line((x + 8, y + 8, x + 24, y - 12), fill="black", width=3)
+    image.save(source)
+
+    table_rows = [
+        ["", "2005", "2014", "2023", "2024"],
+        ["Revenue", "$187", "$487", "$1,127", "$1,064"],
+        ["Total payments volume", "NA", "$1.6", "$5.9", "SE"],
+        ["Credit card loans market share", "", "17%", "17%", ""],
+    ]
+    rank_rows = [
+        ["", "2006", "", "", ""],
+        ["Total Markets revenue", "#8", "dl", "#1", "CA"],
+        ["Global Investment banking fees", "#2", "ud", "#1", "a"],
+    ]
+    tables = []
+    for table_id, top, rows in (
+        ("consumer-table", 30, table_rows),
+        ("markets-table", 210, rank_rows),
+    ):
+        cells = []
+        for row, values in enumerate(rows):
+            for column, text in enumerate(values):
+                left = 20 if column == 0 else 200 + (column - 1) * 100
+                right = 200 if column == 0 else left + 100
+                cell = _cell(
+                    f"{table_id}-{row}-{column}",
+                    row,
+                    column,
+                    text,
+                    (left, top + row * 40, right, top + (row + 1) * 40),
+                )
+                cells.append(cell | {"confidence": 0.4})
+        tables.append(
+            TextRegion(
+                id=table_id,
+                kind="table",
+                text="",
+                confidence=0.96,
+                bounding_box=BoundingBox(20, top, 600, top + len(rows) * 40),
+                reading_order=10,
+                provider="table-transformer",
+                structure={"role": "table", "cells": cells},
+            )
+        )
+
+    result = process_document(
+        source,
+        FixedReader(tables),
+        stages=[GeometricControlStage()],
+    )
+
+    assert all(region.kind != "checkbox" for region in result.pages[0].regions)
+
+
+def test_financial_artifact_does_not_promote_scattered_glyphs_as_controls() -> None:
+    source = Path(__file__).parents[1] / "artifacts/demo/financial_table.png"
+    labels = [
+        _region("serve", "Serve", (732, 179, 767, 207), 1),
+        _region("deposit", "deposit", (751, 307, 795, 320), 2),
+        _region("of-1", "of", (210, 462, 220, 471), 3),
+        _region("of-2", "of", (210, 480, 220, 489), 4),
+        _region("first", "first", (863, 760, 886, 770), 5),
+        _region("morgan", "Morgan", (756, 829, 800, 842), 6),
+        _region("of-3", "of", (210, 915, 221, 925), 7),
+        _region("payments", "Payments", (314, 949, 372, 962), 8),
+        _region("of-4", "of", (210, 1035, 221, 1045), 9),
+        _region("of-5", "of", (210, 1265, 221, 1275), 10),
+    ]
+
+    result = process_document(
+        source,
+        FixedReader(labels),
+        stages=[GeometricControlStage()],
+    )
+
+    assert all(region.kind != "checkbox" for region in result.pages[0].regions)
+
+
+def test_historical_formula_region_owns_math_marks_before_control_detection() -> None:
+    source = Path(__file__).parents[1] / "artifacts/demo/formula_scan.png"
+    formula = TextRegion(
+        id="formula",
+        kind="formula",
+        text="integral equation x dx = result",
+        confidence=0.99,
+        bounding_box=BoundingBox(80, 370, 430, 535),
+        reading_order=1,
+        provider="nemotron-ocr-v2",
+        structure={"semantic_class": "formula"},
+    )
+
+    result = process_document(
+        source,
+        FixedReader([formula]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    assert all(region.kind != "checkbox" for region in result.pages[0].regions)
 
 
 def test_control_stage_recovers_same_cell_controls_from_ruled_form(

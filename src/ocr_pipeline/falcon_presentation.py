@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 from PIL import Image, UnidentifiedImageError
 
-from .contracts import BoundingBox, PageResult, TextRegion
+from .contracts import (
+    BoundingBox,
+    EvidenceText,
+    PageResult,
+    TextAlternative,
+    TextRegion,
+)
+from .evidence_layout import formula_ink_box
 from .falcon import FalconOCRReader, falcon_token_limit
 from .providers import ReaderError
 from .table_topology import TableTopologyError, validate_table_topology
@@ -68,14 +75,18 @@ class FalconPresentationReader:
         *,
         max_crops: int = 32,
         max_table_segment_height: int = 1536,
+        formula_padding: int = 12,
     ) -> None:
         if max_crops <= 0:
             raise ValueError("Falcon presentation max_crops must be positive")
         if max_table_segment_height <= 0:
             raise ValueError("Falcon table segment height must be positive")
+        if formula_padding < 0:
+            raise ValueError("Falcon formula padding cannot be negative")
         self.reader = reader
         self.max_crops = max_crops
         self.max_table_segment_height = max_table_segment_height
+        self.formula_padding = formula_padding
 
     def read_page(self, image_path: Path, page: PageResult) -> list[TextRegion]:
         handwriting_ids = {
@@ -93,7 +104,7 @@ class FalconPresentationReader:
                 "Falcon presentation image could not be prepared",
             ) from error
 
-        selected = self._select(page.regions, image.size)
+        selected = self._select(page.regions, image)
         if not selected:
             image.close()
             return []
@@ -186,10 +197,12 @@ class FalconPresentationReader:
     def _select(
         self,
         regions: list[TextRegion],
-        image_size: tuple[int, int],
+        image: Image.Image,
     ) -> list[_CropRequest]:
         selected: list[_CropRequest] = []
         seen: set[tuple[object, ...]] = set()
+        image_size = image.size
+        formula_mask: Image.Image | None = None
         handwriting_ids = {
             region.id for region in regions if _is_handwriting_region(region)
         }
@@ -197,7 +210,16 @@ class FalconPresentationReader:
             category = _category(region, handwriting_ids)
             if category is None or not _valid_box(region.bounding_box, image_size):
                 continue
-            requests = self._crop_requests(region, category, image_size)
+            if category == "formula" and formula_mask is None:
+                formula_mask = image.convert("L").point(
+                    lambda value: 255 if value < 220 else 0
+                )
+            requests = self._crop_requests(
+                region,
+                category,
+                image_size,
+                formula_mask,
+            )
             if not requests:
                 continue
             keys = [_request_key(item) for item in requests]
@@ -209,6 +231,8 @@ class FalconPresentationReader:
             selected.extend(requests)
             if len(selected) == self.max_crops:
                 break
+        if formula_mask is not None:
+            formula_mask.close()
         return selected
 
     def _crop_requests(
@@ -216,7 +240,31 @@ class FalconPresentationReader:
         region: TextRegion,
         category: str,
         image_size: tuple[int, int],
+        formula_mask: Image.Image | None,
     ) -> list[_CropRequest]:
+        if category == "formula":
+            structure = region.structure if isinstance(region.structure, dict) else {}
+            grouped_crop = _mapping_box(structure.get("formula_crop"))
+            return [
+                _CropRequest(
+                    region,
+                    category,
+                    _padded_box(grouped_crop, image_size, self.formula_padding)
+                    if grouped_crop is not None and _valid_box(grouped_crop, image_size)
+                    else formula_ink_box(
+                        formula_mask,
+                        region.bounding_box,
+                        image_size,
+                        self.formula_padding,
+                    )
+                    if formula_mask is not None
+                    else _padded_box(
+                        region.bounding_box,
+                        image_size,
+                        self.formula_padding,
+                    ),
+                )
+            ]
         if category != "table":
             return [_CropRequest(region, category, region.bounding_box)]
         structure = region.structure if isinstance(region.structure, dict) else {}
@@ -241,6 +289,127 @@ class FalconPresentationReader:
             image_size,
             self.max_table_segment_height,
         )
+
+
+class FalconFormulaStage:
+    """Record Falcon formula rereads as review evidence on canonical owners."""
+
+    name = "falcon-formula"
+
+    def __init__(self, reader: FalconPresentationReader) -> None:
+        self.reader = reader
+
+    def apply(
+        self,
+        image_path: Path,
+        page_number: int,
+        regions: list[TextRegion],
+    ) -> list[TextRegion]:
+        handwriting_ids = {
+            region.id for region in regions if _is_handwriting_region(region)
+        }
+        owners = [
+            region
+            for region in regions
+            if _category(region, handwriting_ids) == "formula"
+        ]
+        if not owners:
+            return regions
+
+        regions_by_id = {region.id: region for region in regions}
+        page = PageResult(
+            page_number=page_number,
+            width=0,
+            height=0,
+            reader=self.reader.name,
+            route="review",
+            text=EvidenceText("", []),
+            regions=owners,
+        )
+        owners_by_id = {owner.id: owner for owner in owners}
+        for candidate in self.reader.read_page(image_path, page):
+            candidate_provenance = candidate.text_provenance or {}
+            candidate_text = _formula_candidate_text(candidate.text)
+            source_id = candidate_provenance.get("source_region_id")
+            owner = owners_by_id.get(source_id)
+            if owner is None:
+                continue
+            backend = getattr(self.reader.reader, "name", candidate.provider)
+            provenance = {
+                **copy.deepcopy(candidate_provenance),
+                "reader": backend,
+                "presentation_reader": candidate.provider,
+                "crop": {"bounding_box": asdict(candidate.bounding_box)},
+                "page_number": page_number,
+                "source_region_id": owner.id,
+                "candidate_latex": candidate_text,
+            }
+            if not candidate_text:
+                _record_formula_attempt(
+                    owner,
+                    "invalid_output",
+                    "empty_normalized_formula",
+                    provenance,
+                )
+                continue
+            source_providers = sorted(
+                {
+                    child.provider
+                    for child_id in (owner.structure or {}).get(
+                        "child_evidence_ids", []
+                    )
+                    if isinstance(child_id, str)
+                    and (child := regions_by_id.get(child_id)) is not None
+                }
+                or {owner.provider}
+            )
+            provenance["source_providers"] = source_providers
+            if candidate_text == owner.text:
+                same_reader = backend in source_providers
+                _record_formula_attempt(
+                    owner,
+                    "same_reader_repeat" if same_reader else "supported",
+                    (
+                        "reader_not_independent"
+                        if same_reader
+                        else "independent_reader_matches_canonical"
+                    ),
+                    provenance,
+                )
+                if not same_reader:
+                    structure = dict(owner.structure or {})
+                    structure["formula_recognition"] = "specialist_supported"
+                    owner.structure = structure
+                continue
+
+            if not any(
+                alternative.decision_state == "pending"
+                and alternative.text == candidate_text
+                for alternative in owner.alternatives
+            ):
+                owner.alternatives.append(
+                    TextAlternative(
+                        text=candidate_text,
+                        confidence=None,
+                        provider=backend,
+                        text_provenance=copy.deepcopy(provenance),
+                    )
+                )
+            _record_formula_attempt(
+                owner,
+                "candidate_pending",
+                "specialist_disagrees_with_canonical",
+                provenance,
+            )
+            structure = dict(owner.structure or {})
+            structure["formula_recognition"] = "specialist_pending"
+            structure["formula_review"] = {
+                "required": True,
+                "reasons": ["structural_disagreement"],
+                "provenance": copy.deepcopy(provenance),
+            }
+            owner.structure = structure
+        return regions
 
 
 def _category(region: TextRegion, handwriting_ids: set[str]) -> str | None:
@@ -275,6 +444,8 @@ def _category(region: TextRegion, handwriting_ids: set[str]) -> str | None:
         (candidate for candidate in categories if candidate != "text"),
         "text" if "text" in categories else None,
     )
+    if category == "formula" and "formula_attempt" in structure:
+        return None
     if category == "text" and region.resolution == "resolved":
         return None
     if category == "table" and not _table_needs_presentation(region, structure):
@@ -471,3 +642,41 @@ def _valid_box(box: BoundingBox, image_size: tuple[int, int]) -> bool:
 
 def _box_tuple(box: BoundingBox) -> tuple[int, int, int, int]:
     return box.left, box.top, box.right, box.bottom
+
+
+def _padded_box(
+    box: BoundingBox,
+    image_size: tuple[int, int],
+    padding: int,
+) -> BoundingBox:
+    width, height = image_size
+    return BoundingBox(
+        max(0, box.left - padding),
+        max(0, box.top - padding),
+        min(width, box.right + padding),
+        min(height, box.bottom + padding),
+    )
+
+
+def _record_formula_attempt(
+    region: TextRegion,
+    outcome: str,
+    reason: str,
+    provenance: dict[str, Any],
+) -> None:
+    structure = dict(region.structure or {})
+    structure["formula_attempt"] = {
+        "outcome": outcome,
+        "reason": reason,
+        "provenance": copy.deepcopy(provenance),
+    }
+    region.structure = structure
+
+
+def _formula_candidate_text(raw_response: str) -> str:
+    text = raw_response.strip()
+    if text.startswith("$$") and text.endswith("$$"):
+        return text[2:-2].strip()
+    if text.startswith(r"\[") and text.endswith(r"\]"):
+        return text[2:-2].strip()
+    return text

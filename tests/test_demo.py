@@ -363,19 +363,22 @@ class DemoMarkupParser(HTMLParser):
         self.elements.append((tag, dict(attrs)))
 
 
-def test_default_demo_identifies_reduced_tesseract_workbench() -> None:
+def test_default_demo_reports_reduced_composition_without_banner() -> None:
     app = create_app()
 
     with TestClient(app) as client:
         index = client.get("/")
         composition = client.get("/api/composition").json()
 
-    assert "Reduced Tesseract workbench" in index.text
+    assert 'id="composition-banner"' not in index.text
     assert composition["id"] == "reduced-tesseract-workbench"
     assert composition["scope"] == "reduced"
     assert composition["primary_ocr"] == "tesseract-routed"
     assert composition["orientation"] == "not configured"
     assert composition["tesseract_roles"] == ["primary OCR"]
+    assert composition["build_label"] == "local-workbench"
+    assert composition["warmup_completed"] is False
+    assert composition["service_started_at"].endswith("+00:00")
 
 
 def test_workbench_reports_orientation_from_wrapped_reader() -> None:
@@ -404,15 +407,20 @@ def test_demo_processes_multi_page_tiff_and_clears_session() -> None:
         assert index.headers["cache-control"] == "no-store"
         assert "Not So Smart OCR" in index.text
         assert 'id="page-canvas"' in index.text
-        assert 'id="download-markdown"' in index.text
+        assert 'id="copy-markdown"' in index.text
         assert 'canvas.addEventListener("click"' in index.text
         assert 'id="panel-rendered"' in index.text
-        assert 'id="panel-layout"' in index.text
-        assert 'id="panel-processed"' in index.text
-        assert 'id="panel-raw"' in index.text
-        assert 'id="composition-banner"' in index.text
+        assert 'id="panel-visual"' in index.text
+        assert 'id="panel-markdown"' in index.text
+        source_start = index.text.index('<article class="card source-card"')
+        output_start = index.text.index('<article class="card output-card"')
+        visual_start = index.text.index('id="panel-visual"')
+        visual_end = index.text.index('id="panel-markdown"')
+        assert source_start < index.text.index('id="page-canvas"') < output_start
+        assert 'id="page-canvas"' not in index.text[visual_start:visual_end]
+        assert 'id="region-categories"' not in index.text[visual_start:visual_end]
+        assert 'id="composition-banner"' not in index.text
         assert 'aria-live="polite"' in index.text
-        assert "Custom local workbench" in index.text
         assert "__OCR_COMPOSITION_JSON__" not in index.text
 
         composition = client.get("/api/composition")
@@ -430,6 +438,9 @@ def test_demo_processes_multi_page_tiff_and_clears_session() -> None:
                 "Configuration only. This is not the full verified GPU pipeline; "
                 "readiness and execution are reported only after processing."
             ),
+            "build_label": "local-workbench",
+            "service_started_at": composition.json()["service_started_at"],
+            "warmup_completed": False,
         }
 
         processed = client.post(
@@ -576,11 +587,11 @@ def test_demo_processes_multi_page_tiff_and_clears_session() -> None:
         assert example.content.startswith(b"%PDF")
         assert example.headers["content-disposition"].startswith("inline;")
         for example_name in (
-            "handwriting",
+            "formula-scan",
             "academic-paper",
             "code",
-            "photographed-table",
-            "multi-column-page",
+            "financial-table",
+            "scanned-form",
         ):
             gallery_image = client.get(f"/api/examples/{example_name}")
             assert gallery_image.status_code == 200
@@ -588,24 +599,26 @@ def test_demo_processes_multi_page_tiff_and_clears_session() -> None:
             assert gallery_image.headers["content-disposition"].startswith("inline;")
             with Image.open(io.BytesIO(gallery_image.content)) as image:
                 image.verify()
+        handwriting_image = client.get("/api/examples/handwriting")
+        assert handwriting_image.status_code == 200
+        assert handwriting_image.headers["content-type"] == "image/png"
+        assert handwriting_image.content.startswith(b"\x89PNG\r\n\x1a\n")
         assert client.get("/api/examples/../../AGENTS.md").status_code == 404
         assert client.get("/api/examples/private-case").status_code == 404
 
         assert "state.imageRequest += 1" in index.text
-        assert (
-            'byId("panel-json").querySelector("pre").textContent = "{}"' in index.text
-        )
+        assert 'setEmptyContent("markdown-source"' in index.text
         assert 'kind: "table_cell"' in index.text
         assert "function currentOverlays()" in index.text
         assert "boxArea(left.region.bounding_box)" in index.text
         assert 'id="region-order"' in index.text
         assert 'id="region-alternatives"' in index.text
         assert 'id="region-structure"' in index.text
-        assert 'id="risk-card"' in index.text
+        assert 'id="risk-card"' not in index.text
         assert 'id="copy-json"' in index.text
         assert 'id="category-list"' in index.text
         assert 'id="timing-card"' in index.text
-        assert "function renderUncertainty()" in index.text
+        assert "function renderUncertainty()" not in index.text
         assert "function renderCategories()" in index.text
         assert (
             "function renderTiming(timing, pageExecution = [], stageExecution = [])"
@@ -680,19 +693,65 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
 
     assert response.status_code == 200
     html = response.text
-    assert html.count('class="tab" role="tab"') == 6
+    assert html.count('class="tab" role="tab"') == 3
     assert ">Readable draft</button>" not in html
     assert html.count("Not So Smart OCR") == 2
     assert "!SoSmartOCR" not in html
     assert html.count('class="example-button" type="button" data-example=') == 6
     assert 'data-example="clinical-table"' in html
-    assert 'data-example="handwriting"' in html
+    assert 'data-example="formula-scan"' in html
     assert 'data-example="academic-paper"' in html
     assert 'data-example="code"' in html
-    assert 'data-example="photographed-table"' in html
-    assert 'data-example="multi-column-page"' in html
+    assert 'data-example="financial-table"' in html
+    assert 'data-example="scanned-form"' in html
+    assert "Handwritten notes" not in html
+    assert "Local evidence viewer" not in html
+    assert "Local only" not in html
+    assert "25 MB max" not in html
+    assert "Total time taken" in html
     assert html.count('class="example-preview"') == 6
     assert "Table-cell comparison" not in html
+    handle_example_start = html.index("async function handleExample(button)")
+    example_fetch = html.index("await fetch", handle_example_start)
+    assert (
+        html.index("state.selectedFile = null;", handle_example_start) < example_fetch
+    )
+    assert (
+        html.index('byId("parse-button").disabled = true;', handle_example_start)
+        < example_fetch
+    )
+    assert 'button.setAttribute("aria-busy", "true")' in html
+    assert 'const extension = blob.type === "image/png" ? ".png" : ".pdf";' in html
+    assert "renderUncertainty();" not in html
+    assert 'class="inspector empty"' in html
+    assert 'class="tab-panel active empty-panel confidence-review"' in html
+    assert "Ready to extract" in html
+    assert ">Text output</button>" in html
+    assert ">Visual</button>" in html
+    assert ">Confidence</button>" in html
+    assert "confidence-summary" not in html
+    assert "High 90%+" not in html
+    assert "Medium 70-89.99%" not in html
+    assert "Low below 70%" not in html
+    assert "Confidence is not correctness." in html
+    assert "element.dataset.confidenceLevel = validConfidence(confidence)" in html
+    assert (
+        'if (value === null || value === undefined || value === "") return false;'
+        in html
+    )
+    assert 'if (confidence >= 0.9) return "high";' in html
+    assert 'if (confidence >= 0.7) return "medium";' in html
+    assert "${target.dataset.confidenceKind}: ${percent} · Uncalibrated" in html
+    assert 'provenance.method === "tesseract_tsv"' in html
+    assert "line or region" in html
+    assert "function markdownUrl()" in html
+    assert "function renderReview(payload)" in html
+    assert 'run.status === "failed"' in html
+    assert "page.review_required && !notedPages.has(page.page_number)" in html
+    assert "const markdown = await response.text();" in html
+    assert 'list.className = "markdown-lines";' in html
+    assert 'const item = document.createElement("li");' in html
+    assert 'aria-controls="panel-markdown" id="tab-markdown"' in html
 
     assert 'id="client-timer" data-state="idle"' in html
     assert 'id="client-elapsed">0.0 s' in html
@@ -700,13 +759,14 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     assert "function stopClientTimer(outcome)" in html
     assert 'let timerOutcome = "error"' in html
     assert 'timerOutcome = "complete"' in html
+    assert html.count("if (resultRequest === state.resultRequest) {") == 2
     assert html.index("startClientTimer();") < html.index("resetResult();")
     assert html.index("startClientTimer();") < html.index(
         'fetch("/api/process", { method: "POST", body })'
     )
     assert "stopClientTimer(timerOutcome);" in html
     assert "Pipeline execution" in html
-    assert '"Backend pipeline"' in html
+    assert '"Backend pipeline"' not in html
     assert '["Preview queue", timing.preview_queue_seconds]' in html
     assert '["Preview processing", timing.preview_seconds]' in html
     assert '["OCR queue", timing.queue_seconds]' in html
@@ -716,18 +776,23 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     )
     assert "`Page ${run.page_number} total`" in html
     assert "function stageExecutionDetail(run)" in html
-    assert ">Regions</button>" in html
+    assert ">Regions</button>" not in html
 
+    assert 'id="copy-text" type="button" data-copy-state="idle"' in html
+    assert 'id="copy-markdown" type="button" data-copy-state="idle"' in html
     assert 'id="copy-json" type="button" data-copy-state="idle"' in html
-    assert "Copy API response JSON" in html
-    assert "Download result JSON" in html
+    assert ">Copy</summary>" in html
+    assert ">Download</summary>" in html
+    assert 'id="download-markdown" aria-disabled="true"' in html
+    assert 'id="download-json" aria-disabled="true"' in html
+    assert ">Result JSON</a>" in html
     assert 'id="copy-status" role="status" aria-live="polite"' in html
-    assert html.count("JSON.stringify(state.response, null, 2)") == 2
+    assert html.count("JSON.stringify(state.response, null, 2)") == 1
     assert "navigator.clipboard.writeText(content)" in html
     assert "function copyTextWithTextarea(content)" in html
     assert 'document.execCommand("copy")' in html
-    assert 'showCopyStatus("JSON copied", "copied")' in html
-    assert 'showCopyStatus("Copy failed", "error")' in html
+    assert 'showCopyStatus(button, successMessage, "copied")' in html
+    assert 'showCopyStatus(button, "Copy failed", "error")' in html
     assert 'button.textContent = "Copying..."' in html
     assert 'button.setAttribute("aria-busy", "true")' in html
     assert 'button.setAttribute("aria-busy", "false")' in html
@@ -744,58 +809,141 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     assert "function updateRereadAction(region)" in html
     assert "Rereading the selected region locally..." in html
     assert "Handwriting reread complete." in html
-    assert "`/api/sessions/${sessionId}/handwriting`" in html
-    assert (
-        "JSON.stringify({ page_number: page.page_number, region_id: region.id })"
-        in html
-    )
-    assert "state.response = payload;\n        renderResult();" in html
+    assert "`/api/sessions/${sessionId}/${path}`" in html
+    assert "revision," in html
+    assert "request_id: requestId" in html
+    assert 'payload.recovery_outcome?.status === "stale"' in html
+    assert "function applyRevisionResponse(payload)" in html
+    assert "function recoveryStatusMessage(payload, fallback)" in html
+    assert "Alternative accepted as the canonical revision." in html
+    assert "A candidate was added; review is still required." in html
+    assert "state.response = payload;" in html
+    assert 'id="review-actions"' in html
+    assert 'id="accept-alternative"' in html
+    assert 'id="keep-unresolved"' in html
+    assert 'id="layers-control"' in html
+    assert 'window.addEventListener("pagehide", cancelRecovery, { once: true })' in html
+    assert "state.recoveryController?.abort();" in html
+    assert "if (!target) {\n        clearInteraction();" in html
+    assert "state.renderedMarkdownRevision === revision" in html
+    assert "state.response?.session_id !== sessionId" in html
+    assert 'byId("region-edit-text").value = "";' in html
+    assert "scrollIntoView" not in html
 
     assert 'form.setAttribute("aria-busy", String(busy))' in html
     assert 'parseButton.textContent = busy ? "Parsing..." : "Parse"' in html
     assert "function activateTab(tab)" in html
+    assert "dismissConfidenceTooltip();" in html
     assert "panel.hidden = !active" in html
-    assert 'id="panel-layout" aria-labelledby="tab-layout" hidden' in html
-    assert (
-        "Canonical and review-relevant semantic regions are shown by default." in html
-    )
-    assert "Show all evidence regions" in html
-    assert (
-        "state.showAllRegions ? orderedRegions(page.regions) : displayRegions(page)"
-        in html
-    )
+    assert 'id="panel-visual" aria-labelledby="tab-visual" hidden' in html
+    assert 'id="panel-markdown" aria-labelledby="tab-markdown" hidden' in html
+    assert 'if (tab.id === "tab-markdown") void loadRenderedMarkdown();' in html
+    assert "function documentMarkdownLines(markdown)" in html
+    assert "return lines;" in html
+    assert ">Technical details</summary>" in html
+    assert 'id="region-crop" aria-label="Selected source crop" hidden' in html
+    assert 'state.response?.composition?.handwriting === "configured"' in html
+    assert "function alignedAlternatives(region)" in html
+    assert "function clearRegionSelection()" in html
     assert '["table", "figure", "control"].includes(semanticKind(region))' in html
-    assert (
-        'id="panel-raw" aria-labelledby="tab-raw" aria-describedby="raw-scope"' in html
-    )
-    assert ">Region JSON</button>" in html
-    assert "Final post-stage region JSON" in html
-    assert "This view contains page-numbered regions after all pipeline stages." in html
+    assert ">Region JSON</button>" not in html
+    assert ">Processed</button>" not in html
+    assert ">Failures</button>" not in html
     assert 'state.hiddenKinds.add("text")' in html
+    assert 'state.hiddenKinds.add("line")' in html
     assert 'state.hiddenKinds.add("table_cell")' in html
-    assert 'state.hiddenKinds.add("table")' in html
+    assert 'state.hiddenKinds.add("table")' not in html
+    assert "state.hiddenKinds.delete(categoryKey(source))" not in html
+    assert "state.selectedRegionKey = regionKey(source);" in html
     assert 'if (kind === "table_cell") return kind;' in html
     assert 'if (kind === "table") return "table bounds";' in html
     assert 'if (kind === "table_cell") return "table cell bounds";' in html
-    assert "if (structural && index !== state.selectedOverlay) return;" in html
-    assert "if (!structural) {" in html
-    assert "Execution failures" in html
-    assert "Unresolved evidence and review flags" in html
-    assert "function reviewFlagSummary(page)" in html
-    assert (
-        'byId("download-json").href = '
-        "`/api/sessions/${payload.session_id}/result.json`;" in html
-    )
+    assert "const label = selected ? `${index + 1} ${kind}` : kind;" in html
+    assert 'if (role === "layout_block") return true;' in html
+    assert "function visualTabActive()" in html
 
-    assert "Evidence diagnostics" in html
-    assert "Provider-reported" in html
-    assert 'card.dataset.state = page.review_required ? "review" : "clear"' in html
-    assert "Review required · page ${page.page_number}" in html
+    assert "Evidence diagnostics" not in html
+    assert 'id="metadata"' not in html
     assert 'region?.structure?.role || ""' in html
     assert "block.dataset.sourceKind = group.sourceKind" in html
-    assert 'region.text_provenance?.merge_level === "word"' in html
+    assert "function confidenceScope(region)" in html
+    assert "function decoratePresentationSource(element, block, source)" in html
+    assert "rendering.source_confidence_scope" in html
+    assert "function evidencePageNumber(target)" in html
     assert "function renderedLiteral(value, resolution)" in html
     assert "appendEvidenceState" not in html
+
+
+def test_confidence_review_uses_reported_values_and_downloaded_markdown() -> None:
+    class ConfidenceReader:
+        name = "confidence-reader"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            return [
+                TextRegion(
+                    id=f"page-{page_number}-high",
+                    kind="word",
+                    text="High",
+                    confidence=0.95,
+                    bounding_box=BoundingBox(5, 5, 30, 20),
+                    reading_order=1,
+                    provider=self.name,
+                ),
+                TextRegion(
+                    id=f"page-{page_number}-medium",
+                    kind="word",
+                    text="Medium",
+                    confidence=0.8,
+                    bounding_box=BoundingBox(35, 5, 70, 20),
+                    reading_order=2,
+                    provider=self.name,
+                ),
+                TextRegion(
+                    id=f"page-{page_number}-low",
+                    kind="word",
+                    text="Low",
+                    confidence=0.4,
+                    bounding_box=BoundingBox(75, 5, 95, 20),
+                    reading_order=3,
+                    provider=self.name,
+                ),
+                TextRegion(
+                    id=f"page-{page_number}-unreported",
+                    kind="word",
+                    text="Unreported",
+                    confidence=None,
+                    bounding_box=BoundingBox(5, 30, 60, 45),
+                    reading_order=4,
+                    provider=self.name,
+                ),
+            ]
+
+    app = create_app(ConfidenceReader())
+
+    with TestClient(app) as client:
+        index = client.get("/")
+        processed = client.post(
+            "/api/process",
+            files={"file": ("confidence.png", _page_png(), "image/png")},
+        )
+        payload = processed.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    assert index.status_code == 200
+    assert processed.status_code == 200
+    assert [
+        region["confidence"] for region in payload["result"]["pages"][0]["regions"]
+    ] == [0.95, 0.8, 0.4, None]
+    assert "High Medium Low" in markdown
+    assert "Unreported" in markdown
+    assert (
+        "function decorateConfidence(element, confidence, inline = false, evidence = {})"
+        in index.text
+    )
+    assert (
+        "element.dataset.confidencePercent = validConfidence(confidence)" in index.text
+    )
+    assert "function markdownUrl()" in index.text
 
 
 def test_generated_table_example_runs_through_table_pipeline() -> None:
@@ -844,20 +992,78 @@ def test_generated_table_example_runs_through_table_pipeline() -> None:
     assert table_lines[1].count("---") == 4
 
 
-def test_demo_uses_neutral_navy_and_amber_visual_roles() -> None:
+def test_public_raster_examples_process_end_to_end() -> None:
+    class PublicExampleReader(ControlledReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            return [
+                TextRegion(
+                    id=f"page-{page_number}-region-1",
+                    kind="paragraph",
+                    text="Public example",
+                    confidence=0.91,
+                    bounding_box=BoundingBox(1, 1, 20, 20),
+                    reading_order=1,
+                    provider=self.name,
+                )
+            ]
+
+    app = create_app(PublicExampleReader())
+
+    with TestClient(app) as client:
+        for example_name in ("formula-scan", "academic-paper"):
+            example = client.get(f"/api/examples/{example_name}")
+            assert example.status_code == 200
+            processed = client.post(
+                "/api/process",
+                files={"file": (f"{example_name}.png", example.content, "image/png")},
+            )
+            assert processed.status_code == 200
+            assert processed.json()["result"]["status"] == "success"
+
+
+def test_documented_cpu_entrypoint_processes_bundled_complex_examples_as_reduced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(demo_module.shutil, "which", lambda _: "/usr/bin/tesseract")
+    app = create_app()
+
+    with TestClient(app) as client:
+        for example_name in ("financial-table", "handwriting"):
+            example = client.get(f"/api/examples/{example_name}")
+            assert example.status_code == 200
+            with Image.open(io.BytesIO(example.content)) as image:
+                image.verify()
+            processed = client.post(
+                "/api/process",
+                files={
+                    "file": (
+                        f"{example_name}.png",
+                        example.content,
+                        "image/png",
+                    )
+                },
+            )
+            assert processed.status_code == 200
+            payload = processed.json()
+            assert payload["composition"]["id"] == "reduced-tesseract-workbench"
+            assert payload["composition"]["handwriting"] == "not configured"
+            assert payload["pipeline_stages"] == []
+
+
+def test_demo_uses_neutral_navy_and_blue_visual_roles() -> None:
     app = create_app(ControlledReader())
 
     with TestClient(app) as client:
         html = client.get("/").text
 
     for declaration in (
-        "--background: #f4f2ed",
+        "--background: #f6f7f9",
         "--panel: #ffffff",
-        "--panel-raised: #eeece5",
-        "--text: #15243b",
-        "--muted: #5b6678",
-        "--accent: #a85b00",
-        "--accent-soft: #fff2d5",
+        "--panel-raised: #f3f4f6",
+        "--text: #172033",
+        "--muted: #667085",
+        "--accent: #2563eb",
+        "--accent-soft: #eff6ff",
     ):
         assert declaration in html
     assert "--danger:" not in html
@@ -867,9 +1073,14 @@ def test_demo_uses_neutral_navy_and_amber_visual_roles() -> None:
         ".status-line.success { color: var(--text); border-color: var(--line-strong);"
         in html
     )
-    assert 'const structureColor = rootStyle.getPropertyValue("--text").trim()' in html
+    assert 'title: "#1d4ed8"' in html
+    assert 'paragraph: "#a21caf"' in html
+    assert 'figure: "#047857"' in html
+    assert 'control: "#c2410c"' in html
     assert 'const actionColor = rootStyle.getPropertyValue("--accent").trim()' in html
-    assert "return structureColor;" in html
+    assert (
+        "return regionColors[categoryKey(regionOrKind)] || regionColors.text;" in html
+    )
 
 
 def test_demo_markup_links_controls_tabs_and_output_panels() -> None:
@@ -905,6 +1116,15 @@ def test_demo_markup_links_controls_tabs_and_output_panels() -> None:
     assert reread_attrs["hidden"] is None
     assert reread_attrs["disabled"] is None
     assert by_element_id["reread-status"][1]["role"] == "status"
+    assert by_element_id["rendered-toolbar"][1]["hidden"] is None
+    assert by_element_id["confidence-toggle"][1]["aria-pressed"] == "true"
+    assert (
+        by_element_id["confidence-toggle"][1]["aria-label"]
+        == "Turn provider confidence highlights off"
+    )
+    assert (
+        'element.dataset.confidenceScope = evidence.scope || "region";' in response.text
+    )
 
     tabs = [attrs for _, attrs in elements if attrs.get("role") == "tab"]
     panels = {
@@ -912,11 +1132,8 @@ def test_demo_markup_links_controls_tabs_and_output_panels() -> None:
     }
     assert [tab["id"] for tab in tabs] == [
         "tab-rendered",
-        "tab-layout",
-        "tab-processed",
-        "tab-raw",
-        "tab-json",
-        "tab-failures",
+        "tab-visual",
+        "tab-markdown",
     ]
     assert len(panels) == len(tabs)
     assert [tab["id"] for tab in tabs if tab["aria-selected"] == "true"] == [
@@ -927,13 +1144,16 @@ def test_demo_markup_links_controls_tabs_and_output_panels() -> None:
         assert panel["aria-labelledby"] == tab["id"]
         assert ("hidden" in panel) is (tab["aria-selected"] == "false")
 
-    for link_id in ("download-json", "download-markdown"):
-        tag, attrs = by_element_id[link_id]
-        assert tag == "a"
-        assert "download" in attrs
-        assert attrs["aria-disabled"] == "true"
+    for button_id in ("copy-text", "copy-markdown", "copy-json"):
+        tag, attrs = by_element_id[button_id]
+        assert tag == "button"
+        assert "disabled" in attrs
 
     assert "@media (max-width: 900px)" in response.text
+    assert (
+        "grid-template-columns: minmax(0, .95fr) minmax(420px, 1.05fr);"
+        in response.text
+    )
     assert ".workspace { grid-template-columns: 1fr; }" in response.text
 
 
@@ -1366,7 +1586,7 @@ def test_demo_adds_review_only_local_page_presentation_without_replacing_evidenc
     assert 'id="panel-presentation"' not in html
     assert "function renderRendered(pages, presentations)" in html
     assert "function renderPresentationMarkdown(markdown)" in html
-    assert "Structured presentation" in html
+    assert "renderStructuredPresentation(page, presentation)" in html
 
 
 def test_demo_does_not_run_page_presenter_on_clear_page() -> None:
@@ -1508,6 +1728,16 @@ def test_demo_preserves_and_validates_category_routed_presentation_blocks() -> N
     assert 'new DOMParser().parseFromString(rawText, "text/html")' in html
     assert "clone.append(document.createTextNode(child.textContent))" in html
     assert "window.katex.render(rawText, formula" in html
+    assert 'if (kind === "formula" && group.region.resolution === "resolved")' in html
+    assert (
+        '} else if (kind === "formula" && group.region.resolution === "resolved") {'
+        in html
+    )
+    assert 'if (semanticKind(selectedRegion()) === "formula")' in html
+    assert (
+        'if (region.structure?.block_type === "formula") return region.text || "";'
+        in html
+    )
     assert "Local KaTeX is unavailable" in html
     assert "function usablePresentation(presentation)" in html
     assert "usableFalconPresentation" not in html
@@ -1654,6 +1884,44 @@ def test_demo_rejects_additive_structured_presentation_content() -> None:
     assert "Diagnosis" not in markdown
     assert "Flu" not in markdown
     assert r"\frac{x}{y}" not in markdown
+
+
+def test_demo_rejects_unsupported_ordinary_presentation_words() -> None:
+    class AdditivePresenter:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="paragraph-output",
+                    kind="page_text",
+                    text="Primary text invented",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 50, 10),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "text"},
+                    text_provenance={"source_region_id": "paragraph"},
+                )
+            ]
+
+    app = create_app(ReviewEvidenceReader(), presentation_reader=AdditivePresenter())
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        payload = response.json()
+        markdown = client.get(f"/api/sessions/{payload['session_id']}/result.md").text
+
+    [block] = payload["presentation"]["pages"][0]["blocks"]
+    assert block["rendering"]["status"] == "canonical_fallback"
+    assert "unsupported_generated_content" in {
+        failure["code"] for failure in block["validation"]["failures"]
+    }
+    assert "Primary text" in markdown
+    assert "invented" not in markdown
 
 
 def test_demo_rejects_generated_content_for_empty_structured_evidence() -> None:
@@ -2272,8 +2540,82 @@ def test_demo_selects_verified_image_grounded_table_recovery() -> None:
     assert block["rendering"] == {
         "status": "selected",
         "source_region_id": "table",
+        "source_page_number": 1,
+        "source_bounding_box": {"left": 52, "top": 0, "right": 110, "bottom": 46},
+        "source_evidence_ids": ["table"],
+        "source_confidence": 0.95,
+        "source_confidence_kind": "Recognition score",
+        "source_confidence_scope": "source region",
     }
     assert "<td>42</td>" in markdown
+
+
+def test_demo_links_selected_formula_presentation_to_source_evidence() -> None:
+    class FormulaReader:
+        name = "formula-reader"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="formula",
+                    kind="formula",
+                    text="x + y",
+                    confidence=0.88,
+                    bounding_box=BoundingBox(4, 8, 80, 32),
+                    reading_order=1,
+                    provider=self.name,
+                ),
+                TextRegion(
+                    id="risk",
+                    kind="coverage_risk",
+                    text="",
+                    confidence=None,
+                    bounding_box=BoundingBox(0, 0, 120, 80),
+                    reading_order=2,
+                    provider="risk",
+                    resolution="unreadable",
+                    structure={"role": "coverage_risk", "reasons": ["formula_review"]},
+                ),
+            ]
+
+    class FormulaPresenter:
+        name = "falcon-review"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            return [
+                TextRegion(
+                    id="formula-output",
+                    kind="page_text",
+                    text="x+y",
+                    confidence=None,
+                    bounding_box=BoundingBox(4, 8, 80, 32),
+                    reading_order=1,
+                    provider=self.name,
+                    structure={"category": "formula"},
+                    text_provenance={"source_region_id": "formula"},
+                )
+            ]
+
+    app = create_app(FormulaReader(), presentation_reader=FormulaPresenter())
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("formula.png", _page_png(), "image/png")},
+        )
+
+    [block] = response.json()["presentation"]["pages"][0]["blocks"]
+    assert block["rendering"] == {
+        "status": "selected",
+        "source_region_id": "formula",
+        "source_page_number": 1,
+        "source_bounding_box": {"left": 4, "top": 8, "right": 80, "bottom": 32},
+        "source_evidence_ids": ["formula"],
+        "source_confidence": 0.88,
+        "source_confidence_kind": "Recognition score",
+        "source_confidence_scope": "source region",
+    }
 
 
 @pytest.mark.parametrize(
@@ -2868,11 +3210,8 @@ def test_demo_surfaces_presentation_service_failure_and_page_limit() -> None:
     assert limited_payload["stage_execution"][1]["skip_reason"] == (
         "Review draft page limit reached"
     )
-    assert (
-        "function renderFailures(failures, previewFailure, presentations = [])" in html
-    )
-    assert 'presentationHeading.textContent = "Presentation status"' in html
-    assert 'page.validation?.status === "failed"' in html
+    assert ">Failures</button>" not in html
+    assert 'id="panel-failures"' not in html
 
 
 def test_demo_fails_closed_on_disallowed_table_html_and_bad_formula() -> None:
@@ -3201,7 +3540,11 @@ def test_demo_keeps_structured_rows_canonical_and_rejects_unsupported_claims() -
     assert "3/18/2025" in markdown
     assert "3/18/2015" not in markdown
     assert "♡" not in markdown
-    assert '["plain", "text"].includes(block.category)' in html
+    assert "const outcome = renderPresentationBlock(block, source);" in html
+    assert "decorateConfidence(marker, source.confidence" in html
+    assert 'scope: "table detection"' in html
+    assert "card.open = false;" in html
+    assert 'button.addEventListener("focus"' in html
     assert "function appendPresentationInline(element, text)" in html
     assert 'document.createElement("strong")' in html
 
@@ -3347,7 +3690,12 @@ def test_demo_reports_manual_handwriting_reread_execution() -> None:
         assert initial["stage_execution"] == []
         reread = client.post(
             f"/api/sessions/{initial['session_id']}/handwriting",
-            json={"page_number": 1, "region_id": "page-1-region-1"},
+            json={
+                "page_number": 1,
+                "region_id": "page-1-region-1",
+                "revision": initial["revision"],
+                "request_id": "manual-reread-1",
+            },
         )
 
     assert reread.status_code == 200
@@ -3374,6 +3722,7 @@ def test_demo_reports_manual_handwriting_reread_execution() -> None:
         == manual_run["elapsed_seconds"]
     )
     assert payload["timing"]["manual_reread_seconds"] == manual_run["elapsed_seconds"]
+    assert payload["recovery_outcome"]["status"] == "corrected"
 
 
 def test_manual_reread_refreshes_the_page_presentation() -> None:
@@ -3435,7 +3784,12 @@ def test_manual_reread_refreshes_the_page_presentation() -> None:
         assert initial["presentation"]["pages"] == []
         reread = client.post(
             f"/api/sessions/{initial['session_id']}/handwriting",
-            json={"page_number": 1, "region_id": "page-1-region-1"},
+            json={
+                "page_number": 1,
+                "region_id": "page-1-region-1",
+                "revision": initial["revision"],
+                "request_id": "presentation-reread-1",
+            },
         )
 
     payload = reread.json()
@@ -3445,6 +3799,67 @@ def test_manual_reread_refreshes_the_page_presentation() -> None:
     assert [run["stage"] for run in payload["stage_execution"]] == [
         "handwriting.manual-reread",
         "presentation",
+    ]
+
+
+def test_manual_reread_skips_presentation_when_canonical_text_is_unchanged() -> None:
+    class MetadataOnlyRereadStage:
+        name = "handwriting"
+
+        def apply(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            return regions
+
+        def review_region(
+            self,
+            image_path: Path,
+            page_number: int,
+            region: TextRegion,
+        ) -> TextRegion:
+            return replace(region, confidence=0.99)
+
+    class CountingPresentationReader:
+        name = "falcon-review"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            self.calls += 1
+            return []
+
+    presentation_reader = CountingPresentationReader()
+    app = create_app(
+        ControlledReader(),
+        handwriting_stage=MetadataOnlyRereadStage(),
+        presentation_reader=presentation_reader,
+    )
+    with TestClient(app) as client:
+        initial = client.post(
+            "/api/process",
+            files={"file": ("page.png", _page_png(), "image/png")},
+        ).json()
+        reread = client.post(
+            f"/api/sessions/{initial['session_id']}/handwriting",
+            json={
+                "page_number": 1,
+                "region_id": "page-1-region-1",
+                "revision": initial["revision"],
+                "request_id": "metadata-reread-1",
+            },
+        )
+
+    payload = reread.json()
+    assert presentation_reader.calls == 0
+    assert payload["presentation"]["pages"] == []
+    assert payload["uncertainty"]["pages"][0]["review_required"] is True
+    assert payload["uncertainty"]["pages"][0]["risk_reasons"] == []
+    assert [run["stage"] for run in payload["stage_execution"]] == [
+        "handwriting.manual-reread"
     ]
 
 
@@ -3482,12 +3897,585 @@ def test_failed_manual_reread_cannot_mutate_live_session_evidence() -> None:
         session_id = initial["session_id"]
         failed = client.post(
             f"/api/sessions/{session_id}/handwriting",
-            json={"page_number": 1, "region_id": "page-1-region-1"},
+            json={
+                "page_number": 1,
+                "region_id": "page-1-region-1",
+                "revision": initial["revision"],
+                "request_id": "failed-reread-1",
+            },
         )
         stored = client.get(f"/api/sessions/{session_id}/result.json").json()
 
     assert failed.status_code == 422
     assert stored["pages"][0]["regions"][0]["text"] == "Controlled page 1"
+
+
+def test_manual_reread_candidate_can_be_accepted_into_every_export() -> None:
+    class CandidateRereadStage:
+        name = "handwriting"
+
+        def apply(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            return regions
+
+        def review_region(
+            self,
+            image_path: Path,
+            page_number: int,
+            region: TextRegion,
+        ) -> TextRegion:
+            region.alternatives.append(
+                TextAlternative(
+                    "Corrected handwritten text",
+                    0.88,
+                    "candidate-reader",
+                    {"method": "source_crop_reread"},
+                )
+            )
+            region.structure = {
+                "handwriting_review": {
+                    "required": True,
+                    "reason": "specialist_candidate",
+                }
+            }
+            return region
+
+    app = create_app(
+        ControlledReader(),
+        handwriting_stage=CandidateRereadStage(),
+    )
+    with TestClient(app) as client:
+        initial = client.post(
+            "/api/process",
+            files={"file": ("page.png", _page_png(), "image/png")},
+        ).json()
+        reread = client.post(
+            f"/api/sessions/{initial['session_id']}/handwriting",
+            json={
+                "page_number": 1,
+                "region_id": "page-1-region-1",
+                "revision": 1,
+                "request_id": "reread-1",
+            },
+        ).json()
+        accepted = client.post(
+            f"/api/sessions/{initial['session_id']}/corrections",
+            json={
+                "page_number": 1,
+                "region_id": "page-1-region-1",
+                "revision": 2,
+                "request_id": "accept-reread-1",
+                "action": "accept",
+                "alternative_index": 0,
+            },
+        )
+        exported = client.get(
+            f"/api/sessions/{initial['session_id']}/result.json?revision=3"
+        ).json()
+        markdown = client.get(
+            f"/api/sessions/{initial['session_id']}/result.md?revision=3"
+        ).text
+
+    assert reread["revision"] == 2
+    assert reread["recovery_outcome"]["status"] == "candidate_pending"
+    assert reread["result"]["pages"][0]["route"] == "review"
+    assert accepted.status_code == 200
+    payload = accepted.json()
+    region = payload["result"]["pages"][0]["regions"][0]
+    assert payload["revision"] == 3
+    assert payload["result"]["pages"][0]["route"] == "accept_local"
+    assert payload["uncertainty"]["pages"][0]["review_required"] is False
+    assert region["text"] == "Corrected handwritten text"
+    assert region["provider"] == "candidate-reader"
+    assert region["confidence"] == 0.88
+    assert region["structure"]["handwriting_review"]["required"] is False
+    assert [item["decision_state"] for item in region["alternatives"]] == [
+        "superseded",
+        "accepted",
+    ]
+    assert exported["pages"][0]["text"]["value"] == "Corrected handwritten text"
+    assert "Corrected handwritten text" in markdown
+
+
+def test_human_correction_updates_every_export_at_one_revision() -> None:
+    app = create_app(StructuredDocumentReader())
+
+    with TestClient(app) as client:
+        initial = client.post(
+            "/api/process",
+            files={"file": ("page.png", _page_png(), "image/png")},
+        ).json()
+        session_id = initial["session_id"]
+        corrected = client.post(
+            f"/api/sessions/{session_id}/corrections",
+            json={
+                "page_number": 1,
+                "region_id": "handwriting",
+                "revision": 1,
+                "request_id": "accept-1",
+                "action": "accept",
+                "alternative_index": 0,
+            },
+        )
+        current_json = client.get(f"/api/sessions/{session_id}/result.json?revision=2")
+        current_markdown = client.get(
+            f"/api/sessions/{session_id}/result.md?revision=2"
+        )
+        stale_export = client.get(f"/api/sessions/{session_id}/result.json?revision=1")
+        stale_edit = client.post(
+            f"/api/sessions/{session_id}/corrections",
+            json={
+                "page_number": 1,
+                "region_id": "handwriting",
+                "revision": 1,
+                "request_id": "late-edit-1",
+                "action": "edit",
+                "text": "Late overwrite",
+            },
+        )
+
+    assert corrected.status_code == 200
+    payload = corrected.json()
+    assert payload["revision"] == payload["result"]["revision"] == 2
+    assert payload["recovery_outcome"] == {
+        "kind": "human_review",
+        "status": "accept",
+        "request_id": "accept-1",
+        "page_number": 1,
+        "region_id": "handwriting",
+        "base_revision": 1,
+        "revision": 2,
+    }
+    region = next(
+        item
+        for item in payload["result"]["pages"][0]["regions"]
+        if item["id"] == "handwriting"
+    )
+    assert region["text"] == "Return in 3 weeks"
+    assert region["provider"] == "challenger"
+    assert region["confidence"] == 0.5
+    assert [item["decision_state"] for item in region["alternatives"]] == [
+        "superseded",
+        "accepted",
+    ]
+    assert region["alternatives"][0]["text"] == "Return in 2 weeks"
+    assert region["text_provenance"]["human_review"]["correcting_provider"] == (
+        "challenger"
+    )
+    assert region["bounding_box"] == {
+        "left": 0,
+        "top": 62,
+        "right": 100,
+        "bottom": 76,
+    }
+    assert current_json.status_code == 200
+    assert current_json.json()["revision"] == 2
+    assert "Return in 3 weeks" in current_json.text
+    assert current_markdown.status_code == 200
+    assert "- Revision: 2" in current_markdown.text
+    assert "Return in 3 weeks" in current_markdown.text
+    assert stale_export.status_code == 409
+    assert stale_edit.status_code == 409
+    assert stale_edit.json()["recovery_outcome"]["status"] == "stale"
+
+
+def test_accepted_formula_owner_supersedes_fragments_in_every_export() -> None:
+    class FormulaReviewReader(ControlledReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            del image_path, page_number
+            child = TextRegion(
+                id="formula-fragment",
+                kind="word",
+                text="x + y",
+                confidence=0.8,
+                bounding_box=BoundingBox(5, 5, 45, 20),
+                reading_order=1,
+                provider=self.name,
+                structure={
+                    "layout_owner_id": "formula-owner",
+                    "layout_owner_type": "formula",
+                },
+            )
+            owner = TextRegion(
+                id="formula-owner",
+                kind="layout_block",
+                text="x + y",
+                confidence=0.8,
+                bounding_box=BoundingBox(5, 5, 100, 30),
+                reading_order=1,
+                provider="evidence-spatial-layout",
+                resolution="conflicting",
+                alternatives=[
+                    TextAlternative(
+                        text=r"\frac{x^2 + y^2",
+                        confidence=None,
+                        provider="falcon-formula",
+                        text_provenance={"category": "formula"},
+                    ),
+                    TextAlternative(
+                        text=r"x^2 + y^2",
+                        confidence=None,
+                        provider="falcon-formula",
+                        text_provenance={"category": "formula"},
+                    ),
+                    TextAlternative(
+                        text="   ",
+                        confidence=None,
+                        provider="falcon-formula",
+                        text_provenance={"category": "formula"},
+                    ),
+                ],
+                structure={
+                    "role": "layout_block",
+                    "block_type": "formula",
+                    "child_evidence_ids": [child.id],
+                    "lines": [{"evidence_ids": [child.id]}],
+                    "formula_review": {"required": True},
+                },
+            )
+            return [child, owner]
+
+    app = create_app(FormulaReviewReader())
+    with TestClient(app) as client:
+        initial = client.post(
+            "/api/process",
+            files={"file": ("formula.png", _page_png(), "image/png")},
+        ).json()
+        session_id = initial["session_id"]
+        invalid = client.post(
+            f"/api/sessions/{session_id}/corrections",
+            json={
+                "page_number": 1,
+                "region_id": "formula-owner",
+                "revision": 1,
+                "request_id": "reject-invalid-formula",
+                "action": "accept",
+                "alternative_index": 0,
+            },
+        )
+        invalid_edit = client.post(
+            f"/api/sessions/{session_id}/corrections",
+            json={
+                "page_number": 1,
+                "region_id": "formula-owner",
+                "revision": 1,
+                "request_id": "reject-invalid-formula-edit",
+                "action": "edit",
+                "text": r"\frac{x^2 + y^2",
+            },
+        )
+        blank = client.post(
+            f"/api/sessions/{session_id}/corrections",
+            json={
+                "page_number": 1,
+                "region_id": "formula-owner",
+                "revision": 1,
+                "request_id": "reject-blank-formula",
+                "action": "accept",
+                "alternative_index": 2,
+            },
+        )
+        corrected = client.post(
+            f"/api/sessions/{session_id}/corrections",
+            json={
+                "page_number": 1,
+                "region_id": "formula-owner",
+                "revision": 1,
+                "request_id": "accept-formula",
+                "action": "accept",
+                "alternative_index": 1,
+            },
+        )
+        current_json = client.get(f"/api/sessions/{session_id}/result.json?revision=2")
+        current_markdown = client.get(
+            f"/api/sessions/{session_id}/result.md?revision=2"
+        )
+
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"].endswith("unbalanced_latex_braces")
+    assert invalid_edit.status_code == 422
+    assert invalid_edit.json()["detail"].endswith("unbalanced_latex_braces")
+    assert blank.status_code == 422
+    assert blank.json()["detail"].endswith("empty_formula")
+    assert corrected.status_code == 200
+    payload = corrected.json()
+    page = payload["result"]["pages"][0]
+    owner = next(item for item in page["regions"] if item["id"] == "formula-owner")
+    assert page["text"] == {
+        "value": r"x^2 + y^2",
+        "evidence_ids": ["formula-owner"],
+    }
+    assert owner["text"] == r"x^2 + y^2"
+    assert owner["provider"] == "falcon-formula"
+    assert owner["structure"]["formula_recognition"] == "human_accepted"
+    assert owner["structure"]["formula_review"] == {
+        "required": False,
+        "resolved_by": "human_review",
+    }
+    assert [item["decision_state"] for item in owner["alternatives"]] == [
+        "superseded",
+        "rejected",
+        "accepted",
+        "rejected",
+    ]
+    assert current_json.json()["pages"][0]["text"] == page["text"]
+    assert "$$\nx^2 + y^2\n$$" in current_markdown.text
+    assert "x + y" not in current_markdown.text
+
+
+def test_keep_unresolved_records_review_without_inventing_text() -> None:
+    app = create_app(StructuredDocumentReader())
+
+    with TestClient(app) as client:
+        initial = client.post(
+            "/api/process",
+            files={"file": ("page.png", _page_png(), "image/png")},
+        ).json()
+        response = client.post(
+            f"/api/sessions/{initial['session_id']}/corrections",
+            json={
+                "page_number": 1,
+                "region_id": "handwriting",
+                "revision": 1,
+                "request_id": "keep-1",
+                "action": "keep_unresolved",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    region = next(
+        item
+        for item in payload["result"]["pages"][0]["regions"]
+        if item["id"] == "handwriting"
+    )
+    assert payload["revision"] == 2
+    assert payload["recovery_outcome"]["status"] == "keep_unresolved"
+    assert region["resolution"] == "conflicting"
+    assert region["provider"] == "controlled-reader"
+    assert region["text_provenance"]["human_review"]["action"] == ("keep_unresolved")
+    assert "Return in 2 weeks" not in payload["result"]["pages"][0]["text"]["value"]
+
+
+def test_stale_tab_can_refresh_and_retry_against_current_revision() -> None:
+    app = create_app(StructuredDocumentReader())
+
+    with TestClient(app) as client:
+        initial = client.post(
+            "/api/process",
+            files={"file": ("page.png", _page_png(), "image/png")},
+        ).json()
+        session_id = initial["session_id"]
+        kept = client.post(
+            f"/api/sessions/{session_id}/corrections",
+            json={
+                "page_number": 1,
+                "region_id": "handwriting",
+                "revision": 1,
+                "request_id": "keep-1",
+                "action": "keep_unresolved",
+            },
+        )
+        stale = client.post(
+            f"/api/sessions/{session_id}/corrections",
+            json={
+                "page_number": 1,
+                "region_id": "handwriting",
+                "revision": 1,
+                "request_id": "stale-edit",
+                "action": "edit",
+                "text": "Stale edit",
+            },
+        )
+        retry = client.post(
+            f"/api/sessions/{session_id}/corrections",
+            json={
+                "page_number": 1,
+                "region_id": "handwriting",
+                "revision": 2,
+                "request_id": "fresh-edit",
+                "action": "edit",
+                "text": "Fresh edit",
+            },
+        )
+
+    assert kept.status_code == 200
+    assert stale.status_code == 409
+    stale_payload = stale.json()
+    assert stale_payload["session_id"] == session_id
+    assert stale_payload["revision"] == 2
+    assert stale_payload["result"]["revision"] == 2
+    assert stale_payload["recovery_outcome"]["status"] == "stale"
+    assert retry.status_code == 200
+    retry_payload = retry.json()
+    assert retry_payload["revision"] == 3
+    assert retry_payload["result"]["pages"][0]["text"]["value"].endswith("Fresh edit")
+
+
+def test_delayed_reread_cannot_overwrite_newer_human_correction() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    class DelayedRereadStage:
+        name = "handwriting"
+
+        def apply(
+            self,
+            image_path: Path,
+            page_number: int,
+            regions: list[TextRegion],
+        ) -> list[TextRegion]:
+            return regions
+
+        def review_region(
+            self,
+            image_path: Path,
+            page_number: int,
+            region: TextRegion,
+        ) -> TextRegion:
+            started.set()
+            assert release.wait(timeout=2)
+            return replace(region, text="Late machine reread")
+
+    app = create_app(
+        StructuredDocumentReader(),
+        handwriting_stage=DelayedRereadStage(),
+    )
+    with TestClient(app) as client:
+        initial = client.post(
+            "/api/process",
+            files={"file": ("page.png", _page_png(), "image/png")},
+        ).json()
+        session_id = initial["session_id"]
+
+        def reread() -> Any:
+            return client.post(
+                f"/api/sessions/{session_id}/handwriting",
+                json={
+                    "page_number": 1,
+                    "region_id": "handwriting",
+                    "revision": 1,
+                    "request_id": "reread-1",
+                },
+            )
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(reread)
+            assert started.wait(timeout=2)
+            correction = client.post(
+                f"/api/sessions/{session_id}/corrections",
+                json={
+                    "page_number": 1,
+                    "region_id": "handwriting",
+                    "revision": 1,
+                    "request_id": "edit-1",
+                    "action": "edit",
+                    "text": "Human correction",
+                },
+            )
+            release.set()
+            delayed = future.result(timeout=2)
+        stored = client.get(f"/api/sessions/{session_id}/result.json?revision=2").json()
+
+    assert correction.status_code == 200
+    assert correction.json()["revision"] == 2
+    assert delayed.status_code == 409
+    assert delayed.json()["recovery_outcome"]["status"] == "stale"
+    assert "Human correction" in stored["pages"][0]["text"]["value"]
+    assert "Late machine reread" not in json.dumps(stored)
+    region = next(
+        item for item in stored["pages"][0]["regions"] if item["id"] == "handwriting"
+    )
+    assert region["provider"] == "human-review"
+    assert region["confidence"] is None
+    assert [item["decision_state"] for item in region["alternatives"]] == [
+        "superseded",
+        "rejected",
+    ]
+
+
+def test_concurrent_revision_responses_keep_their_own_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response_started = threading.Event()
+    release_response = threading.Event()
+    original_response = demo_module.JSONResponse
+
+    class DelayedJSONResponse(original_response):
+        def __init__(self, content: Any, *args: Any, **kwargs: Any) -> None:
+            request_id = (content.get("recovery_outcome") or {}).get("request_id")
+            if request_id == "edit-a":
+                response_started.set()
+                assert release_response.wait(timeout=2)
+            super().__init__(content, *args, **kwargs)
+
+    class TwoReviewReader:
+        name = "two-review-reader"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            return [
+                TextRegion(
+                    id=region_id,
+                    kind="handwriting",
+                    text="uncertain",
+                    confidence=0.4,
+                    bounding_box=BoundingBox(0, top, 50, top + 10),
+                    reading_order=index,
+                    provider=self.name,
+                    resolution="conflicting",
+                )
+                for index, (region_id, top) in enumerate(
+                    (("region-a", 10), ("region-b", 30)), start=1
+                )
+            ]
+
+    monkeypatch.setattr(demo_module, "JSONResponse", DelayedJSONResponse)
+    app = create_app(TwoReviewReader())
+    with TestClient(app) as client:
+        initial = client.post(
+            "/api/process",
+            files={"file": ("page.png", _page_png(), "image/png")},
+        ).json()
+        session_id = initial["session_id"]
+
+        def edit_first() -> Any:
+            return client.post(
+                f"/api/sessions/{session_id}/corrections",
+                json={
+                    "page_number": 1,
+                    "region_id": "region-a",
+                    "revision": 1,
+                    "request_id": "edit-a",
+                    "action": "edit",
+                    "text": "first correction",
+                },
+            )
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(edit_first)
+            assert response_started.wait(timeout=2)
+            second = client.post(
+                f"/api/sessions/{session_id}/corrections",
+                json={
+                    "page_number": 1,
+                    "region_id": "region-b",
+                    "revision": 2,
+                    "request_id": "edit-b",
+                    "action": "edit",
+                    "text": "second correction",
+                },
+            )
+            release_response.set()
+            first = future.result(timeout=2)
+
+    assert first.json()["revision"] == 2
+    assert first.json()["recovery_outcome"]["request_id"] == "edit-a"
+    assert second.json()["revision"] == 3
+    assert second.json()["recovery_outcome"]["request_id"] == "edit-b"
 
 
 def test_demo_bounds_preparation_and_serializes_shared_reader_requests(

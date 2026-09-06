@@ -17,10 +17,10 @@ MODEL = {
     "license": "Apache-2.0",
 }
 EXCLUDED_ANCHOR_KINDS = frozenset(
-    {"checkbox", "control", "coverage_risk", "page_text", "table"}
+    {"checkbox", "control", "coverage_risk", "layout_block", "page_text", "table"}
 )
 NON_TEXT_MASK_KINDS = frozenset(
-    {"coverage_risk", "page_text", "table", "table_candidate"}
+    {"coverage_risk", "layout_block", "page_text", "table", "table_candidate"}
 )
 
 
@@ -121,10 +121,12 @@ def _proposal(
     if ink_box is None:
         return None
 
+    field_ownership = _field_ownership(anchor, regions, page_number)
     provenance = {
         "method": "label_anchored_rule_removed_residual_ink",
         "page_number": page_number,
         "anchor_evidence_ids": [anchor.id],
+        "field_ownership": field_ownership,
         "line_bounding_box": [line.left, line.top, line.right, line.bottom],
         "residual_component_count": component_count,
         "residual_area": residual_area,
@@ -145,9 +147,45 @@ def _proposal(
             "handwriting_candidate": True,
             "handwriting_candidate_source": "anchored_residual",
             "anchor_evidence_ids": [anchor.id],
+            "field_ownership": field_ownership,
             "proposal": provenance,
         },
     )
+
+
+def _field_ownership(
+    anchor: TextRegion,
+    regions: list[TextRegion],
+    page_number: int,
+) -> dict[str, object]:
+    for region in regions:
+        structure = region.structure or {}
+        fields = structure.get("fields")
+        if structure.get("role") != "layout_block" or not isinstance(fields, list):
+            continue
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            label_ids = field.get("label_evidence_ids")
+            if not isinstance(label_ids, list) or anchor.id not in label_ids:
+                continue
+            value_ids = field.get("value_evidence_ids")
+            return {
+                "field_id": str(field.get("id") or f"p{page_number}-field-{anchor.id}"),
+                "owner_block_id": region.id,
+                "label": str(field.get("label") or anchor.text),
+                "label_evidence_ids": list(label_ids),
+                "value_evidence_ids": list(value_ids)
+                if isinstance(value_ids, list)
+                else [],
+            }
+    return {
+        "field_id": f"p{page_number}-field-{anchor.id}",
+        "owner_block_id": None,
+        "label": anchor.text,
+        "label_evidence_ids": [anchor.id],
+        "value_evidence_ids": [],
+    }
 
 
 def _nearest_writing_line(

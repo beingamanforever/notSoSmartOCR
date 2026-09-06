@@ -15,6 +15,7 @@ from PIL import Image, UnidentifiedImageError
 
 from .contracts import BoundingBox, TextAlternative, TextRegion
 from .providers import LocalReader, ReaderError
+from .tables import attach_recovered_table_evidence
 
 RecoveryView = Literal[
     "native",
@@ -34,6 +35,7 @@ class _Proposal:
     box: BoundingBox
     component_count: int
     ink_pixels: int
+    source: Literal["table_cell", "unowned_pixels"] = "unowned_pixels"
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,19 @@ class _View:
     path: Path
     origin: BoundingBox
     scale: int
+
+
+@dataclass(frozen=True)
+class _ReadResult:
+    candidates: list[TextRegion]
+    completed_proposals: list[_Proposal]
+    failed_proposals: list[tuple[_Proposal, ReaderError]]
+
+
+@dataclass(frozen=True)
+class _ViewReadResult:
+    candidates: list[TextRegion]
+    failed_indexes: list[tuple[int, ReaderError]]
 
 
 class FaintTinyTextStage:
@@ -87,22 +102,17 @@ class FaintTinyTextStage:
             ) from error
 
         try:
-            proposals = _find_proposals(page, regions, self.max_proposals)
-            if len(proposals) > self.max_proposals:
-                raise ReaderError(
-                    "faint_tiny_proposal_limit_exceeded",
-                    f"Found {len(proposals)} faint-text candidates; refusing to "
-                    f"reread more than {self.max_proposals}",
-                )
+            proposals = _find_proposals(page, regions)
             if not proposals:
                 return regions
-            candidates = self._read(page, image_path, page_number, proposals)
+            selected, omitted = _schedule_proposals(proposals, self.max_proposals)
+            read_result = self._read(page, image_path, page_number, selected)
         finally:
             page.close()
 
         recovered = _resolve_candidates(
-            candidates,
-            proposals,
+            read_result.candidates,
+            read_result.completed_proposals,
             regions,
             page_number,
             self.reader.name,
@@ -110,6 +120,16 @@ class FaintTinyTextStage:
             self.scale,
             self.minimum_confidence,
         )
+        attach_recovered_table_evidence(regions, recovered)
+        coverage_risk = _coverage_risk(
+            page_number,
+            regions,
+            omitted,
+            read_result.failed_proposals,
+            self.reader.name,
+        )
+        if coverage_risk is not None:
+            recovered.append(coverage_risk)
         return _insert_recovered_regions(regions, recovered)
 
     def _read(
@@ -118,14 +138,15 @@ class FaintTinyTextStage:
         image_path: Path,
         page_number: int,
         proposals: list[_Proposal],
-    ) -> list[TextRegion]:
+    ) -> _ReadResult:
         if self.view == "native":
             view = _View(
                 image_path,
                 BoundingBox(0, 0, page.width, page.height),
                 1,
             )
-            return _read_views(self.reader, [view], page_number, page.size)
+            result = _read_views(self.reader, [view], page_number, page.size)
+            return _ReadResult(result.candidates, proposals, [])
 
         with tempfile.TemporaryDirectory(prefix="ocr-faint-tiny-") as directory:
             root = Path(directory)
@@ -150,13 +171,24 @@ class FaintTinyTextStage:
                     finally:
                         cropped.close()
                     views.append(_View(path, crop, self.scale))
-            return _read_views(self.reader, views, page_number, page.size)
+            result = _read_views(self.reader, views, page_number, page.size)
+            if self.view == "global_high_resolution":
+                return _ReadResult(result.candidates, proposals, [])
+            failures = [
+                (proposals[index], error) for index, error in result.failed_indexes
+            ]
+            failed_indexes = {index for index, _ in result.failed_indexes}
+            completed = [
+                proposal
+                for index, proposal in enumerate(proposals)
+                if index not in failed_indexes
+            ]
+            return _ReadResult(result.candidates, completed, failures)
 
 
 def _find_proposals(
     page: Image.Image,
     regions: Sequence[TextRegion],
-    proposal_limit: int | None = None,
 ) -> list[_Proposal]:
     cv2, np = _vision_dependencies()
     gray = np.asarray(page.convert("L"))
@@ -174,6 +206,7 @@ def _find_proposals(
         block_size,
         5,
     )
+    proposals = _unread_table_cell_proposals(gray, regions, page.size)
     padding = max(1, round(reference_height / 4))
     known_boxes = [
         region.bounding_box for region in regions if _masks_pixels(region, page.size)
@@ -184,6 +217,9 @@ def _find_proposals(
         right = min(width, box.right + padding)
         bottom = min(height, box.bottom + padding)
         mask[top:bottom, left:right] = 0
+    for proposal in proposals:
+        box = proposal.box
+        mask[box.top : box.bottom, box.left : box.right] = 0
 
     count, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
     maximum_height = max(3, min(round(height * 0.05), reference_height * 2))
@@ -196,7 +232,7 @@ def _find_proposals(
         components.append((label, left, top, item_width, item_height, area))
         accepted_labels[label] = True
     if len(components) < 2:
-        return []
+        return proposals
     component_mask = np.where(accepted_labels[labels], 255, 0).astype(mask.dtype)
 
     median_height = max(2, round(statistics.median(item[4] for item in components)))
@@ -212,7 +248,6 @@ def _find_proposals(
         cv2.RETR_EXTERNAL,
         cv2.CHAIN_APPROX_SIMPLE,
     )[0]
-    proposals = []
     ordered_contours = sorted(
         contours,
         key=lambda contour: tuple(cv2.boundingRect(contour)[1::-1]),
@@ -240,9 +275,115 @@ def _find_proposals(
         if any(_boxes_duplicate(box, existing.box) for existing in proposals):
             continue
         proposals.append(proposal)
-        if proposal_limit is not None and len(proposals) > proposal_limit:
-            return proposals
     return proposals
+
+
+def _schedule_proposals(
+    proposals: list[_Proposal],
+    limit: int,
+) -> tuple[list[_Proposal], list[_Proposal]]:
+    ordered = sorted(
+        enumerate(proposals),
+        key=lambda item: (item[1].source != "table_cell", item[0]),
+    )
+    prioritized = [proposal for _, proposal in ordered]
+    return prioritized[:limit], prioritized[limit:]
+
+
+def _unread_table_cell_proposals(
+    gray: object,
+    regions: Sequence[TextRegion],
+    page_size: tuple[int, int],
+) -> list[_Proposal]:
+    cv2, _ = _vision_dependencies()
+    proposals = []
+    for region in regions:
+        if region.kind != "table" or not isinstance(region.structure, dict):
+            continue
+        cells = region.structure.get("cells")
+        if not isinstance(cells, list):
+            continue
+        for cell in cells:
+            if not isinstance(cell, dict) or str(cell.get("text", "")).strip():
+                continue
+            if cell.get("decision") != "no_cell_evidence":
+                continue
+            box = _cell_box(cell.get("bbox"), page_size)
+            if box is None:
+                continue
+            component_count, ink_pixels = _cell_ink(
+                cv2,
+                gray[box.top : box.bottom, box.left : box.right],
+            )
+            if component_count == 0:
+                continue
+            proposal = _Proposal(
+                box,
+                component_count,
+                ink_pixels,
+                source="table_cell",
+            )
+            if any(_boxes_duplicate(box, existing.box) for existing in proposals):
+                continue
+            proposals.append(proposal)
+    return proposals
+
+
+def _cell_ink(cv2: object, crop: object) -> tuple[int, int]:
+    height, width = crop.shape
+    if width < 3 or height < 3:
+        return 0, 0
+    inset = max(1, round(min(width, height) * 0.06))
+    inner = crop[inset : height - inset, inset : width - inset]
+    if inner.size == 0:
+        return 0, 0
+    _, binary = cv2.threshold(
+        inner,
+        0,
+        255,
+        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+    )
+    count, _, stats, _ = cv2.connectedComponentsWithStats(binary)
+    component_count = 0
+    ink_pixels = 0
+    maximum_height = max(3, inner.shape[0])
+    for label in range(1, count):
+        _, _, item_width, item_height, area = map(int, stats[label])
+        horizontal_rule = item_width >= inner.shape[1] * 0.85 and item_height <= max(
+            2, inner.shape[0] * 0.2
+        )
+        vertical_rule = item_height >= inner.shape[0] * 0.85 and item_width <= max(
+            2, inner.shape[1] * 0.12
+        )
+        if horizontal_rule or vertical_rule:
+            continue
+        if not _text_like_component(
+            item_width,
+            item_height,
+            area,
+            maximum_height,
+        ):
+            continue
+        component_count += 1
+        ink_pixels += area
+    if not 0.01 <= ink_pixels / inner.size <= 0.8:
+        return 0, 0
+    return component_count, ink_pixels
+
+
+def _cell_box(value: object, page_size: tuple[int, int]) -> BoundingBox | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        box = BoundingBox(
+            left=int(value["left"]),
+            top=int(value["top"]),
+            right=int(value["right"]),
+            bottom=int(value["bottom"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    return box if _valid_box(box, page_size) else None
 
 
 def _read_views(
@@ -250,7 +391,7 @@ def _read_views(
     views: list[_View],
     page_number: int,
     page_size: tuple[int, int],
-) -> list[TextRegion]:
+) -> _ViewReadResult:
     read_batch = getattr(reader, "read_batch", None)
     if len(views) > 1 and callable(read_batch) and getattr(reader, "batch_size", 1) > 1:
         outputs = read_batch(
@@ -263,12 +404,20 @@ def _read_views(
                 "Faint-text batch reader returned the wrong number of results",
             )
     else:
-        outputs = [reader.read(view.path, page_number) for view in views]
+        outputs = []
+        for view in views:
+            try:
+                outputs.append(reader.read(view.path, page_number))
+            except ReaderError as error:
+                outputs.append(error)
 
     candidates = []
-    for view, output in zip(views, outputs, strict=True):
+    failures = []
+    successful_outputs = 0
+    for index, (view, output) in enumerate(zip(views, outputs, strict=True)):
         if isinstance(output, ReaderError):
-            raise output
+            failures.append((index, output))
+            continue
         if not isinstance(output, list) or not all(
             isinstance(region, TextRegion) for region in output
         ):
@@ -276,11 +425,86 @@ def _read_views(
                 "invalid_faint_tiny_output",
                 "Faint-text reader returned invalid regions",
             )
+        successful_outputs += 1
         for region in output:
             translated = _translate(region, view, page_size)
             if translated is not None:
                 candidates.append(translated)
-    return candidates
+    if failures and successful_outputs == 0:
+        raise failures[0][1]
+    return _ViewReadResult(candidates, failures)
+
+
+def _coverage_risk(
+    page_number: int,
+    existing: Sequence[TextRegion],
+    omitted: Sequence[_Proposal],
+    failures: Sequence[tuple[_Proposal, ReaderError]],
+    reader_name: str,
+) -> TextRegion | None:
+    region_risks = [
+        _proposal_risk(proposal, "proposal_budget_exceeded") for proposal in omitted
+    ]
+    region_risks.extend(
+        _proposal_risk(proposal, "reread_failed", error) for proposal, error in failures
+    )
+    if not region_risks:
+        return None
+
+    boxes = [risk["bounding_box"] for risk in region_risks]
+    box = BoundingBox(
+        min(item["left"] for item in boxes),
+        min(item["top"] for item in boxes),
+        max(item["right"] for item in boxes),
+        max(item["bottom"] for item in boxes),
+    )
+    reasons = list(dict.fromkeys(risk["reason"] for risk in region_risks))
+    base_id = f"p{page_number}-faint-tiny-coverage-risk"
+    used_ids = {region.id for region in existing}
+    risk_id = base_id
+    suffix = 2
+    while risk_id in used_ids:
+        risk_id = f"{base_id}-{suffix}"
+        suffix += 1
+    return TextRegion(
+        id=risk_id,
+        kind="coverage_risk",
+        text="",
+        confidence=None,
+        bounding_box=box,
+        reading_order=max(
+            (region.reading_order for region in existing),
+            default=0,
+        )
+        + 1,
+        provider=f"{reader_name}-faint-text-scheduler",
+        text_provenance={
+            "method": "bounded_faint_text_proposal_scheduling",
+            "page_number": page_number,
+            "reader": reader_name,
+        },
+        resolution="unreadable",
+        structure={
+            "role": "coverage_risk",
+            "reasons": reasons,
+            "region_risks": region_risks,
+        },
+    )
+
+
+def _proposal_risk(
+    proposal: _Proposal,
+    reason: str,
+    error: ReaderError | None = None,
+) -> dict[str, object]:
+    risk: dict[str, object] = {
+        "reason": reason,
+        "bounding_box": asdict(proposal.box),
+        "source": proposal.source,
+    }
+    if error is not None:
+        risk["failure_code"] = error.code
+    return risk
 
 
 def _resolve_candidates(
@@ -466,6 +690,7 @@ def _candidate_alternatives(
                 confidence=reading.confidence,
                 provider=reading.provider,
                 text_provenance=provenance,
+                decision_state=reading.decision_state,
             )
         )
     return alternatives
@@ -489,6 +714,7 @@ def _provenance(
             "bounding_box": asdict(proposal.box),
             "component_count": proposal.component_count,
             "ink_pixels": proposal.ink_pixels,
+            "source": proposal.source,
         },
     }
     if candidate is not None:
@@ -531,6 +757,7 @@ def _translate(
                 confidence=alternative.confidence,
                 provider=alternative.provider,
                 text_provenance=alternative_provenance,
+                decision_state=alternative.decision_state,
             )
         )
     return TextRegion(

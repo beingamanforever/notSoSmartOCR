@@ -13,6 +13,7 @@ import unicodedata
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
+from difflib import SequenceMatcher
 from pathlib import Path
 from statistics import median
 from types import ModuleType
@@ -36,12 +37,28 @@ MIN_NEAR_PAGE_ROWS = 3
 MIN_NEAR_PAGE_COLUMNS = 3
 MIN_NEAR_PAGE_CELLS = 9
 MAX_PARALLEL_CHALLENGERS = 4
+MAX_CELL_REREADS_PER_PAGE = 64
+CELL_REREAD_PADDING = 0
+CELL_REREAD_SCALE = 3
+DECIMAL_CELL_REREAD_SCALE = 6
+GROUPED_CELL_REREAD_PADDING = 2
 VALUE_PATTERN = re.compile(r"[+-]?\(?\d[\d,]*(?:\.\d+)?%?\)?")
+OBSERVED_VALUE_PATTERN = re.compile(
+    r"(?:[$#]\s*)?[+-]?(?:\(\s*)?\d[\d,]*(?:\.\d+)?%?(?:\s*\))?"
+)
+LABEL_UNIT_PATTERN = re.compile(r"\(\s*(\$[A-Za-z])(?:[,\s)]|$)")
+LABEL_UNIT_SLOT_PATTERN = re.compile(r"\((?:\$[^)]{1,12}|[A-Z]{1,3})\)")
+LABEL_UNIT_MARKER_PATTERN = re.compile(r"(\(\s*)(\$[A-Za-z0-9]|[A-Z]{1,3})(?=[,\s)])")
 CELL_CROSSING_OVERLAP = 0.2
 CELL_CROSSING_SCALE = 1.25
 RULED_PROPOSAL_SOURCE = "opencv_ruled_table"
 RULED_DUPLICATE_OVERLAP = 0.9
 HORIZONTAL_PANEL_PROPOSAL_SOURCE = "opencv_horizontal_panel_decomposition"
+NUMERIC_COLUMN_CORE_SOURCE = "numeric_column_core"
+ALIGNED_NUMERIC_ROWS_SOURCE = "ocr_aligned_numeric_bands"
+MIN_NUMERIC_CORE_COLUMNS = 3
+MIN_NUMERIC_CORE_FILLED_CELLS = 2
+MIN_ALIGNED_NUMERIC_COLUMNS = 2
 
 
 @dataclass(frozen=True)
@@ -52,6 +69,7 @@ class TableCell:
     column_header: bool = False
     projected_row_header: bool = False
     span_boxes: tuple[BoundingBox, ...] = ()
+    span_texts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -121,8 +139,11 @@ class TatrTableStage:
         names = [challenger.name for challenger in challengers]
         if any(not name.strip() for name in names) or len(names) != len(set(names)):
             raise ValueError("Table challenger names must be non-empty and unique")
-        if any(challenger.scope not in {"table", "page"} for challenger in challengers):
-            raise ValueError("Table challenger scope must be table or page")
+        if any(
+            challenger.scope not in {"table", "page", "cell"}
+            for challenger in challengers
+        ):
+            raise ValueError("Table challenger scope must be table, page, or cell")
         if challenger_padding is not None:
             padding = (
                 (challenger_padding, challenger_padding)
@@ -194,6 +215,7 @@ class TatrTableStage:
             image_path,
             page_number,
             predictions,
+            primary_by_table,
         )
 
         tables: list[TextRegion] = []
@@ -233,6 +255,7 @@ class TatrTableStage:
         image_path: Path,
         page_number: int,
         predictions: Sequence[TablePrediction],
+        primary_by_table: Sequence[list[TextRegion]],
     ) -> dict[str, list[list[TextRegion]]]:
         result: dict[str, list[list[TextRegion]]] = {}
         if not self.challengers:
@@ -251,16 +274,22 @@ class TatrTableStage:
             if isinstance(configured_padding, int)
             else configured_padding
         )
+        standard = tuple(
+            challenger for challenger in self.challengers if challenger.scope != "cell"
+        )
+        cells = tuple(
+            challenger for challenger in self.challengers if challenger.scope == "cell"
+        )
         with tempfile.TemporaryDirectory(prefix="ocr-table-") as directory:
             root = Path(directory)
             table_crops = (
                 _write_table_crops(image, predictions, padding, root)
-                if any(challenger.scope == "table" for challenger in self.challengers)
+                if any(challenger.scope == "table" for challenger in standard)
                 else ()
             )
-            if self.parallel_challengers and len(self.challengers) > 1:
+            if self.parallel_challengers and len(standard) > 1:
                 with ThreadPoolExecutor(
-                    max_workers=min(len(self.challengers), MAX_PARALLEL_CHALLENGERS),
+                    max_workers=min(len(standard), MAX_PARALLEL_CHALLENGERS),
                     thread_name_prefix="table-ocr",
                 ) as executor:
                     futures = [
@@ -274,27 +303,182 @@ class TatrTableStage:
                             predictions,
                             table_crops,
                         )
-                        for challenger in self.challengers
+                        for challenger in standard
                     ]
                     for challenger, future in zip(
-                        self.challengers,
+                        standard,
                         futures,
                         strict=True,
                     ):
                         result[challenger.name] = future.result()
-                return result
-
-            for challenger in self.challengers:
-                result[challenger.name] = self._read_challenger(
+            else:
+                for challenger in standard:
+                    result[challenger.name] = self._read_challenger(
+                        challenger,
+                        image,
+                        image_path,
+                        root,
+                        page_number,
+                        predictions,
+                        table_crops,
+                    )
+            for challenger in cells:
+                result[challenger.name] = self._read_cell_challenger(
                     challenger,
                     image,
-                    image_path,
                     root,
                     page_number,
                     predictions,
-                    table_crops,
+                    primary_by_table,
+                    result,
                 )
         return result
+
+    def _read_cell_challenger(
+        self,
+        challenger: TableChallenger,
+        image: Image.Image,
+        root: Path,
+        page_number: int,
+        predictions: Sequence[TablePrediction],
+        primary_by_table: Sequence[list[TextRegion]],
+        prior: dict[str, list[list[TextRegion]]],
+    ) -> list[list[TextRegion]]:
+        output: list[list[TextRegion]] = []
+        remaining_rereads = MAX_CELL_REREADS_PER_PAGE
+        for table_index, prediction in enumerate(predictions, start=1):
+            primary_cells = _assign_cells(
+                prediction.cells,
+                primary_by_table[table_index - 1],
+            )
+            prior_cells = {
+                name: _assign_cells(prediction.cells, tables[table_index - 1])
+                for name, tables in prior.items()
+            }
+            jobs = []
+            for cell_index, cell in enumerate(prediction.cells, start=1):
+                if remaining_rereads <= 0:
+                    break
+                primary = _candidate(primary_cells[cell_index - 1], "primary")
+                existing = [
+                    _candidate(items[cell_index - 1], name)
+                    for name, items in prior_cells.items()
+                ]
+                row_peers = _row_peer_candidates(
+                    cell_index - 1,
+                    prediction.cells,
+                    primary_cells,
+                )
+                label_unit = _expected_label_unit(
+                    _column_peer_candidates(
+                        cell_index - 1,
+                        prediction.cells,
+                        primary_cells,
+                    )
+                )
+                if not _needs_cell_reread(
+                    primary,
+                    existing,
+                    self.low_primary_confidence,
+                    row_peers,
+                    min(cell.column_nums, default=0) > 0,
+                    label_unit,
+                ):
+                    continue
+                padding, scale = _cell_reread_view(row_peers)
+                crop, offset = _table_crop(
+                    image,
+                    cell.bounding_box,
+                    (padding, padding),
+                )
+                if not _normalize(primary.text) and not _has_visible_ink(crop):
+                    crop.close()
+                    continue
+                path = root / f"{_slug(challenger.name)}-{table_index}-{cell_index}.png"
+                prepared = None
+                scaled = None
+                try:
+                    prepared = (
+                        challenger.prepare(crop.copy())
+                        if challenger.prepare is not None
+                        else crop
+                    )
+                    if not isinstance(prepared, Image.Image):
+                        raise TypeError("Table preprocessing must return a PIL image")
+                    scaled = prepared.resize(
+                        (
+                            prepared.width * scale,
+                            prepared.height * scale,
+                        ),
+                        Image.Resampling.LANCZOS,
+                    )
+                    scaled.save(path, format="PNG")
+                except Exception as error:
+                    raise ReaderError("table_preprocess_failed", str(error)) from error
+                finally:
+                    if scaled is not None:
+                        scaled.close()
+                    if prepared is not None and prepared is not crop:
+                        prepared.close()
+                    crop.close()
+                jobs.append((cell_index, cell, path, offset, scale))
+                remaining_rereads -= 1
+            if self.parallel_challengers and len(jobs) > 1:
+                with ThreadPoolExecutor(
+                    max_workers=min(len(jobs), MAX_PARALLEL_CHALLENGERS),
+                    thread_name_prefix="cell-ocr",
+                ) as executor:
+                    readings = list(
+                        executor.map(
+                            lambda job: challenger.reader.read(job[2], page_number),
+                            jobs,
+                        )
+                    )
+            else:
+                readings = [
+                    challenger.reader.read(path, page_number)
+                    for _, _, path, _, _ in jobs
+                ]
+            table_regions = []
+            for job, regions in zip(jobs, readings, strict=True):
+                cell_index, cell, _, offset, scale = job
+                for source_index, region in enumerate(regions, start=1):
+                    provenance = dict(region.text_provenance or {})
+                    provenance.update(
+                        {
+                            "challenger": challenger.name,
+                            "challenger_scope": "cell",
+                            "source_id": region.id,
+                            "source_provider": region.provider,
+                            "source_cell_bbox": asdict(cell.bounding_box),
+                            "scale": scale,
+                        }
+                    )
+                    table_regions.append(
+                        replace(
+                            region,
+                            id=(
+                                f"p{page_number}-tables-{_slug(challenger.name)}-"
+                                f"t{table_index}-c{cell_index}-source-{source_index}"
+                            ),
+                            provider=challenger.name,
+                            bounding_box=BoundingBox(
+                                left=offset[0]
+                                + math.floor(region.bounding_box.left / scale),
+                                top=offset[1]
+                                + math.floor(region.bounding_box.top / scale),
+                                right=offset[0]
+                                + math.ceil(region.bounding_box.right / scale),
+                                bottom=offset[1]
+                                + math.ceil(region.bounding_box.bottom / scale),
+                            ),
+                            text_provenance=provenance,
+                            alternatives=list(region.alternatives),
+                            structure=copy.deepcopy(region.structure),
+                        )
+                    )
+            output.append(table_regions)
+        return output
 
     def _read_challenger(
         self,
@@ -370,10 +554,13 @@ class TatrTableStage:
         challenger_sources = {
             name: _assigned_regions(items) for name, items in challenger_cells.items()
         }
+        primary_candidates = [
+            _candidate(assigned, "primary") for assigned in primary_cells
+        ]
         cells = []
         table_alternatives = []
         for cell_index, cell in enumerate(prediction.cells, start=1):
-            primary_candidate = _candidate(primary_cells[cell_index - 1], "primary")
+            primary_candidate = primary_candidates[cell_index - 1]
             challenger_candidates = [
                 _candidate(items[cell_index - 1], name)
                 for name, items in challenger_cells.items()
@@ -382,6 +569,18 @@ class TatrTableStage:
                 primary_candidate,
                 challenger_candidates,
                 self.low_primary_confidence,
+                _row_peer_candidates(
+                    cell_index - 1,
+                    prediction.cells,
+                    primary_cells,
+                ),
+                _expected_label_unit(
+                    _column_peer_candidates(
+                        cell_index - 1,
+                        prediction.cells,
+                        primary_cells,
+                    )
+                ),
             )
             cell_id = f"{table_id}-cell-{cell_index}"
             cell_alternatives = [
@@ -675,6 +874,16 @@ class TatrTableExtractor:
                 return []
             if not _usable_panel_grid(cells):
                 return []
+            core = self._reparse_numeric_core(
+                pipeline,
+                image,
+                tokens,
+                panel,
+                cells,
+            )
+            core_metadata = None
+            if core is not None:
+                panel, cells, core_metadata = core
             model = self.model_provenance()
             model["proposal"] = {
                 "source": HORIZONTAL_PANEL_PROPOSAL_SOURCE,
@@ -688,6 +897,8 @@ class TatrTableExtractor:
                 "panel_index": panel_index,
                 "panel_count": len(panels),
             }
+            if core_metadata is not None:
+                model["proposal"]["column_core"] = core_metadata
             recovered.append(
                 TablePrediction(
                     bounding_box=panel,
@@ -697,6 +908,64 @@ class TatrTableExtractor:
                 )
             )
         return recovered
+
+    def _reparse_numeric_core(
+        self,
+        pipeline: object,
+        image: Image.Image,
+        tokens: list[dict[str, Any]],
+        panel: BoundingBox,
+        cells: Sequence[TableCell],
+    ) -> tuple[BoundingBox, list[TableCell], dict[str, Any]] | None:
+        core = _numeric_column_core(cells, panel)
+        if core is None:
+            return None
+        core_box, expected_columns = core
+        crop = image.crop(
+            (core_box.left, core_box.top, core_box.right, core_box.bottom)
+        )
+        detection = {
+            "label": "table",
+            "score": None,
+            "bbox": [core_box.left, core_box.top, core_box.right, core_box.bottom],
+        }
+        core_tokens = _tokens_for_proposal(tokens, core_box)
+        try:
+            recognized = pipeline.recognize(
+                crop,
+                core_tokens,
+                out_objects=True,
+                out_cells=True,
+            )
+            reparsed = self._recognized_cells(
+                recognized,
+                detection,
+                image.size,
+                crop.size,
+                crop_padding=0,
+            )
+        except Exception:
+            return None
+        if not _usable_panel_grid(reparsed):
+            return None
+        row_count, column_count = _table_shape(reparsed)
+        parent_rows, parent_columns = _table_shape(cells)
+        if column_count != expected_columns or row_count < parent_rows:
+            return None
+        aligned = _repair_dense_numeric_rows(reparsed, core_tokens, core_box)
+        row_alignment = None
+        if aligned is not None:
+            reparsed, row_alignment = aligned
+        return (
+            core_box,
+            reparsed,
+            {
+                "source": NUMERIC_COLUMN_CORE_SOURCE,
+                "parent_column_count": parent_columns,
+                "column_count": column_count,
+                **({"row_alignment": row_alignment} if row_alignment else {}),
+            },
+        )
 
     def model_provenance(self) -> dict[str, Any]:
         return {
@@ -851,6 +1120,11 @@ class TatrTableExtractor:
                         )
                         for span in spans
                         if isinstance(span, dict) and _valid_box(span.get("bbox"))
+                    ),
+                    span_texts=tuple(
+                        str(span.get("text", "")).strip()
+                        for span in spans
+                        if isinstance(span, dict) and str(span.get("text", "")).strip()
                     ),
                 )
             )
@@ -1024,6 +1298,314 @@ def _usable_panel_grid(cells: Sequence[TableCell]) -> bool:
     rows = {row for cell in cells for row in cell.row_nums}
     columns = {column for cell in cells for column in cell.column_nums}
     return len(rows) >= 2 and len(columns) >= 2
+
+
+def _numeric_column_core(
+    cells: Sequence[TableCell],
+    panel: BoundingBox,
+) -> tuple[BoundingBox, int] | None:
+    _, column_count = _table_shape(cells)
+    texts_by_column: dict[int, list[str]] = {
+        column: [] for column in range(column_count)
+    }
+    for cell in cells:
+        if len(cell.column_nums) != 1:
+            continue
+        text = " ".join(cell.span_texts).strip()
+        if text:
+            texts_by_column[cell.column_nums[0]].append(text)
+
+    numeric_columns = []
+    for column in range(column_count):
+        texts = texts_by_column[column]
+        numeric = sum(_is_numeric_cell_text(text) for text in texts)
+        numeric_columns.append(
+            len(texts) >= MIN_NUMERIC_CORE_FILLED_CELLS and numeric / len(texts) >= 0.6
+        )
+
+    runs: list[tuple[int, int]] = []
+    start = None
+    for column, numeric in enumerate((*numeric_columns, False)):
+        if numeric and start is None:
+            start = column
+        elif not numeric and start is not None:
+            runs.append((start, column))
+            start = None
+    if not runs:
+        return None
+    first_numeric, after_numeric = max(
+        runs,
+        key=lambda run: (run[1] - run[0], -run[0]),
+    )
+    if after_numeric - first_numeric < MIN_NUMERIC_CORE_COLUMNS:
+        return None
+
+    first_column = max(0, first_numeric - 1)
+    if first_column == 0 and after_numeric == column_count:
+        return None
+    selected = [
+        cell
+        for cell in cells
+        if min(cell.column_nums) >= first_column
+        and max(cell.column_nums) < after_numeric
+    ]
+    if not selected:
+        return None
+    left = min(cell.bounding_box.left for cell in selected)
+    right = max(cell.bounding_box.right for cell in selected)
+    if right <= left or left <= panel.left and right >= panel.right:
+        return None
+    return (
+        BoundingBox(left, panel.top, right, panel.bottom),
+        after_numeric - first_column,
+    )
+
+
+def _is_numeric_cell_text(text: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", text).strip().casefold()
+    if normalized in {"na", "n/a", "nm"}:
+        return True
+    compact = re.sub(r"[\s$€£¥₹§,+().%#:/-]", "", normalized)
+    return bool(compact) and compact.isdigit()
+
+
+def _table_shape(cells: Sequence[TableCell]) -> tuple[int, int]:
+    return (
+        max((max(cell.row_nums, default=-1) for cell in cells), default=-1) + 1,
+        max((max(cell.column_nums, default=-1) for cell in cells), default=-1) + 1,
+    )
+
+
+def _repair_dense_numeric_rows(
+    cells: Sequence[TableCell],
+    tokens: Sequence[dict[str, Any]],
+    table_box: BoundingBox,
+) -> tuple[list[TableCell], dict[str, Any]] | None:
+    row_count, column_count = _table_shape(cells)
+    if column_count < MIN_NUMERIC_CORE_COLUMNS + 1:
+        return None
+    column_boxes = _single_column_boxes(cells, column_count)
+    if column_boxes is None:
+        return None
+
+    numeric_tokens = []
+    for token in tokens:
+        box = _page_token_box(token, table_box)
+        if box is None or not _is_numeric_cell_text(str(token.get("text", ""))):
+            continue
+        center_x = (box.left + box.right) / 2
+        column = next(
+            (
+                index
+                for index, column_box in enumerate(column_boxes[1:], start=1)
+                if column_box.left <= center_x <= column_box.right
+            ),
+            None,
+        )
+        if column is not None:
+            numeric_tokens.append((column, box))
+    bands = _aligned_numeric_bands(numeric_tokens)
+    if len(bands) < 2:
+        return None
+    aligned_band_count = len(bands)
+
+    for row in range(row_count):
+        row_cells = [
+            cell
+            for cell in cells
+            if cell.row_nums == (row,)
+            and len(cell.column_nums) == 1
+            and cell.column_nums[0] > 0
+        ]
+        if len(row_cells) < MIN_ALIGNED_NUMERIC_COLUMNS:
+            continue
+        if any(
+            any(
+                cell.bounding_box.top <= center <= cell.bounding_box.bottom
+                for cell in row_cells
+            )
+            for _, _, center in bands
+        ):
+            continue
+        bands.append(
+            (
+                min(cell.bounding_box.top for cell in row_cells),
+                max(cell.bounding_box.bottom for cell in row_cells),
+                median(
+                    (cell.bounding_box.top + cell.bounding_box.bottom) / 2
+                    for cell in row_cells
+                ),
+            )
+        )
+    bands.sort(key=lambda band: band[2])
+
+    rows_by_band = []
+    for _, _, center in bands:
+        matching_rows = {
+            min(cell.row_nums)
+            for cell in cells
+            if len(cell.row_nums) == 1
+            and len(cell.column_nums) == 1
+            and cell.column_nums[0] > 0
+            and cell.bounding_box.top <= center <= cell.bounding_box.bottom
+        }
+        rows_by_band.append(min(matching_rows) if matching_rows else None)
+    merged_numeric_bands = len([row for row in rows_by_band if row is not None]) != len(
+        {row for row in rows_by_band if row is not None}
+    )
+    label_only_projection = any(
+        cell.projected_row_header
+        and len(cell.column_nums) == column_count
+        and not any(
+            cell.bounding_box.top <= center <= cell.bounding_box.bottom
+            for _, _, center in bands
+        )
+        for cell in cells
+    )
+    if not merged_numeric_bands and not label_only_projection:
+        return None
+
+    table_top = min(cell.bounding_box.top for cell in cells)
+    table_bottom = max(cell.bounding_box.bottom for cell in cells)
+    centers = [center for _, _, center in bands]
+    edges = [table_top]
+    edges.extend(
+        round((upper + lower) / 2) for upper, lower in zip(centers, centers[1:])
+    )
+    edges.append(table_bottom)
+
+    for cell in cells:
+        matching = [
+            index
+            for index, center in enumerate(centers)
+            if cell.bounding_box.top <= center <= cell.bounding_box.bottom
+        ]
+        is_label_cell = cell.column_nums == (0,)
+        is_label_projection = (
+            cell.projected_row_header and len(cell.column_nums) == column_count
+        )
+        if is_label_cell and len(matching) == 1:
+            index = matching[0]
+            if index > 0:
+                edges[index] = min(edges[index], cell.bounding_box.top)
+            if index + 1 < len(edges) - 1:
+                edges[index + 1] = max(edges[index + 1], cell.bounding_box.bottom)
+        elif is_label_projection and not matching:
+            following = next(
+                (
+                    index
+                    for index, center in enumerate(centers)
+                    if center >= cell.bounding_box.bottom
+                ),
+                None,
+            )
+            if following is not None:
+                edges[following] = min(edges[following], cell.bounding_box.top)
+
+    if any(lower <= upper for upper, lower in zip(edges, edges[1:])):
+        return None
+    header_rows = {
+        index
+        for index, center in enumerate(centers)
+        if any(
+            cell.column_header
+            and cell.bounding_box.top <= center <= cell.bounding_box.bottom
+            for cell in cells
+        )
+    }
+    repaired = [
+        TableCell(
+            bounding_box=BoundingBox(
+                column_box.left,
+                edges[row],
+                column_box.right,
+                edges[row + 1],
+            ),
+            row_nums=(row,),
+            column_nums=(column,),
+            column_header=row in header_rows,
+        )
+        for row in range(len(bands))
+        for column, column_box in enumerate(column_boxes)
+    ]
+    if not _usable_panel_grid(repaired):
+        return None
+    return repaired, {
+        "source": ALIGNED_NUMERIC_ROWS_SOURCE,
+        "model_row_count": row_count,
+        "aligned_band_count": aligned_band_count,
+        "row_count": len(bands),
+    }
+
+
+def _single_column_boxes(
+    cells: Sequence[TableCell],
+    column_count: int,
+) -> list[BoundingBox] | None:
+    boxes = []
+    for column in range(column_count):
+        matches = [cell.bounding_box for cell in cells if cell.column_nums == (column,)]
+        if not matches:
+            return None
+        boxes.append(
+            BoundingBox(
+                round(median(box.left for box in matches)),
+                min(box.top for box in matches),
+                round(median(box.right for box in matches)),
+                max(box.bottom for box in matches),
+            )
+        )
+    return boxes
+
+
+def _page_token_box(
+    token: dict[str, Any],
+    table_box: BoundingBox,
+) -> BoundingBox | None:
+    if not _valid_box(token.get("bbox")):
+        return None
+    left, top, right, bottom = _float_box(token["bbox"])
+    return BoundingBox(
+        math.floor(left + table_box.left),
+        math.floor(top + table_box.top),
+        math.ceil(right + table_box.left),
+        math.ceil(bottom + table_box.top),
+    )
+
+
+def _aligned_numeric_bands(
+    tokens: Sequence[tuple[int, BoundingBox]],
+) -> list[tuple[int, int, float]]:
+    if not tokens:
+        return []
+    tolerance = max(
+        2,
+        round(median(box.bottom - box.top for _, box in tokens) * 0.6),
+    )
+    groups: list[list[tuple[int, BoundingBox]]] = []
+    for item in sorted(tokens, key=lambda value: (value[1].top + value[1].bottom) / 2):
+        center = (item[1].top + item[1].bottom) / 2
+        if not groups:
+            groups.append([item])
+            continue
+        group_centers = [(box.top + box.bottom) / 2 for _, box in groups[-1]]
+        if abs(center - median(group_centers)) <= tolerance:
+            groups[-1].append(item)
+        else:
+            groups.append([item])
+
+    bands = []
+    for group in groups:
+        if len({column for column, _ in group}) < MIN_ALIGNED_NUMERIC_COLUMNS:
+            continue
+        bands.append(
+            (
+                min(box.top for _, box in group),
+                max(box.bottom for _, box in group),
+                median((box.top + box.bottom) / 2 for _, box in group),
+            )
+        )
+    return bands
 
 
 def _line_centers(
@@ -1483,15 +2065,118 @@ def _resolve_cell(
     primary: _Candidate,
     challengers: list[_Candidate],
     low_primary_confidence: float,
+    row_peers: Sequence[_Candidate] = (),
+    label_unit: str | None = None,
 ) -> dict[str, Any]:
-    challenger = _best_challenger(challengers)
+    cell_reread = next(
+        (
+            candidate
+            for candidate in challengers
+            if any(
+                region.text_provenance
+                and region.text_provenance.get("challenger_scope") == "cell"
+                for region in candidate.regions
+            )
+            and _normalize(candidate.text)
+        ),
+        None,
+    )
+    standard_challengers = [
+        candidate for candidate in challengers if candidate is not cell_reread
+    ]
+    challenger = _best_challenger(standard_challengers)
+    text_repair = (
+        _supported_text_repair(primary, challenger[0], challenger[2])
+        if challenger is not None and challenger[1]
+        else None
+    )
     selected = primary
     supporters = [primary]
     decision = "primary"
-    if not _normalize(primary.text) and challenger is not None and challenger[1]:
+    if cell_reread is not None:
+        confirmations = [
+            candidate
+            for candidate in standard_challengers
+            if _same_tokens(candidate.text, cell_reread.text)
+        ]
+        primary_present = bool(_normalize(primary.text))
+        blank_recovery_supported = bool(
+            _confidence(cell_reread.confidence) >= low_primary_confidence
+            and any(
+                _confidence(candidate.confidence) >= low_primary_confidence
+                and _independent_candidates(cell_reread, candidate)
+                for candidate in confirmations
+            )
+        )
+        repaired_unit = _splice_label_unit(primary.text, cell_reread.text, label_unit)
+        if repaired_unit is not None:
+            supporters = [cell_reread, *confirmations]
+            supporters.insert(0, primary)
+            selected = _with_support(
+                replace(primary, text=repaired_unit),
+                supporters,
+            )
+            decision = "supported_unit_repair"
+        else:
+            cell_reread = _numeric_fragment(cell_reread)
+            confirmations = [
+                candidate
+                for candidate in standard_challengers
+                if _same_numeric_core(candidate.text, cell_reread.text)
+                or _same_tokens(candidate.text, cell_reread.text)
+            ]
+            blank_recovery_supported = bool(
+                _confidence(cell_reread.confidence) >= low_primary_confidence
+                and any(
+                    _confidence(candidate.confidence) >= low_primary_confidence
+                    and _independent_candidates(cell_reread, candidate)
+                    for candidate in confirmations
+                )
+            )
+            primary_score = _row_format_score(primary.text, row_peers)
+            reread_score = _row_format_score(cell_reread.text, row_peers)
+            primary_matches = _same_numeric_core(primary.text, cell_reread.text) or (
+                _same_tokens(primary.text, cell_reread.text)
+            )
+            if reread_score > primary_score and (
+                blank_recovery_supported
+                or primary_matches
+                or primary_present
+                and confirmations
+            ):
+                supporters = [cell_reread, *confirmations]
+                selected = _with_support(cell_reread, supporters)
+                decision = "cell_reread"
+            elif primary_matches:
+                supporters = [primary, cell_reread]
+                selected = _with_support(primary, supporters)
+                decision = "cell_confirmation"
+            elif (
+                not primary_present
+                and blank_recovery_supported
+                and _is_numeric_cell_text(cell_reread.text)
+            ):
+                supporters = [cell_reread, *confirmations]
+                selected = _with_support(cell_reread, supporters)
+                decision = "cell_reread"
+            elif (
+                confirmations
+                and primary_score == reread_score
+                and _confidence(primary.confidence) < low_primary_confidence
+            ):
+                supporters = [cell_reread, *confirmations]
+                selected = _with_support(cell_reread, supporters)
+                decision = "cell_reread"
+            else:
+                decision = "cell_disagreement"
+    elif not _normalize(primary.text) and challenger is not None and challenger[1]:
         selected = _with_support(challenger[0], challenger[2])
         supporters = challenger[2]
         decision = "primary_missing"
+    elif text_repair is not None:
+        selected = text_repair
+        supporters = challenger[2]
+        decision = "supported_text_repair"
     elif (
         challenger is not None
         and challenger[1]
@@ -1501,18 +2186,6 @@ def _resolve_cell(
         selected = _with_support(challenger[0], challenger[2])
         supporters = challenger[2]
         decision = "overlap_conflict"
-    elif (
-        challenger is not None
-        and challenger[1]
-        and primary.confidence is not None
-        and challenger[0].confidence is not None
-        and primary.confidence < low_primary_confidence
-        and challenger[0].confidence > primary.confidence
-    ):
-        selected = _with_support(challenger[0], challenger[2])
-        supporters = challenger[2]
-        decision = "low_primary_confidence"
-
     if selected is primary and challenger is not None and challenger[1]:
         recovered = _recover_supported_wrapper(primary, challenger[2])
         if recovered is not None:
@@ -1532,6 +2205,13 @@ def _resolve_cell(
         and not _same_tokens(challenger[0].text, primary.text)
         and _confidence(challenger[0].confidence) >= _confidence(primary.confidence)
     )
+    cell_conflict = bool(
+        decision == "cell_disagreement"
+        and cell_reread is not None
+        and _is_numeric_cell_text(primary.text)
+        and _is_numeric_cell_text(cell_reread.text)
+        and not _same_numeric_core(primary.text, cell_reread.text)
+    )
     no_evidence = not _normalize(selected.text) and not selected.evidence_ids
     return {
         "selected": selected,
@@ -1541,7 +2221,7 @@ def _resolve_cell(
             "unreadable"
             if no_evidence
             else "conflicting"
-            if strong_conflict
+            if strong_conflict or cell_conflict
             else "resolved"
         ),
         "decision": (
@@ -1634,6 +2314,309 @@ def _best_challenger(
         or (_value(candidate.text) and _value(candidate.text) == _value(selected.text))
     ]
     return selected, agreed, supporters
+
+
+def _needs_cell_reread(
+    primary: _Candidate,
+    challengers: Sequence[_Candidate],
+    low_primary_confidence: float,
+    row_peers: Sequence[_Candidate],
+    numeric_column: bool = True,
+    label_unit: str | None = None,
+) -> bool:
+    numeric_challengers = [
+        candidate for candidate in challengers if _is_numeric_cell_text(candidate.text)
+    ]
+    if _adequate_numeric_consensus(numeric_challengers, low_primary_confidence):
+        resolution = _resolve_cell(
+            primary,
+            list(challengers),
+            low_primary_confidence,
+            row_peers,
+            label_unit,
+        )["resolution"]
+        if resolution == "resolved":
+            return False
+    if not _normalize(primary.text):
+        return numeric_column or bool(numeric_challengers)
+    if not numeric_column and not _is_numeric_cell_text(primary.text):
+        return bool(
+            label_unit
+            and _label_unit(primary.text) is None
+            and LABEL_UNIT_SLOT_PATTERN.search(primary.text)
+        )
+    expected = _expected_numeric_format(row_peers)
+    if expected and not _matches_numeric_format(primary.text, expected):
+        return True
+    if not _is_numeric_cell_text(primary.text):
+        return bool(expected or numeric_challengers)
+    return _confidence(primary.confidence) < low_primary_confidence and (
+        any(
+            not _same_numeric_core(primary.text, candidate.text)
+            for candidate in numeric_challengers
+        )
+        or expected.get("decimal_places", 0) > 0
+        and not _has_decimal_value(primary.text)
+    )
+
+
+def _adequate_numeric_consensus(
+    challengers: Sequence[_Candidate],
+    minimum_confidence: float,
+) -> bool:
+    adequate = [
+        candidate
+        for candidate in challengers
+        if _confidence(candidate.confidence) >= minimum_confidence
+    ]
+    consensus = _best_challenger(adequate)
+    return bool(
+        consensus is not None
+        and consensus[1]
+        and len({candidate.source for candidate in consensus[2]}) >= 2
+    )
+
+
+def _row_peer_candidates(
+    index: int,
+    cells: Sequence[TableCell],
+    assigned: Sequence[list[TextRegion]],
+) -> list[_Candidate]:
+    rows = set(cells[index].row_nums)
+    return [
+        _candidate(assigned[peer_index], "primary")
+        for peer_index, cell in enumerate(cells)
+        if peer_index != index and rows.intersection(cell.row_nums)
+    ]
+
+
+def _column_peer_candidates(
+    index: int,
+    cells: Sequence[TableCell],
+    assigned: Sequence[list[TextRegion]],
+) -> list[_Candidate]:
+    columns = set(cells[index].column_nums)
+    return [
+        _candidate(assigned[peer_index], "primary")
+        for peer_index, cell in enumerate(cells)
+        if peer_index != index and columns.intersection(cell.column_nums)
+    ]
+
+
+def _label_unit(text: str) -> str | None:
+    match = LABEL_UNIT_PATTERN.search(text)
+    return _normalize(match.group(1)) if match is not None else None
+
+
+def _expected_label_unit(column_peers: Sequence[_Candidate]) -> str | None:
+    units = [
+        unit for candidate in column_peers if (unit := _label_unit(candidate.text))
+    ]
+    if not units:
+        return None
+    unit = max(units, key=units.count)
+    return unit if units.count(unit) >= 2 else None
+
+
+def _splice_label_unit(
+    primary: str,
+    reread: str,
+    expected: str | None,
+) -> str | None:
+    reread_unit = LABEL_UNIT_PATTERN.search(reread)
+    primary_marker = LABEL_UNIT_MARKER_PATTERN.search(primary)
+    if (
+        expected is None
+        or reread_unit is None
+        or primary_marker is None
+        or _normalize(reread_unit.group(1)) != expected
+    ):
+        return None
+    start, end = primary_marker.span(2)
+    return f"{primary[:start]}{reread_unit.group(1)}{primary[end:]}"
+
+
+def _cell_reread_view(row_peers: Sequence[_Candidate]) -> tuple[int, int]:
+    expected = _expected_numeric_format(row_peers)
+    if expected.get("decimal_places", 0) > 0:
+        padding = (
+            GROUPED_CELL_REREAD_PADDING
+            if not expected.get("currency") and not expected.get("percent")
+            else CELL_REREAD_PADDING
+        )
+        return padding, DECIMAL_CELL_REREAD_SCALE
+    if expected.get("grouped_thousands"):
+        return GROUPED_CELL_REREAD_PADDING, CELL_REREAD_SCALE
+    return CELL_REREAD_PADDING, CELL_REREAD_SCALE
+
+
+def _has_visible_ink(image: Image.Image) -> bool:
+    grayscale = image.convert("L")
+    try:
+        pixels = grayscale.load()
+        dark_rows = {
+            y
+            for y in range(grayscale.height)
+            if sum(pixels[x, y] < 200 for x in range(grayscale.width))
+            >= max(1, math.ceil(grayscale.width * 0.8))
+        }
+        dark_columns = {
+            x
+            for x in range(grayscale.width)
+            if sum(pixels[x, y] < 200 for y in range(grayscale.height))
+            >= max(1, math.ceil(grayscale.height * 0.8))
+        }
+        dark_pixels = sum(
+            pixels[x, y] < 200
+            for y in range(grayscale.height)
+            if y not in dark_rows
+            for x in range(grayscale.width)
+            if x not in dark_columns
+        )
+        return dark_pixels >= 3
+    finally:
+        grayscale.close()
+
+
+def _independent_candidates(left: _Candidate, right: _Candidate) -> bool:
+    return bool(_candidate_providers(left).isdisjoint(_candidate_providers(right)))
+
+
+def _candidate_providers(candidate: _Candidate) -> set[str]:
+    return {
+        str((region.text_provenance or {}).get("source_provider") or region.provider)
+        for region in candidate.regions
+    }
+
+
+def _numeric_fragment(candidate: _Candidate) -> _Candidate:
+    matches = list(OBSERVED_VALUE_PATTERN.finditer(candidate.text))
+    if not matches:
+        return candidate
+    match = max(
+        matches,
+        key=lambda item: (
+            sum(character.isdigit() for character in item.group(0)),
+            len(item.group(0)),
+        ),
+    )
+    observed = match.group(0).strip()
+    fragment = observed.rstrip(",")
+    remainder = f"{candidate.text[: match.start()]}{candidate.text[match.end() :]}"
+    if (
+        _is_numeric_cell_text(candidate.text)
+        and observed == fragment
+        and remainder.strip() not in {",", "."}
+    ):
+        return candidate
+    if not _is_numeric_cell_text(fragment):
+        return candidate
+    return replace(candidate, text=fragment)
+
+
+def _supported_text_repair(
+    primary: _Candidate,
+    challenger: _Candidate,
+    supporters: Sequence[_Candidate],
+) -> _Candidate | None:
+    if (
+        len(supporters) < 2
+        or _is_numeric_cell_text(primary.text)
+        or _is_numeric_cell_text(challenger.text)
+    ):
+        return None
+    similarity = SequenceMatcher(
+        None,
+        _normalize(primary.text),
+        _normalize(challenger.text),
+    ).ratio()
+    if similarity < 0.8:
+        return None
+    return _with_support(challenger, list(supporters))
+
+
+def _numeric_format(text: str) -> dict[str, object] | None:
+    if not _is_numeric_cell_text(text):
+        return None
+    matches = list(VALUE_PATTERN.finditer(text))
+    if not matches:
+        return None
+    match = max(
+        matches,
+        key=lambda item: (
+            sum(character.isdigit() for character in item.group(0)),
+            len(item.group(0)),
+        ),
+    )
+    token = match.group(0)
+    core = re.sub(r"[^\d.]", "", token)
+    if not core:
+        return None
+    integer = core.split(".", 1)[0]
+    prefix = text[: match.start()]
+    return {
+        "currency": "$" in prefix,
+        "rank": "#" in prefix,
+        "percent": "%" in token,
+        "decimal_places": len(core.partition(".")[2]) if "." in core else 0,
+        "grouped_thousands": "," in token,
+        "integer_digits": len(integer),
+    }
+
+
+def _expected_numeric_format(
+    row_peers: Sequence[_Candidate],
+) -> dict[str, object]:
+    formats = [
+        current
+        for candidate in row_peers
+        if (current := _numeric_format(candidate.text)) is not None
+    ]
+    if len(formats) < 2:
+        return {}
+    expected: dict[str, object] = {}
+    for feature in ("currency", "rank", "percent", "decimal_places"):
+        values = [current[feature] for current in formats]
+        value = max(values, key=values.count)
+        if values.count(value) >= 2 and values.count(value) > len(values) / 2:
+            expected[feature] = value
+    if any(current["grouped_thousands"] for current in formats):
+        expected["grouped_thousands"] = True
+    return expected
+
+
+def _matches_numeric_format(text: str, expected: dict[str, object]) -> bool:
+    current = _numeric_format(text)
+    if current is None:
+        return False
+    for feature in ("currency", "rank", "percent", "decimal_places"):
+        if feature in expected and current[feature] != expected[feature]:
+            return False
+    return not (
+        expected.get("grouped_thousands")
+        and current["integer_digits"] >= 4
+        and not current["grouped_thousands"]
+    )
+
+
+def _row_format_score(text: str, row_peers: Sequence[_Candidate]) -> int:
+    expected = _expected_numeric_format(row_peers)
+    current = _numeric_format(text)
+    if not expected or current is None:
+        return 0
+    score = sum(
+        current[feature] == value
+        for feature, value in expected.items()
+        if feature != "grouped_thousands"
+    )
+    if expected.get("grouped_thousands"):
+        score += bool(current["integer_digits"] < 4 or current["grouped_thousands"])
+    return score
+
+
+def _has_decimal_value(text: str) -> bool:
+    parts = _value_parts(text)
+    return parts is not None and "." in parts[0]
 
 
 def _with_support(selected: _Candidate, supporters: list[_Candidate]) -> _Candidate:
@@ -1915,6 +2898,101 @@ def _mark_sources(regions: Sequence[TextRegion], table_id: str) -> None:
             structure["source_role"] = old_role
         structure.update({"role": "table_source", "parent_id": table_id})
         region.structure = structure
+
+
+def attach_recovered_table_evidence(
+    regions: Sequence[TextRegion],
+    recovered: Sequence[TextRegion],
+) -> None:
+    """Fill unreadable table cells with later geometry-linked OCR evidence."""
+    available = list(recovered)
+    for table in (region for region in regions if region.kind == "table"):
+        structure = table.structure
+        if not isinstance(structure, dict) or not isinstance(
+            structure.get("cells"), list
+        ):
+            continue
+        cells = _table_cells_from_structure(structure["cells"])
+        if cells is None:
+            continue
+        assigned = _assign_cells(cells, available)
+        added = []
+        for cell, evidence in zip(structure["cells"], assigned, strict=True):
+            if (
+                not evidence
+                or cell.get("decision") != "no_cell_evidence"
+                or _normalize(str(cell.get("text", "")))
+            ):
+                continue
+            candidate = _candidate(evidence, "recovered")
+            if not _normalize(candidate.text):
+                continue
+            cell.update(
+                {
+                    "text": candidate.text,
+                    "source": candidate.source,
+                    "confidence": candidate.confidence,
+                    "resolution": "resolved",
+                    "evidence_ids": list(candidate.evidence_ids),
+                    "supporters": [
+                        {
+                            "provider": candidate.source,
+                            "evidence_ids": list(candidate.evidence_ids),
+                        }
+                    ],
+                    "decision": "recovered_missing_cell",
+                }
+            )
+            added.extend(evidence)
+        if not added:
+            continue
+        _mark_sources(added, table.id)
+        provenance = dict(table.text_provenance or {})
+        source_ids = provenance.setdefault("source_region_ids", [])
+        source_ids.extend(region.id for region in added if region.id not in source_ids)
+        table.text_provenance = provenance
+        table.text = _markdown(
+            structure["cells"],
+            int(structure["row_count"]),
+            int(structure["column_count"]),
+        )
+        confidences = [
+            cell.get("confidence")
+            for cell in structure["cells"]
+            if cell.get("confidence") is not None
+        ]
+        table.confidence = (
+            sum(float(confidence) for confidence in confidences) / len(confidences)
+            if confidences
+            else table.confidence
+        )
+        used = {region.id for region in added}
+        available = [region for region in available if region.id not in used]
+
+
+def _table_cells_from_structure(
+    values: Sequence[object],
+) -> list[TableCell] | None:
+    cells = []
+    for value in values:
+        if not isinstance(value, dict):
+            return None
+        box = value.get("bbox")
+        rows = _indexes(value.get("row_nums"))
+        columns = _indexes(value.get("column_nums"))
+        if not isinstance(box, dict) or not rows or not columns:
+            return None
+        try:
+            bounding_box = BoundingBox(
+                int(box["left"]),
+                int(box["top"]),
+                int(box["right"]),
+                int(box["bottom"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+        cells.append(TableCell(bounding_box, rows, columns))
+    return cells
 
 
 def _challenger_region(
@@ -2206,6 +3284,16 @@ def _value(value: str) -> str:
 
 def _same_value(left: str, right: str) -> bool:
     return bool(_value(left) and _value(left) == _value(right))
+
+
+def _same_numeric_core(left: str, right: str) -> bool:
+    left_parts = _value_parts(left)
+    right_parts = _value_parts(right)
+    return bool(
+        left_parts is not None
+        and right_parts is not None
+        and left_parts[0] == right_parts[0]
+    )
 
 
 def _value_noise(value: str) -> int:
