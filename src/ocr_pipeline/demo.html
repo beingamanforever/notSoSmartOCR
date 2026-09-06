@@ -44,7 +44,7 @@
       outline-offset: 2px;
     }
 
-    .shell { max-width: 1600px; margin: 0 auto; padding: 20px; }
+    .shell { max-width: min(2100px, 96vw); margin: 0 auto; padding: 20px 24px 32px; }
     header {
       text-align: center;
       margin-bottom: 14px;
@@ -199,11 +199,19 @@
     }
     .workspace {
       display: grid;
-      grid-template-columns: minmax(0, .95fr) minmax(420px, 1.05fr);
-      align-items: start;
+      grid-template-columns: minmax(0, 1fr) minmax(460px, 1fr);
+      align-items: stretch;
       gap: 18px;
     }
-    .card { min-width: 0; border-radius: 16px; overflow: hidden; }
+    .card {
+      min-width: 0;
+      border-radius: 16px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    /* the scrolling body absorbs the height difference so both cards end level */
+    .preview-wrap, .tab-panel.active { flex: 1 1 auto; }
     .card-head {
       min-height: 57px;
       display: flex;
@@ -274,8 +282,8 @@
     .category-swatch { width: 8px; height: 8px; border-radius: 50%; background: var(--category-color); }
 
     .preview-wrap {
-      min-height: 520px;
-      max-height: 70vh;
+      min-height: 620px;
+      max-height: 74vh;
       overflow: auto;
       display: grid;
       place-items: center;
@@ -294,7 +302,79 @@
       cursor: crosshair;
     }
     canvas.visible { display: block; }
+    .loader { display: grid; place-items: center; gap: 14px; color: var(--muted); }
+    .loader-blocks { display: grid; grid-template-columns: repeat(2, 18px); gap: 4px; }
+    .loader-blocks i {
+      display: block;
+      width: 18px;
+      height: 18px;
+      border-radius: 3px;
+      background: var(--accent);
+      animation: loader-pulse 1.1s ease-in-out infinite;
+    }
+    .loader-blocks i:nth-child(1) { animation-delay: 0s; opacity: .9; }
+    .loader-blocks i:nth-child(2) { animation-delay: .14s; opacity: .65; }
+    .loader-blocks i:nth-child(3) { animation-delay: .28s; opacity: .8; }
+    .loader-blocks i:nth-child(4) { animation-delay: .42s; opacity: .5; }
+    @keyframes loader-pulse {
+      0%, 100% { transform: scale(.72); opacity: .35; }
+      50% { transform: scale(1); opacity: 1; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .loader-blocks i { animation: none; opacity: .8; }
+    }
+
+    .icon-only {
+      display: inline-grid;
+      place-items: center;
+      width: 34px;
+      padding: 0;
+    }
+    .icon-only svg, .feedback-button svg {
+      width: 16px;
+      height: 16px;
+      fill: none;
+      stroke: currentColor;
+      stroke-width: 1.7;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .doc-metrics { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .metric {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel-raised);
+      color: var(--muted);
+      font-size: .7rem;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .metric::before { content: attr(data-icon); font-size: .78rem; line-height: 1; }
+    .metric[hidden] { display: none; }
+    .feedback { display: inline-flex; gap: 4px; }
+    .feedback-button {
+      display: inline-grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--muted);
+      cursor: pointer;
+      transition: color 150ms ease, border-color 150ms ease, background-color 150ms ease;
+    }
+    .feedback-button:hover:not(:disabled) { color: var(--text); border-color: var(--line-strong); }
+    .feedback-button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+    .feedback-button:disabled { opacity: .5; cursor: default; }
+
     .empty-state { max-width: 340px; color: var(--muted); text-align: center; line-height: 1.6; }
+    .tab-panel.active:has(> .empty-state) { display: grid; place-items: center; }
+    .tab-panel > .empty-state { margin: 0 auto; }
     .empty-state strong { display: block; color: var(--text); font-size: 1.02rem; }
 
     .inspector { padding: 14px 16px 16px; border-top: 1px solid var(--line); }
@@ -381,7 +461,7 @@
     .review-details { padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--confidence-medium-soft); }
     .review-details summary { color: var(--confidence-medium); cursor: pointer; font-size: .76rem; font-weight: 750; }
     .review-list { margin: 8px 0 0; padding-left: 18px; color: var(--text); font-size: .74rem; line-height: 1.5; }
-    .tab-panel { display: none; min-height: 560px; max-height: 70vh; overflow: auto; padding: 18px; }
+    .tab-panel { display: none; min-height: 620px; max-height: 74vh; overflow: auto; padding: 18px; }
     .tab-panel.active { display: block; }
     .tab-panel.empty-panel.active { display: grid; place-items: center; }
     .rendered-toolbar {
@@ -678,7 +758,12 @@
           <span class="card-title">Document output</span>
           <div class="downloads">
             <details class="action-menu">
-              <summary class="download">Copy</summary>
+              <summary class="download icon-only" role="button" aria-label="Copy" title="Copy">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <rect x="9" y="9" width="11" height="11" rx="2"></rect>
+                  <path d="M5 15V5a2 2 0 0 1 2-2h10"></path>
+                </svg>
+              </summary>
               <div class="action-popover">
                 <button class="download" id="copy-text" type="button" data-copy-state="idle" data-label="Raw text" disabled>Raw text</button>
                 <button class="download" id="copy-markdown" type="button" data-copy-state="idle" data-label="Markdown" disabled>Markdown</button>
@@ -693,6 +778,26 @@
               </div>
             </details>
             <span class="copy-status" id="copy-status" role="status" aria-live="polite" aria-atomic="true"></span>
+            <div class="doc-metrics" id="doc-metrics" hidden>
+              <span class="metric" id="metric-time" title="Backend processing time"></span>
+              <span class="metric" id="metric-pages" title="Pages"></span>
+              <span class="metric" id="metric-chars" title="Extracted characters"></span>
+              <span class="metric" id="metric-size" title="Source file size"></span>
+            </div>
+            <div class="feedback" id="feedback" hidden>
+              <button class="feedback-button" id="feedback-up" type="button"
+                aria-label="Report this result as good" title="Result looks right">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M7 22V11l5-9 1.5 1a3 3 0 0 1 1 3l-.8 4H19a2 2 0 0 1 2 2.4l-1.4 7A2 2 0 0 1 17.6 22z"></path>
+                </svg>
+              </button>
+              <button class="feedback-button" id="feedback-down" type="button"
+                aria-label="Report a problem with this result" title="Report a problem">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M17 2v11l-5 9-1.5-1a3 3 0 0 1-1-3l.8-4H5a2 2 0 0 1-2-2.4l1.4-7A2 2 0 0 1 6.4 2z"></path>
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
         <div class="tabs" role="tablist" aria-label="Output views">
@@ -778,6 +883,8 @@
       resultRequest: 0,
       hiddenKinds: new Set(),
       selectedFile: null,
+      selectedFileSize: 0,
+      feedbackSent: null,
       clientTimerStartedAt: null,
       clientTimerId: null,
       copyResetId: null,
@@ -829,6 +936,7 @@
     fileInput.addEventListener("change", () => {
       const file = fileInput.files[0];
       state.selectedFile = file || null;
+      state.selectedFileSize = state.selectedFile?.size || 0;
       byId("file-name").textContent = file ? file.name : "Choose one image, PDF, or TIFF";
       byId("parse-button").disabled = !file;
       byId("clear-button").disabled = !file && !state.response;
@@ -842,6 +950,7 @@
       const name = button.dataset.example;
       const label = button.querySelector(".example-name")?.textContent || "example";
       state.selectedFile = null;
+      state.selectedFileSize = state.selectedFile?.size || 0;
       byId("parse-button").disabled = true;
       document.querySelectorAll("[data-example]").forEach((item) => {
         item.disabled = true;
@@ -869,6 +978,7 @@
         setStatus("Example ready. Select Parse to extract it locally.", false, "success");
       } catch (error) {
         state.selectedFile = null;
+        state.selectedFileSize = state.selectedFile?.size || 0;
         byId("parse-button").disabled = true;
         setStatus(error.message, true);
       } finally {
@@ -888,6 +998,7 @@
       startClientTimer();
       resetResult();
       state.selectedFile = file;
+      state.selectedFileSize = state.selectedFile?.size || 0;
       setBusy(
         true,
         "Extracting text and structure locally."
@@ -943,6 +1054,7 @@
       const sessionId = state.response?.session_id;
       fileInput.value = "";
       state.selectedFile = null;
+      state.selectedFileSize = state.selectedFile?.size || 0;
       byId("file-name").textContent = "Choose one image, PDF, or TIFF";
       byId("parse-button").disabled = true;
       resetResult();
@@ -962,6 +1074,28 @@
     byId("copy-markdown").addEventListener("click", handleCopyMarkdown);
     byId("copy-json").addEventListener("click", handleCopyJson);
     byId("reread-handwriting").addEventListener("click", handleRereadHandwriting);
+    // <details> only closes by clicking its own summary, so dismiss menus explicitly.
+    function closeActionMenus(except = null) {
+      document.querySelectorAll("details.action-menu[open]").forEach((menu) => {
+        if (menu !== except) menu.open = false;
+      });
+    }
+
+    document.querySelectorAll("details.action-menu").forEach((menu) => {
+      menu.addEventListener("toggle", () => {
+        if (menu.open) closeActionMenus(menu);
+      });
+      menu.addEventListener("click", (event) => {
+        if (event.target.closest(".action-popover")) closeActionMenus();
+      });
+    });
+
+    document.addEventListener("pointerdown", (event) => {
+      if (!event.target.closest("details.action-menu")) closeActionMenus();
+    });
+
+    byId("feedback-up").addEventListener("click", () => sendFeedback("good"));
+    byId("feedback-down").addEventListener("click", () => sendFeedback("problem"));
     byId("accept-alternative").addEventListener("click", () => handleCorrection("accept"));
     byId("edit-region").addEventListener("click", handleEditRegion);
     byId("save-region-edit").addEventListener("click", () => handleCorrection("edit"));
@@ -1265,6 +1399,17 @@
       }
     }
 
+    function setCopyStatus(message, isError = false) {
+      const status = byId("copy-status");
+      window.clearTimeout(state.copyResetId);
+      status.textContent = message;
+      status.classList.toggle("error", isError);
+      state.copyResetId = window.setTimeout(() => {
+        status.textContent = "";
+        status.classList.remove("error");
+      }, 2200);
+    }
+
     function showCopyStatus(button, message, copyState) {
       const status = byId("copy-status");
       window.clearTimeout(state.copyResetId);
@@ -1337,7 +1482,25 @@
       document.querySelectorAll("[data-example]").forEach((button) => {
         button.disabled = busy;
       });
+      byId("feedback").hidden = busy || !state.response;
+      if (busy) showParsingLoader(message);
       if (busy) setStatus(message, false, "busy");
+    }
+
+    function showParsingLoader(message) {
+      const panel = byId("panel-rendered");
+      if (!panel) return;
+      const loader = document.createElement("div");
+      loader.className = "empty-state loader";
+      const blocks = document.createElement("div");
+      blocks.className = "loader-blocks";
+      for (let index = 0; index < 4; index += 1) blocks.append(document.createElement("i"));
+      const caption = document.createElement("strong");
+      caption.textContent = "Reading the document";
+      const detail = document.createElement("span");
+      detail.textContent = message || "Extracting text with its position.";
+      loader.append(blocks, caption, detail);
+      panel.replaceChildren(loader);
     }
 
     function setStatus(message, isError, tone = "") {
@@ -1360,7 +1523,82 @@
       byId("download-markdown").href = markdownUrl();
       byId("download-json").setAttribute("aria-disabled", "false");
       byId("download-markdown").setAttribute("aria-disabled", "false");
+      renderMetrics(payload);
+      resetFeedback();
       renderPage();
+    }
+
+    function renderMetrics(payload) {
+      const pages = payload.result?.pages || [];
+      const characters = pages.reduce(
+        (total, page) => total + (page.text?.value?.length || 0),
+        0
+      );
+      const seconds = Number(payload.timing?.total_seconds);
+      setMetric("metric-time", "\u23F1", Number.isFinite(seconds) ? `${seconds.toFixed(2)} s` : "");
+      setMetric("metric-pages", "\u25A4", pages.length ? String(pages.length) : "");
+      setMetric("metric-chars", "Tt", characters ? formatCount(characters) : "");
+      setMetric("metric-size", "\u{1F5AB}", formatBytes(state.selectedFileSize));
+      const metrics = byId("doc-metrics");
+      metrics.hidden = !Array.from(metrics.children).some((item) => !item.hidden);
+    }
+
+    function resetFeedback() {
+      state.feedbackSent = null;
+      const panel = byId("feedback");
+      panel.hidden = !state.response;
+      ["feedback-up", "feedback-down"].forEach((id) => {
+        const button = byId(id);
+        button.disabled = !state.response;
+        button.setAttribute("aria-pressed", "false");
+      });
+    }
+
+    async function sendFeedback(verdict) {
+      if (!state.response || state.feedbackSent === verdict) return;
+      const page = state.response.result?.pages?.[state.pageIndex];
+      try {
+        const response = await fetch(
+          `/api/sessions/${state.response.session_id}/feedback`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              verdict,
+              revision: state.response.revision,
+              page_number: page?.page_number ?? null,
+              filename: state.response.filename ?? null,
+            }),
+          }
+        );
+        if (!response.ok) throw new Error(`Feedback failed (${response.status})`);
+        state.feedbackSent = verdict;
+        byId("feedback-up").setAttribute("aria-pressed", String(verdict === "good"));
+        byId("feedback-down").setAttribute("aria-pressed", String(verdict === "problem"));
+        setCopyStatus(
+          verdict === "good" ? "Thanks, marked as good." : "Reported to the review team."
+        );
+      } catch (error) {
+        setCopyStatus(error.message, true);
+      }
+    }
+
+    function setMetric(id, icon, value) {
+      const node = byId(id);
+      node.hidden = !value;
+      node.dataset.icon = icon;
+      node.textContent = value || "";
+    }
+
+    function formatCount(value) {
+      return value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k` : String(value);
+    }
+
+    function formatBytes(bytes) {
+      if (!Number.isFinite(bytes) || bytes <= 0) return "";
+      if (bytes < 1024) return `${bytes} B`;
+      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+      return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
     }
 
     function renderReview(payload) {
@@ -1709,6 +1947,10 @@
     });
     document.addEventListener("keydown", (event) => {
       if (event.key !== "Escape") return;
+      if (document.querySelector("details.action-menu[open]")) {
+        closeActionMenus();
+        return;
+      }
       const inspectorOpen = !byId("confidence-inspector").hidden;
       if (inspectorOpen) {
         state.pinnedConfidence = null;

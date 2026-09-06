@@ -1029,6 +1029,23 @@ def create_app(
             response_payload = copy.deepcopy(response)
         return JSONResponse(response_payload)
 
+    @app.post("/api/sessions/{session_id}/feedback")
+    def handle_feedback(session_id: str, payload: dict[str, Any]) -> Any:
+        """Record a reviewer verdict so the review team can find the exact page."""
+        verdict = payload.get("verdict")
+        if verdict not in {"good", "problem"}:
+            raise HTTPException(400, "verdict must be good or problem")
+        session = _get_session(sessions, session_id)
+        record = {
+            "session_id": session_id,
+            "verdict": verdict,
+            "revision": session["revision"],
+            "page_number": payload.get("page_number"),
+            "filename": payload.get("filename"),
+        }
+        LOGGER.warning("ocr_reviewer_feedback %s", json.dumps(record, sort_keys=True))
+        return {"status": "recorded", **record}
+
     @app.post("/api/sessions/{session_id}/corrections")
     def handle_correction(session_id: str, payload: dict[str, Any]) -> Any:
         page_number, region_id, base_revision, request_id = _revision_request(payload)

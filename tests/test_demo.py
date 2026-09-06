@@ -782,7 +782,8 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     assert 'id="copy-text" type="button" data-copy-state="idle"' in html
     assert 'id="copy-markdown" type="button" data-copy-state="idle"' in html
     assert 'id="copy-json" type="button" data-copy-state="idle"' in html
-    assert ">Copy</summary>" in html
+    # Copy is icon-only now, so assert its accessible name rather than a text label
+    assert 'aria-label="Copy"' in html
     assert ">Download</summary>" in html
     assert 'id="download-markdown" aria-disabled="true"' in html
     assert 'id="download-json" aria-disabled="true"' in html
@@ -1166,10 +1167,7 @@ def test_demo_markup_links_controls_tabs_and_output_panels() -> None:
         assert "disabled" in attrs
 
     assert "@media (max-width: 900px)" in response.text
-    assert (
-        "grid-template-columns: minmax(0, .95fr) minmax(420px, 1.05fr);"
-        in response.text
-    )
+    assert "grid-template-columns: minmax(0, 1fr) minmax(460px, 1fr);" in response.text
     assert ".workspace { grid-template-columns: 1fr; }" in response.text
 
 
@@ -4747,3 +4745,50 @@ def _page_png() -> bytes:
     output = io.BytesIO()
     Image.new("RGB", (120, 80), "white").save(output, format="PNG")
     return output.getvalue()
+
+
+def test_demo_records_reviewer_feedback_against_the_live_session() -> None:
+    app = create_app(ControlledReader())
+    with TestClient(app) as client:
+        payload = client.post(
+            "/api/process",
+            files={"file": ("visit.png", _page_png(), "image/png")},
+        ).json()
+        session_id = payload["session_id"]
+
+        good = client.post(
+            f"/api/sessions/{session_id}/feedback",
+            json={"verdict": "good", "page_number": 1, "filename": "visit.png"},
+        )
+        assert good.status_code == 200
+        assert good.json()["verdict"] == "good"
+        assert good.json()["revision"] == payload["revision"]
+
+        rejected = client.post(
+            f"/api/sessions/{session_id}/feedback", json={"verdict": "maybe"}
+        )
+        assert rejected.status_code == 400
+
+        missing = client.post(
+            "/api/sessions/does-not-exist/feedback", json={"verdict": "problem"}
+        )
+        assert missing.status_code == 404
+
+
+def test_demo_dismisses_action_menus_on_outside_click_and_escape() -> None:
+    """A <details> menu only closes via its own summary, so the page must dismiss it."""
+    app = create_app(ControlledReader())
+    with TestClient(app) as client:
+        html = client.get("/").text
+
+    assert "function closeActionMenus(" in html
+    # outside pointerdown closes any open menu
+    assert 'document.addEventListener("pointerdown"' in html
+    assert (
+        'if (!event.target.closest("details.action-menu")) closeActionMenus();' in html
+    )
+    # Escape closes the menu before selection handling runs
+    assert 'if (document.querySelector("details.action-menu[open]")) {' in html
+    # opening one menu closes the other, and choosing an item closes it
+    assert 'menu.addEventListener("toggle"' in html
+    assert 'if (event.target.closest(".action-popover")) closeActionMenus();' in html
