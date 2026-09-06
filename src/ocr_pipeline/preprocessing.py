@@ -27,9 +27,10 @@ DARK_RATIO = 0.85
 TILE_COUNT = 3
 MATCH_OVERLAP = 0.5
 AGREEMENT_OVERLAP = 0.75
-AGREEMENT_CONFIDENCE = 0.85
 MIN_AREA_RATIO = 0.35
 WIDE_BAND_SCALE = 3
+MAX_WIDE_BANDS_PER_PAGE = 8
+MAX_PRECISION_TEXT_CHARACTERS = 16
 CONFIRMATION_RECALL = 0.98
 CONFIRMATION_SIMILARITY = 0.98
 MIN_PAGE_AREA_RATIO = 0.12
@@ -38,6 +39,7 @@ MIN_PAGE_WIDTH_RATIO = 0.25
 MIN_PAGE_FILL_RATIO = 0.75
 MIN_PAGE_MARGIN_RATIO = 0.01
 MIN_PAGE_RING_CONTRAST = 25
+MIN_PAGE_LIKE_EXTERIOR_BRIGHT_RATIO = 0.9
 MIN_PARTIAL_PAGE_HEIGHT_RATIO = 0.08
 
 
@@ -659,10 +661,14 @@ class WideBandFallbackReader:
                         },
                     )
                     return baseline
+                band_count = len(groups)
+                groups = groups[:MAX_WIDE_BANDS_PER_PAGE]
+                omitted_bands = band_count - len(groups)
                 selected_groups: dict[str, list[TextRegion]] = {}
                 alternative_regions: dict[str, TextRegion] = {}
                 band_assessments = []
                 with tempfile.TemporaryDirectory(prefix="ocr-wide-bands-") as directory:
+                    jobs = []
                     for band_number, group in enumerate(groups, start=1):
                         crop = _padded_box(
                             [region.bounding_box for region in group],
@@ -681,10 +687,18 @@ class WideBandFallbackReader:
                             ),
                             Image.Resampling.LANCZOS,
                         ).save(crop_path, format="PNG")
-                        fallback_reader_runs += 1
-                        try:
-                            fallback = self.fallback_reader.read(crop_path, page_number)
-                        except ReaderError as error:
+                        jobs.append((band_number, group, crop, crop_path))
+                    fallback_reader_runs = len(jobs)
+                    readings = _read_wide_bands(
+                        self.fallback_reader,
+                        [crop_path for _, _, _, crop_path in jobs],
+                        page_number,
+                    )
+                    for job, (fallback, error, fallback_needs_review) in zip(
+                        jobs, readings, strict=True
+                    ):
+                        band_number, group, crop, crop_path = job
+                        if error is not None:
                             band_assessments.append(
                                 {
                                     "band_number": band_number,
@@ -700,11 +714,6 @@ class WideBandFallbackReader:
                             continue
 
                         fallback_candidates += len(fallback)
-                        fallback_needs_review = _reader_needs_review(
-                            self.fallback_reader,
-                            page_number,
-                        )
-
                         usable_fallback = [
                             region for region in fallback if _band_tokens(region.text)
                         ]
@@ -720,6 +729,21 @@ class WideBandFallbackReader:
                             translated,
                             self.minimum_fallback_confidence,
                         )
+                        review_only = _precision_review_group(
+                            group,
+                            width,
+                            self.minimum_width_fraction,
+                        )
+                        if review_only:
+                            selected = False
+                            assessment.update(
+                                {
+                                    "selected_view": "baseline",
+                                    "reason": "precision_sensitive_review",
+                                    "selection_reason": None,
+                                    "confirmation_candidate": False,
+                                }
+                            )
                         if fallback_needs_review:
                             selected = False
                             assessment["selected_view"] = "baseline"
@@ -778,14 +802,11 @@ class WideBandFallbackReader:
                                 assessment.update(confirmation_assessment)
                                 assessment["confirmation_review"] = confirmation_review
                                 if confirmed:
-                                    selected = True
                                     assessment.update(
                                         {
-                                            "selected_view": "fallback",
-                                            "reason": "evidence_confirmed",
-                                            "selection_reason": (
-                                                "same_engine_view_confirmation"
-                                            ),
+                                            "selected_view": "baseline",
+                                            "reason": "same_engine_agreement_review",
+                                            "selection_reason": None,
                                         }
                                     )
                         assessment.update(
@@ -796,6 +817,7 @@ class WideBandFallbackReader:
                                 "ignored_fallback_regions": len(fallback)
                                 - len(usable_fallback),
                                 "fallback_review": fallback_needs_review,
+                                "review_only": review_only,
                             }
                         )
                         band_assessments.append(assessment)
@@ -846,7 +868,9 @@ class WideBandFallbackReader:
             "page_number": page_number,
             "reader": self.name,
             "ran": True,
-            "status": "recovered" if replaced_bands else "uncertain",
+            "status": "recovered"
+            if replaced_bands and not omitted_bands
+            else "uncertain",
             "selected_view": "fused" if replaced_bands else "baseline",
             "baseline_reader": self.reader.name,
             "fallback_reader": self.fallback_reader.name,
@@ -859,7 +883,9 @@ class WideBandFallbackReader:
             ),
             "confirmation_reader_runs": confirmation_reader_runs,
             "qualifying_regions": qualifying_count,
-            "band_count": len(groups),
+            "band_count": band_count,
+            "assessed_band_count": len(groups),
+            "omitted_bands": omitted_bands,
             "replaced_bands": replaced_bands,
             "nested_reader_review": baseline_needs_review
             or any(
@@ -872,6 +898,7 @@ class WideBandFallbackReader:
                 dict.fromkeys(
                     [
                         *(["nested_reader_review"] if baseline_needs_review else []),
+                        *(["band_call_limit_reached"] if omitted_bands else []),
                         *(
                             str(band["reason"])
                             for band in band_assessments
@@ -923,7 +950,10 @@ class WideBandFallbackReader:
                 "pages": pages,
             }
         replaced = sum(int(page.get("replaced_bands", 0)) for page in routed)
-        bands = sum(int(page.get("band_count", 0)) for page in routed)
+        bands = sum(
+            int(page.get("assessed_band_count", page.get("band_count", 0)))
+            for page in routed
+        )
         return {
             "status": "review_recommended",
             "message": (
@@ -976,6 +1006,21 @@ def _locate_document_frame(image_path: Path) -> tuple[BoundingBox | None, bool]:
     if any(
         candidate is not selected and _similar_page(candidate, selected)
         for candidate in candidates
+    ):
+        return None, False
+
+    exterior = [
+        pixels[y * small_width + x]
+        for y in range(small_height)
+        for x in range(small_width)
+        if not (
+            selected["left"] <= x <= selected["right"]
+            and selected["top"] <= y <= selected["bottom"]
+        )
+    ]
+    # A printed border can isolate bright paper just like a viewer canvas.
+    if exterior and statistics.mean(value >= 230 for value in exterior) >= (
+        MIN_PAGE_LIKE_EXTERIOR_BRIGHT_RATIO
     ):
         return None, False
 
@@ -1538,14 +1583,7 @@ def _resolve_tile_only(
         ]
         texts = {_normalized_text(region.text) for region in group}
         views = {(region.text_provenance or {}).get("tile_number") for region in group}
-        confident = all(
-            (region.confidence or 0.0) >= AGREEMENT_CONFIDENCE for region in group
-        )
-        agrees = len(group) >= 2 and len(views) >= 2 and len(texts) == 1 and confident
-        if agrees:
-            resolution = "resolved"
-            promoted += 1
-        elif len(texts) > 1:
+        if len(texts) > 1:
             resolution = "conflicting"
             unresolved += 1
         else:
@@ -1687,6 +1725,23 @@ def _translate_regions(
     return translated
 
 
+def _read_wide_bands(
+    reader: LocalReader,
+    crop_paths: list[Path],
+    page_number: int,
+) -> list[tuple[list[TextRegion], ReaderError | None, bool]]:
+    def handle_read(
+        crop_path: Path,
+    ) -> tuple[list[TextRegion], ReaderError | None, bool]:
+        try:
+            regions = reader.read(crop_path, page_number)
+        except ReaderError as error:
+            return [], error, False
+        return regions, None, _reader_needs_review(reader, page_number)
+
+    return [handle_read(path) for path in crop_paths]
+
+
 def _wide_band_groups(
     regions: list[TextRegion],
     width: int,
@@ -1724,17 +1779,15 @@ def _wide_band_groups(
         else:
             line.append(region)
 
-    selected = [
-        line
-        for line in lines
-        if (
-            _box_union([region.bounding_box for region in line]).right
-            - _box_union([region.bounding_box for region in line]).left
+    selected = []
+    for line in lines:
+        box = _box_union([region.bounding_box for region in line])
+        wide = (box.right - box.left) / width >= minimum_width_fraction
+        precision_sensitive = any(
+            _precision_sensitive_text(region.text) for region in line
         )
-        / width
-        >= minimum_width_fraction
-        and _mean_confidence(line) < low_confidence
-    ]
+        if _mean_confidence(line) < low_confidence and (wide or precision_sensitive):
+            selected.append(line)
     selected_ids = {region.id for line in selected for region in line}
     groups: list[list[TextRegion]] = []
     current: list[TextRegion] = []
@@ -1767,6 +1820,29 @@ def _is_band_candidate(
         and box.right > box.left
         and box.bottom > box.top
         and (box.bottom - box.top) / height <= maximum_height_fraction
+    )
+
+
+def _precision_review_group(
+    regions: list[TextRegion],
+    page_width: int,
+    minimum_width_fraction: float,
+) -> bool:
+    box = _box_union([region.bounding_box for region in regions])
+    return (box.right - box.left) / page_width < minimum_width_fraction and any(
+        _precision_sensitive_text(region.text) for region in regions
+    )
+
+
+def _precision_sensitive_text(text: str) -> bool:
+    compact = "".join(character for character in text if not character.isspace())
+    alphanumeric = "".join(character for character in compact if character.isalnum())
+    return bool(alphanumeric) and (
+        len(alphanumeric) == 1
+        or (
+            len(compact) <= MAX_PRECISION_TEXT_CHARACTERS
+            and any(character.isdigit() for character in compact)
+        )
     )
 
 
@@ -2086,6 +2162,7 @@ def _attach_originals(
                 confidence=original.confidence,
                 provider=original.provider,
                 text_provenance=provenance,
+                decision_state="superseded",
             )
         )
         alternatives[target].extend(original.alternatives)
@@ -2093,7 +2170,9 @@ def _attach_originals(
             conflicts[target]
             or original.resolution == "conflicting"
             or any(
-                _normalized_text(alternative.text) != _normalized_text(original.text)
+                alternative.decision_state == "pending"
+                and _normalized_text(alternative.text)
+                != _normalized_text(original.text)
                 for alternative in original.alternatives
             )
         )

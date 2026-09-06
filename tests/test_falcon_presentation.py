@@ -9,7 +9,10 @@ from PIL import Image, ImageDraw
 
 from ocr_pipeline.contracts import BoundingBox, EvidenceText, PageResult, TextRegion
 from ocr_pipeline.evidence_layout import EvidenceLayoutStage
-from ocr_pipeline.falcon_presentation import FalconPresentationReader
+from ocr_pipeline.falcon_presentation import (
+    FalconFormulaStage,
+    FalconPresentationReader,
+)
 from ocr_pipeline.providers import ReaderError
 
 
@@ -166,6 +169,196 @@ def _image(tmp_path: Path) -> Path:
     return path
 
 
+def test_formula_stage_records_pending_disagreement_once_with_crop_provenance(
+    tmp_path: Path,
+) -> None:
+    child = _region("formula-word", "text", BoundingBox(10, 10, 30, 30), 1)
+    child.structure = {"layout_owner_id": "formula-owner"}
+    owner = _region(
+        "formula-owner",
+        "layout_block",
+        BoundingBox(10, 10, 100, 40),
+        1,
+        structure={
+            "role": "layout_block",
+            "block_type": "formula",
+            "child_evidence_ids": ["formula-word"],
+        },
+    )
+    unrelated = _region("note", "text", BoundingBox(10, 50, 80, 70), 2)
+    regions = [child, owner, unrelated]
+    untouched = copy.deepcopy([child, unrelated])
+    falcon = RecordingFalcon(["$$ specialist formula $$"])
+    reader = FalconPresentationReader(falcon)
+    stage = FalconFormulaStage(reader)
+
+    result = stage.apply(_image(tmp_path), 3, regions)
+
+    assert result is regions
+    assert falcon.calls == [([(112, 52)], ["formula"])]
+    assert [child, unrelated] == untouched
+    assert owner.text == "canonical formula-owner"
+    assert owner.resolution == "resolved"
+    assert [
+        (candidate.text, candidate.provider, candidate.decision_state)
+        for candidate in owner.alternatives
+    ] == [("specialist formula", "falcon-ocr", "pending")]
+    attempt = owner.structure["formula_attempt"]  # type: ignore[index]
+    assert attempt["outcome"] == "candidate_pending"
+    provenance = attempt["provenance"]
+    assert provenance["reader"] == "falcon-ocr"
+    assert provenance["presentation_reader"] == "falcon-presentation"
+    assert provenance["model"] == falcon.provenance
+    assert provenance["category"] == "formula"
+    assert provenance["raw_response"] == "$$ specialist formula $$"
+    assert provenance["candidate_latex"] == "specialist formula"
+    assert provenance["generation"]["category"] == "formula"
+    assert provenance["crop"] == {
+        "bounding_box": {"left": 0, "top": 0, "right": 112, "bottom": 52}
+    }
+    assert provenance["page_number"] == 3
+    assert provenance["source_region_id"] == "formula-owner"
+    assert provenance["source_providers"] == ["canonical"]
+    assert owner.bounding_box == BoundingBox(10, 10, 100, 40)
+    assert owner.structure["formula_review"] == {  # type: ignore[index]
+        "required": True,
+        "reasons": ["structural_disagreement"],
+        "provenance": provenance,
+    }
+    assert owner.structure["formula_recognition"] == "specialist_pending"  # type: ignore[index]
+
+    stage.apply(_image(tmp_path), 3, regions)
+    assert reader.read_page(_image(tmp_path), _page(regions)) == []
+    assert len(owner.alternatives) == 1
+    assert len(falcon.calls) == 1
+
+
+def test_formula_stage_records_exact_specialist_support(tmp_path: Path) -> None:
+    owner = _region("formula", "formula", BoundingBox(10, 10, 100, 40), 1)
+    falcon = RecordingFalcon([owner.text])
+
+    FalconFormulaStage(FalconPresentationReader(falcon)).apply(
+        _image(tmp_path), 1, [owner]
+    )
+
+    assert falcon.calls == [([(112, 52)], ["formula"])]
+    assert owner.resolution == "resolved"
+    assert owner.alternatives == []
+    assert "formula_review" not in owner.structure  # type: ignore[operator]
+    assert owner.structure["formula_attempt"]["outcome"] == "supported"  # type: ignore[index]
+    assert owner.structure["formula_recognition"] == "specialist_supported"  # type: ignore[index]
+
+
+@pytest.mark.parametrize("raw", ["$$$$", r"\[\]"])
+def test_formula_stage_rejects_empty_normalized_output(
+    tmp_path: Path, raw: str
+) -> None:
+    owner = _region("formula", "formula", BoundingBox(10, 10, 100, 40), 1)
+
+    FalconFormulaStage(FalconPresentationReader(RecordingFalcon([raw]))).apply(
+        _image(tmp_path), 1, [owner]
+    )
+
+    assert owner.alternatives == []
+    assert owner.structure["formula_attempt"]["outcome"] == "invalid_output"  # type: ignore[index]
+    assert owner.structure["formula_attempt"]["reason"] == (  # type: ignore[index]
+        "empty_normalized_formula"
+    )
+
+
+def test_formula_crop_expands_from_numerator_to_complete_source_expression() -> None:
+    image_path = Path(__file__).parents[1] / "artifacts/demo/formula_scan.png"
+    owner = _region(
+        "numerator-only",
+        "layout_block",
+        BoundingBox(247, 375, 281, 389),
+        1,
+        structure={"role": "layout_block", "block_type": "formula"},
+    )
+    falcon = RecordingFalcon(["raw formula"])
+
+    [output] = FalconPresentationReader(falcon).read_page(
+        image_path,
+        _page([owner]),
+    )
+
+    assert output.bounding_box == BoundingBox(182, 364, 316, 425)
+    assert falcon.calls == [([(134, 61)], ["formula"])]
+
+
+def test_grouped_formula_honors_configured_falcon_padding(tmp_path: Path) -> None:
+    image_path = tmp_path / "formula.png"
+    image = Image.new("RGB", (200, 160), "white")
+    ImageDraw.Draw(image).text((50, 50), "x = 1", fill="black")
+    image.save(image_path)
+    source = _region("formula", "formula", BoundingBox(45, 45, 100, 70), 1)
+    regions = EvidenceLayoutStage().apply(image_path, 1, [source])
+    page = _page(regions)
+    unpadded = RecordingFalcon(["x = 1"])
+    padded = RecordingFalcon(["x = 1"])
+
+    FalconPresentationReader(unpadded, formula_padding=0).read_page(image_path, page)
+    FalconPresentationReader(padded, formula_padding=7).read_page(image_path, page)
+
+    width, height = unpadded.calls[0][0][0]
+    assert padded.calls[0][0][0] == (width + 14, height + 14)
+
+
+def test_formula_stage_does_not_treat_same_reader_repeat_as_support(
+    tmp_path: Path,
+) -> None:
+    owner = _region("formula", "formula", BoundingBox(10, 10, 100, 40), 1)
+    owner.provider = "falcon-ocr"
+    falcon = RecordingFalcon([owner.text])
+
+    FalconFormulaStage(FalconPresentationReader(falcon)).apply(
+        _image(tmp_path), 1, [owner]
+    )
+
+    attempt = owner.structure["formula_attempt"]  # type: ignore[index]
+    assert attempt["outcome"] == "same_reader_repeat"
+    assert attempt["reason"] == "reader_not_independent"
+
+
+def test_formula_stage_excludes_handwriting_and_owners_containing_it(
+    tmp_path: Path,
+) -> None:
+    handwriting = _region(
+        "ink",
+        "handwriting",
+        BoundingBox(10, 10, 50, 30),
+        1,
+        structure={"handwriting_candidate": True},
+    )
+    containing_owner = _region(
+        "mixed-formula",
+        "layout_block",
+        BoundingBox(10, 10, 100, 40),
+        1,
+        structure={
+            "block_type": "formula",
+            "child_evidence_ids": ["ink"],
+        },
+    )
+    handwritten_formula = _region(
+        "handwritten-formula",
+        "formula",
+        BoundingBox(10, 50, 100, 80),
+        2,
+        structure={"is_handwritten": True},
+    )
+    regions = [handwriting, containing_owner, handwritten_formula]
+    before = copy.deepcopy(regions)
+    falcon = RecordingFalcon()
+
+    result = FalconFormulaStage(FalconPresentationReader(falcon)).apply(
+        _image(tmp_path), 1, regions
+    )
+
+    assert result == before
+    assert falcon.calls == []
+
+
 def test_batches_supported_canonical_regions_once_with_exact_categories(
     tmp_path: Path,
 ) -> None:
@@ -199,7 +392,9 @@ def test_batches_supported_canonical_regions_once_with_exact_categories(
     before = copy.deepcopy(page)
     falcon = RecordingFalcon()
 
-    output = FalconPresentationReader(falcon).read_page(_image(tmp_path), page)  # type: ignore[arg-type]
+    output = FalconPresentationReader(falcon, formula_padding=0).read_page(  # type: ignore[arg-type]
+        _image(tmp_path), page
+    )
 
     expected_categories = [category for _, category in kinds if category is not None]
     assert falcon.calls == [([(10, 8)] * len(expected_categories), expected_categories)]
@@ -289,7 +484,7 @@ def test_structural_special_category_overrides_generic_text_kind(
         _image(tmp_path), _page([formula])
     )
 
-    assert falcon.calls == [([(90, 30)], ["formula"])]
+    assert falcon.calls == [([(112, 52)], ["formula"])]
     assert output.text_provenance["category"] == "formula"  # type: ignore[index]
 
 
@@ -461,14 +656,17 @@ def test_local_ruled_form_divider_preserves_rows_and_skips_falcon(
         "Patient: Lee | Date: 03/18/2025",
         "Plan: Anthem | ID: 1234",
     ]
-    assert [block.structure["fields"] for block in blocks] == [  # type: ignore[index]
+    assert [
+        [field["evidence_ids"] for field in block.structure["fields"]]  # type: ignore[index]
+        for block in blocks
+    ] == [
         [
-            {"evidence_ids": ["patient-label", "patient"]},
-            {"evidence_ids": ["date-label", "date"]},
+            ["patient-label", "patient"],
+            ["date-label", "date"],
         ],
         [
-            {"evidence_ids": ["plan-label", "plan"]},
-            {"evidence_ids": ["id-label", "id"]},
+            ["plan-label", "plan"],
+            ["id-label", "id"],
         ],
     ]
     assert all(

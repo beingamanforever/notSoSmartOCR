@@ -141,12 +141,46 @@ def test_parse_reader_pins_model_and_reports_missing_weights(
     image_path = tmp_path / "page.png"
     Image.new("RGB", (100, 100), "white").save(image_path)
 
+    observed: dict[str, object] = {}
+
     def unavailable(**options: object) -> object:
+        observed.update(options)
         raise OSError("weights are absent")
 
     monkeypatch.setattr(nemotron_parse, "_TransformersGenerator", unavailable)
     result = process_document(image_path, NemotronParseReader())
 
     assert result.failures[0].code == "nemotron_parse_model_unavailable"
-    with pytest.raises(TypeError):
-        NemotronParseReader(model_path="custom/checkpoint")  # type: ignore[call-arg]
+    assert observed == {
+        "model_name_or_path": "nvidia/NVIDIA-Nemotron-Parse-2.0",
+        "device": "cuda:0",
+        "local_files_only": True,
+    }
+
+
+def test_parse_reader_accepts_pinned_local_model_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (100, 100), "white").save(image_path)
+    model_path = tmp_path / "nemotron-parse-2.0"
+    model_path.mkdir()
+    observed: dict[str, object] = {}
+
+    def local_generator(**options: object) -> object:
+        observed.update(options)
+        return lambda path, prompt: "<x_0.1><y_0.1>local<x_0.9><y_0.9><class_Text>"
+
+    monkeypatch.setattr(nemotron_parse, "_TransformersGenerator", local_generator)
+    result = process_document(
+        image_path,
+        NemotronParseReader(model_name_or_path=model_path),
+    )
+
+    assert result.status == "success"
+    assert observed == {
+        "model_name_or_path": str(model_path),
+        "device": "cuda:0",
+        "local_files_only": True,
+    }

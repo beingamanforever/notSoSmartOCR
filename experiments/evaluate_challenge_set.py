@@ -806,6 +806,12 @@ def _handwriting_regions(
 ) -> list[tuple[str, str, tuple[float, float, float, float]]]:
     candidates = []
     for page_index, page in enumerate(_pages(output), start=1):
+        page_regions = [_as_dict(region) for region in _as_list(page.get("regions"))]
+        regions_by_id = {
+            region["id"]: region
+            for region in page_regions
+            if isinstance(region.get("id"), str)
+        }
         page_text = _as_dict(page.get("text"))
         evidence = page_text.get("evidence_ids")
         evidence_ids = (
@@ -813,8 +819,25 @@ def _handwriting_regions(
             if isinstance(evidence, list) and evidence
             else None
         )
-        for region_index, raw_region in enumerate(_as_list(page.get("regions"))):
-            region = _as_dict(raw_region)
+        if evidence_ids is not None:
+            expanded_ids = set()
+            for region_id in evidence_ids:
+                region = regions_by_id.get(region_id)
+                structure = _as_dict(region.get("structure")) if region else {}
+                children = structure.get("child_evidence_ids")
+                if structure.get("role") == "layout_block" and isinstance(
+                    children, list
+                ):
+                    child_ids = {
+                        child_id
+                        for child_id in children
+                        if isinstance(child_id, str) and child_id in regions_by_id
+                    }
+                    expanded_ids.update(child_ids or {region_id})
+                else:
+                    expanded_ids.add(region_id)
+            evidence_ids = expanded_ids
+        for region_index, region in enumerate(page_regions):
             region_id = region.get("id")
             if evidence_ids is not None and region_id not in evidence_ids:
                 continue

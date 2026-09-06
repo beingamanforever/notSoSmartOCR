@@ -6,6 +6,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
+AlternativeDecision = Literal["pending", "accepted", "rejected", "superseded"]
+ALTERNATIVE_DECISION_STATES = frozenset(
+    {"pending", "accepted", "rejected", "superseded"}
+)
+
 
 @dataclass
 class BoundingBox:
@@ -21,6 +26,7 @@ class TextAlternative:
     confidence: float | None
     provider: str
     text_provenance: dict[str, Any] | None = None
+    decision_state: AlternativeDecision = "pending"
 
 
 @dataclass

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -120,11 +122,14 @@ class ScriptedBandView:
         self.fail_on_crop = fail_on_crop
         self.calls: list[str] = []
         self.sizes: list[tuple[int, int]] = []
+        self._lock = threading.Lock()
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
-        self.calls.append(image_path.name)
         with Image.open(image_path) as image:
-            self.sizes.append(image.size)
+            size = image.size
+        with self._lock:
+            self.calls.append(image_path.name)
+            self.sizes.append(size)
         if self.fail_on_crop and image_path.name.startswith("band-"):
             raise ReaderError("reader_failed", "controlled fallback failure")
         return [
@@ -142,6 +147,25 @@ class ScriptedBandView:
                 self.outputs.get(image_path.name, []), start=1
             )
         ]
+
+
+class DelayedBandView(ScriptedBandView):
+    def __init__(self, delay: float) -> None:
+        super().__init__({})
+        self.delay = delay
+        self.active = 0
+        self.max_active = 0
+
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        with self._lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            time.sleep(self.delay)
+            return super().read(image_path, page_number)
+        finally:
+            with self._lock:
+                self.active -= 1
 
 
 class RecordingStage:
@@ -265,6 +289,17 @@ def test_document_frame_locator_ignores_browser_chrome_and_flags_partial_page(
     assessment = reader.coverage_assessment(1)
     assert assessment["status"] == "review_recommended"
     assert assessment["pages"][0]["partial_page_visible"] is True
+
+
+def test_document_frame_locator_does_not_crop_a_printed_form_border() -> None:
+    source = Path(__file__).parents[1] / "artifacts" / "demo" / "scanned_form.png"
+    controlled = ControlledView("Full form")
+
+    assert locate_document_frame(source) is None
+    result = process_document(source, PageFrameReader(controlled))
+
+    assert controlled.sizes == [(754, 1000)]
+    assert result.pages[0].text.value == "Full form"
 
 
 def test_page_frame_wraps_orientation_and_all_stages_then_restores_nested_boxes(
@@ -538,7 +573,9 @@ def test_tiled_reader_preserves_baseline_and_exposes_uncertain_evidence(
     assert page["removed_tokens"] == 0
 
 
-def test_tiled_reader_promotes_only_multi_view_tile_agreement(tmp_path: Path) -> None:
+def test_tiled_reader_keeps_same_engine_tile_agreement_unresolved(
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "page.png"
     Image.new("RGB", (100, 120), "white").save(source)
     controlled = ScriptedTileView(
@@ -555,7 +592,7 @@ def test_tiled_reader_promotes_only_multi_view_tile_agreement(tmp_path: Path) ->
     assert [region.text for region in regions] == ["Base", "fine print"]
     assert regions[0].id == "p1-page-1"
     assert regions[1].id == "p1-tiny-tile-2"
-    assert regions[1].resolution == "resolved"
+    assert regions[1].resolution == "unreadable"
     assert regions[1].structure == {
         "role": "tiny_text_candidate",
         "support_views": 2,
@@ -563,15 +600,12 @@ def test_tiled_reader_promotes_only_multi_view_tile_agreement(tmp_path: Path) ->
     assert [alternative.text for alternative in regions[1].alternatives] == [
         "fine print"
     ]
-    assert render_evidence(regions).value == "Base fine print"
-    assert render_evidence(regions).evidence_ids == [
-        "p1-page-1",
-        "p1-tiny-tile-2",
-    ]
+    assert render_evidence(regions).value == "Base"
+    assert render_evidence(regions).evidence_ids == ["p1-page-1"]
     page = reader.coverage_assessment(1)["pages"][0]
-    assert page["promoted_tile_only_regions"] == 1
-    assert page["unresolved_tile_only_regions"] == 0
-    assert page["added_tokens"] == 2
+    assert page["promoted_tile_only_regions"] == 0
+    assert page["unresolved_tile_only_regions"] == 1
+    assert page["added_tokens"] == 0
 
 
 def test_tiled_reader_batches_independent_tiles(tmp_path: Path) -> None:
@@ -658,8 +692,10 @@ def test_wide_band_reader_groups_only_adjacent_qualifying_bands_and_upscales(
     regions = reader.read(source, 1)
 
     assert primary.calls == ["page.png"]
-    assert fallback.calls == ["band-1.png", "band-2.png"]
-    assert fallback.sizes == [(513, 102), (510, 72)]
+    assert dict(zip(fallback.calls, fallback.sizes, strict=True)) == {
+        "band-1.png": (513, 102),
+        "band-2.png": (510, 72),
+    }
     assert [region.text for region in regions] == [
         "Heading",
         "ambulates with walker",
@@ -674,6 +710,36 @@ def test_wide_band_reader_groups_only_adjacent_qualifying_bands_and_upscales(
     assert page["qualifying_regions"] == 3
     assert page["band_count"] == 2
     assert page["replaced_bands"] == 2
+
+
+def test_wide_band_reader_bounds_ordered_fallbacks(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (200, 320), "white").save(source)
+    baseline = [
+        (
+            f"weak band {index}",
+            BoundingBox(10, 10 + index * 30, 190, 18 + index * 30),
+            0.6,
+        )
+        for index in range(10)
+    ]
+    fallback = DelayedBandView(0.03)
+    reader = WideBandFallbackReader(ScriptedBandView({"page.png": baseline}), fallback)
+
+    regions = reader.read(source, 1)
+
+    assert [region.text for region in regions] == [text for text, _, _ in baseline]
+    assert len(fallback.calls) == 8
+    assert fallback.max_active == 1
+    page = reader.coverage_assessment(1)["pages"][0]
+    assert page["fallback_reader_runs"] == 8
+    assert page["band_count"] == 10
+    assert page["assessed_band_count"] == 8
+    assert page["omitted_bands"] == 2
+    assert [band["band_number"] for band in page["bands"]] == list(range(1, 9))
+    assert "band_call_limit_reached" in page["review_reasons"]
 
 
 def test_wide_band_reader_translates_boxes_and_keeps_original_alternatives(
@@ -798,6 +864,50 @@ def test_wide_band_reader_does_not_route_ordinary_or_high_confidence_regions(
     assessment = reader.coverage_assessment(1)
     assert assessment["status"] == "not_assessed"
     assert assessment["pages"][0]["status"] == "not_routed"
+
+
+def test_narrow_decimal_reread_preserves_canonical_text_for_review(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (400, 160), "white").save(source)
+    primary = ScriptedBandView(
+        {"page.png": [("53", BoundingBox(190, 40, 215, 50), 0.45)]}
+    )
+    fallback = ScriptedBandView(
+        {"band-1.png": [("5.3", BoundingBox(24, 24, 99, 54), 0.99)]}
+    )
+    reader = WideBandFallbackReader(primary, fallback)
+
+    result = process_document(source, reader)
+
+    [region] = result.pages[0].regions
+    assert region.id == "p1-page-1"
+    assert region.text == "53"
+    assert region.confidence == 0.45
+    assert region.bounding_box == BoundingBox(190, 40, 215, 50)
+    assert result.pages[0].route == "review"
+    assert [alternative.text for alternative in region.alternatives] == ["5.3"]
+    assert region.alternatives[0].text_provenance == {
+        "method": "scripted-band",
+        "stage": "scripted-band-view-wide-band-fallback",
+        "source_crop": {"left": 182, "top": 32, "right": 223, "bottom": 58},
+        "upscale_factor": 3,
+        "selected_view": "fallback",
+        "fallback_region_id": "p1-wide-band-1-fallback-1",
+        "fallback_bounding_box": {
+            "left": 190,
+            "top": 40,
+            "right": 215,
+            "bottom": 50,
+        },
+    }
+    page = reader.coverage_assessment(1)["pages"][0]
+    assert fallback.calls == ["band-1.png"]
+    assert page["fallback_reader_runs"] == 1
+    assert page["replaced_bands"] == 0
+    assert page["bands"][0]["review_only"] is True
+    assert page["bands"][0]["reason"] == "precision_sensitive_review"
 
 
 def test_wide_band_reader_groups_low_confidence_words_into_one_band(
@@ -1021,7 +1131,7 @@ def test_wide_band_reader_keeps_unrelated_fallback_as_review_evidence(
     assert band["baseline_token_recall"] == 0.0
 
 
-def test_wide_band_reader_accepts_independently_confirmed_recovery(
+def test_wide_band_reader_keeps_same_engine_confirmation_for_review(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "page.png"
@@ -1048,25 +1158,34 @@ def test_wide_band_reader_accepts_independently_confirmed_recovery(
 
     regions = reader.read(source, 1)
 
-    assert [region.text for region in regions] == [recovered]
+    assert [region.text for region in regions] == ["alpha beta gamma delta"]
     assert confirmation.calls == ["band-1.png"]
     alternatives = regions[0].alternatives
     assert {alternative.text for alternative in alternatives} == {
-        "alpha beta gamma delta",
         recovered,
     }
+    assert {
+        alternative.text_provenance["selected_view"] for alternative in alternatives
+    } == {
+        "fallback",
+        "confirmation",
+    }
     support = next(
-        alternative for alternative in alternatives if alternative.text == recovered
+        alternative
+        for alternative in alternatives
+        if alternative.text_provenance["selected_view"] == "confirmation"
     )
-    assert support.text_provenance["selected_view"] == "confirmation"
     assert support.text_provenance["confirmation_region_id"]
     band = reader.coverage_assessment(1)["pages"][0]["bands"][0]
-    assert band["selection_reason"] == "same_engine_view_confirmation"
+    assert band["selected_view"] == "baseline"
+    assert band["reason"] == "same_engine_agreement_review"
+    assert band["selection_reason"] is None
     assert band["confirmation_status"] == "agreed"
     assert band["confirmation_fallback_recall"] == 1.0
     assert band["confirmation_token_recall"] == 1.0
     assert band["confirmation_text_similarity"] == 1.0
     assert regions[0].id != support.text_provenance["confirmation_region_id"]
+    assert reader.page_needs_review(1) is True
 
 
 def test_wide_band_reader_rejects_disagreeing_confirmation(tmp_path: Path) -> None:

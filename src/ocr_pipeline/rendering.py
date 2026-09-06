@@ -167,12 +167,21 @@ def _markdown_block(
         block = f"### {text}" if text else ""
     elif kind == "heading":
         block = f"#### {text}" if text else ""
+    elif kind == "formula":
+        if resolution != "resolved":
+            block = "[unreadable formula]"
+        elif not text:
+            block = ""
+        elif _formula_math_ready(region):
+            block = f"$$\n{text}\n$$"
+        else:
+            block = text
     elif kind == "control":
         if resolution == "resolved":
             block = f"- {text}" if text else ""
         else:
             label = str(_structure(region).get("label") or "").strip()
-            block = f"- {label}" if label else ""
+            block = f"- [?] {label}" if label else ""
     elif kind == "field":
         label = str(
             _structure(region).get("label")
@@ -302,12 +311,21 @@ def _semantic_kind(region: dict[str, Any]) -> str:
     return "text"
 
 
+def _formula_math_ready(region: dict[str, Any]) -> bool:
+    return _structure(region).get("formula_recognition") not in {
+        "heuristic",
+        "specialist_pending",
+    }
+
+
 def _canonical_layout_text(
     region: dict[str, Any],
     source_index: dict[str, dict[str, Any]],
 ) -> str:
     structure = _structure(region)
     if structure.get("role") != "layout_block":
+        return _text(region)
+    if structure.get("block_type") == "formula" and _resolution(region) == "resolved":
         return _text(region)
     groups = (
         structure.get("fields", structure.get("segments"))

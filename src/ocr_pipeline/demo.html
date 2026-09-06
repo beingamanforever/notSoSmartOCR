@@ -8,15 +8,21 @@
   <style>
     :root {
       color-scheme: light;
-      --background: #f4f2ed;
+      --background: #f6f7f9;
       --panel: #ffffff;
-      --panel-raised: #eeece5;
-      --line: #d9d5cc;
-      --line-strong: #b8b2a7;
-      --text: #15243b;
-      --muted: #5b6678;
-      --accent: #a85b00;
-      --accent-soft: #fff2d5;
+      --panel-raised: #f3f4f6;
+      --line: #e1e5ea;
+      --line-strong: #c4cad3;
+      --text: #172033;
+      --muted: #667085;
+      --accent: #2563eb;
+      --accent-soft: #eff6ff;
+      --confidence-high: #0f766e;
+      --confidence-high-soft: #d3eee8;
+      --confidence-medium: #b45309;
+      --confidence-medium-soft: #ffedcc;
+      --confidence-low: #b91c1c;
+      --confidence-low-soft: #fee2e2;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
         "Segoe UI", sans-serif;
     }
@@ -30,62 +36,25 @@
       color: var(--text);
     }
 
-    button, input { font: inherit; }
+    button, input, select { font: inherit; }
     button, a { -webkit-tap-highlight-color: transparent; }
-    button:focus-visible, a:focus-visible, input:focus-visible, canvas:focus-visible {
+    button:focus-visible, a:focus-visible, input:focus-visible,
+    select:focus-visible, canvas:focus-visible {
       outline: 2px solid var(--accent);
       outline-offset: 2px;
     }
 
-    .shell { max-width: 1680px; margin: 0 auto; padding: 24px; }
+    .shell { max-width: 1600px; margin: 0 auto; padding: 20px; }
     header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 24px;
-      margin-bottom: 18px;
+      text-align: center;
+      margin-bottom: 14px;
     }
-    .eyebrow {
-      color: var(--accent);
-      font-size: .72rem;
-      font-weight: 750;
-      letter-spacing: .18em;
-      text-transform: uppercase;
-    }
-    h1 { margin: 4px 0 2px; font-size: clamp(1.7rem, 3vw, 2.45rem); letter-spacing: -.04em; }
+    h1 { margin: 3px 0 1px; font-size: clamp(1.65rem, 3vw, 2.2rem); letter-spacing: -.04em; }
     .subtitle { margin: 0; color: var(--muted); }
-    .privacy { color: var(--muted); font-size: .82rem; text-align: right; }
-
-    .composition-banner {
-      display: grid;
-      grid-template-columns: minmax(190px, .45fr) minmax(0, 1.55fr);
-      gap: 8px 18px;
-      margin-bottom: 18px;
-      padding: 13px 15px;
-      border: 1px solid var(--line-strong);
-      border-left: 4px solid var(--text);
-      border-radius: 12px;
-      background: var(--panel);
-    }
-    .composition-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-    .composition-heading strong { font-size: .9rem; }
-    .composition-scope {
-      padding: 3px 7px;
-      border: 1px solid var(--line-strong);
-      border-radius: 999px;
-      color: var(--muted);
-      font-size: .66rem;
-      font-weight: 720;
-      letter-spacing: .05em;
-      text-transform: uppercase;
-    }
-    .composition-summary, .composition-note { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.45; }
-    .composition-note { grid-column: 2; }
-
     .toolbar, .card {
       border: 1px solid var(--line);
       background: var(--panel);
-      box-shadow: 0 8px 26px #15243b12;
+      box-shadow: 0 6px 20px #1720330d;
     }
     .toolbar {
       display: flex;
@@ -181,12 +150,11 @@
       font-weight: 650;
     }
     .example-button:hover { border-color: var(--accent); background: var(--accent-soft); }
-    .example-preview { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; border-bottom: 1px solid var(--line); background: var(--panel-raised); }
+    .example-button:disabled { cursor: wait; opacity: .62; }
+    .example-preview { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; border-bottom: 1px solid var(--line); background: var(--panel-raised); }
     .example-name { display: block; padding: 8px 9px 2px; }
     .example-kind { display: block; padding: 0 9px 8px; color: var(--muted); font-size: .68rem; font-weight: 500; }
 
-    .metadata { display: none; flex-wrap: wrap; gap: 8px; margin: 0 0 18px; }
-    .metadata.visible { display: flex; }
     .timing-card {
       margin: -6px 0 18px;
       border: 1px solid var(--line);
@@ -207,7 +175,7 @@
     .timing-total { color: var(--text); font-variant-numeric: tabular-nums; }
     .timing-list {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 1px;
       border-top: 1px solid var(--line);
       background: var(--line);
@@ -229,54 +197,12 @@
       font-size: .68rem;
       line-height: 1.35;
     }
-    .chip {
-      padding: 6px 10px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: var(--panel);
-      color: var(--muted);
-      font-size: .78rem;
-    }
-    .chip strong { color: var(--text); font-weight: 650; }
-    .chip[data-tone="success"] { border-color: var(--line-strong); background: var(--panel-raised); color: var(--text); }
-    .chip[data-tone="review"], .chip[data-tone="error"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
-
-    .risk-card {
+    .workspace {
       display: grid;
-      grid-template-columns: minmax(230px, .7fr) minmax(0, 1.3fr);
-      gap: 14px;
-      padding: 14px;
-      margin-bottom: 18px;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: var(--panel);
-      box-shadow: 0 8px 26px #15243b12;
+      grid-template-columns: minmax(0, .95fr) minmax(420px, 1.05fr);
+      align-items: start;
+      gap: 18px;
     }
-    .risk-card[data-state="review"] { border-left: 4px solid var(--accent); }
-    .risk-card[data-state="clear"] { border-left: 4px solid var(--text); }
-    .risk-summary { min-width: 0; }
-    .risk-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-bottom: 6px; }
-    .risk-heading h2 { margin: 0; font-size: .95rem; }
-    .risk-badge {
-      padding: 4px 8px;
-      border: 1px solid var(--accent);
-      border-radius: 999px;
-      background: var(--accent-soft);
-      color: var(--accent);
-      font-size: .72rem;
-      font-weight: 700;
-    }
-    .risk-badge.clear { border-color: var(--line-strong); background: var(--panel-raised); color: var(--text); }
-    .risk-copy { margin: 0; color: var(--muted); font-size: .78rem; line-height: 1.45; }
-    .risk-metrics { display: flex; flex-wrap: wrap; gap: 7px; }
-    .risk-metric { flex: 1 1 132px; min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-raised); }
-    .risk-value { display: block; margin-top: 2px; font-size: .96rem; font-weight: 720; }
-    .risk-detail { display: block; margin-top: 2px; color: var(--muted); font-size: .68rem; }
-    .risk-reasons { display: flex; flex: 1 0 100%; flex-wrap: wrap; gap: 6px; align-items: center; padding-top: 2px; }
-    .risk-reason { padding: 4px 7px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-raised); color: var(--muted); font-size: .7rem; }
-    .risk-reason.flag { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
-
-    .workspace { display: grid; grid-template-columns: minmax(0, .95fr) minmax(420px, 1.05fr); gap: 18px; }
     .card { min-width: 0; border-radius: 16px; overflow: hidden; }
     .card-head {
       min-height: 57px;
@@ -301,12 +227,39 @@
     .icon-button:disabled { opacity: .35; cursor: not-allowed; }
     .page-count { min-width: 74px; color: var(--muted); text-align: center; font-size: .84rem; }
 
-    .categories { display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
-    .category-label { flex: 0 0 auto; color: var(--muted); font-size: .72rem; font-weight: 650; }
-    .category-list { display: flex; min-width: 0; gap: 6px; overflow-x: auto; padding: 2px; }
+    .categories { display: flex; justify-content: flex-end; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+    .layers-control { position: relative; }
+    .layers-control > summary {
+      list-style: none;
+      padding: 6px 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--muted);
+      cursor: pointer;
+      font-size: .74rem;
+      font-weight: 700;
+    }
+    .layers-control > summary::-webkit-details-marker { display: none; }
+    .category-list {
+      position: absolute;
+      z-index: 8;
+      top: calc(100% + 6px);
+      right: 0;
+      display: grid;
+      min-width: 210px;
+      max-height: 280px;
+      gap: 5px;
+      overflow-y: auto;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+      box-shadow: 0 10px 28px #17203324;
+    }
     .category-button {
       display: inline-flex;
-      flex: 0 0 auto;
+      width: 100%;
       align-items: center;
       gap: 6px;
       padding: 5px 8px;
@@ -337,7 +290,7 @@
       max-height: 64vh;
       border-radius: 3px;
       background: var(--panel);
-      box-shadow: 0 10px 36px #15243b2b;
+      box-shadow: 0 10px 34px #17203324;
       cursor: crosshair;
     }
     canvas.visible { display: block; }
@@ -345,16 +298,58 @@
     .empty-state strong { display: block; color: var(--text); font-size: 1.02rem; }
 
     .inspector { padding: 14px 16px 16px; border-top: 1px solid var(--line); }
+    .inspector-empty { display: none; color: var(--muted); text-align: center; line-height: 1.55; }
+    .inspector.empty .inspector-grid, .inspector.empty .review-actions,
+    .inspector.empty .inspector-action { display: none; }
+    .inspector.empty .inspector-empty { display: block; }
     .inspector-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
     .inspector-action { flex: 0 0 auto; }
     .reread-status { color: var(--muted); font-size: .72rem; }
     .reread-status:empty { display: none; }
     .reread-status.error { color: var(--accent); }
+    .review-actions {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 7px;
+      margin: 12px 0;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--panel-raised);
+    }
+    .review-actions input, .review-actions select {
+      min-height: 34px;
+      min-width: 150px;
+      max-width: 100%;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--text);
+      padding: 5px 8px;
+    }
+    .review-actions .download { min-height: 34px; }
+    .inspector-primary { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(0, 1.2fr); gap: 14px; align-items: start; }
+    .region-crop {
+      display: block;
+      width: 100%;
+      max-height: 118px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel-raised);
+      object-fit: contain;
+      box-shadow: none;
+    }
     .inspector-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
     .datum { min-width: 0; }
     .label { display: block; color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
     .value { display: block; margin-top: 3px; overflow-wrap: anywhere; font-size: .86rem; }
     .region-text { grid-column: 1 / -1; padding-top: 8px; border-top: 1px solid var(--line); }
+    .region-transcription { margin-bottom: 9px; }
+    .region-transcription .value { font-size: .94rem; line-height: 1.5; }
+    .technical-details { grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 8px; }
+    .technical-details summary { cursor: pointer; color: var(--muted); font-size: .74rem; font-weight: 700; }
+    .technical-grid { display: grid; gap: 10px; margin-top: 10px; }
     .region-list { display: flex; gap: 6px; overflow: auto; margin-top: 12px; padding-bottom: 2px; }
     .region-button {
       flex: 0 0 auto;
@@ -383,19 +378,102 @@
       font-weight: 650;
     }
     .tab[aria-selected="true"] { color: var(--text); border-color: var(--accent); }
+    .review-details { padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--confidence-medium-soft); }
+    .review-details summary { color: var(--confidence-medium); cursor: pointer; font-size: .76rem; font-weight: 750; }
+    .review-list { margin: 8px 0 0; padding-left: 18px; color: var(--text); font-size: .74rem; line-height: 1.5; }
     .tab-panel { display: none; min-height: 560px; max-height: 70vh; overflow: auto; padding: 18px; }
     .tab-panel.active { display: block; }
+    .tab-panel.empty-panel.active { display: grid; place-items: center; }
+    .rendered-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      margin-bottom: 10px;
+    }
+    .rendered-toolbar[hidden] { display: none; }
+    .confidence-toggle {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      color: var(--muted);
+      padding: 7px 10px;
+      font: inherit;
+      font-size: .76rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .confidence-toggle[aria-pressed="true"] {
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .confidence-toggle:disabled { cursor: not-allowed; opacity: .5; }
+    .rendered-page-head { margin-bottom: 9px; }
+    .rendered-page-head h2 { margin-bottom: 0; }
+    .confidence-review .confidence-evidence {
+      display: inline;
+      padding: 0 1px;
+      border-radius: 2px;
+      color: inherit;
+      box-decoration-break: clone;
+      -webkit-box-decoration-break: clone;
+      transition: background-color 140ms ease, opacity 140ms ease;
+    }
+    .confidence-review .confidence-evidence[data-confidence-level="high"] { background: var(--confidence-high-soft); }
+    .confidence-review .confidence-evidence[data-confidence-level="medium"] { background: var(--confidence-medium-soft); }
+    .confidence-review .confidence-evidence[data-confidence-level="low"] { background: var(--confidence-low-soft); }
+    .confidence-review .confidence-evidence[data-confidence-level="unknown"] { text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
+    .confidence-review .confidence-evidence[data-confidence-level="high"]:hover,
+    .confidence-review .confidence-evidence[data-confidence-level="high"].confidence-active { background: #b9e5db; }
+    .confidence-review .confidence-evidence[data-confidence-level="medium"]:hover,
+    .confidence-review .confidence-evidence[data-confidence-level="medium"].confidence-active { background: #ffe0a6; }
+    .confidence-review .confidence-evidence[data-confidence-level="low"]:hover,
+    .confidence-review .confidence-evidence[data-confidence-level="low"].confidence-active { background: #fecaca; }
+    .confidence-review .presentation-source-link,
+    .confidence-review .presentation-source-link:hover,
+    .confidence-review .presentation-source-link.confidence-active { background: transparent; }
+    .presentation-source-link:hover,
+    .presentation-source-link.confidence-active { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .confidence-inspector {
+      position: fixed;
+      z-index: 20;
+      max-width: 260px;
+      padding: 6px 8px;
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      background: var(--text);
+      color: var(--panel);
+      box-shadow: 0 8px 24px #17203338;
+      font-size: .74rem;
+      line-height: 1.4;
+      pointer-events: none;
+    }
+    .confidence-inspector[hidden] { display: none; }
+    .confidence-inspector strong, .confidence-inspector span { display: block; }
+    .confidence-inspector span { margin-top: 2px; opacity: .78; }
+    .confidence-evidence:focus-visible, .confidence-host:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .visual-panel { padding: 0; }
+    .visual-panel .inspector { min-height: 560px; border-top: 0; }
+    .markdown-source { min-height: 520px; }
+    .markdown-lines { margin: 0; padding-left: 4.25rem; font: .78rem/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .markdown-lines li { min-height: 1.65em; padding-left: 10px; border-left: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
+    .markdown-lines li::marker { color: var(--muted); }
+    .markdown-status { color: var(--muted); font-size: .78rem; }
     .rendered-page { margin-bottom: 24px; }
     .rendered-page + .rendered-page { padding-top: 24px; border-top: 1px solid var(--line); }
     .rendered-page h2 { margin: 0 0 9px; font-size: .78rem; letter-spacing: .11em; text-transform: uppercase; color: var(--accent); }
-    .rendered-content { max-width: 78ch; }
+    .rendered-content { max-width: 86ch; }
     .rendered-page p { margin: 0; line-height: 1.72; white-space: pre-wrap; }
     pre { margin: 0; color: var(--text); font: .78rem/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
     .semantic-block { margin: 0 0 13px; line-height: 1.65; white-space: pre-wrap; }
     .semantic-block.title { margin: 4px 0 18px; font-size: 1.4rem; font-weight: 760; line-height: 1.25; }
     .semantic-block.heading { margin: 20px 0 8px; font-size: 1rem; font-weight: 730; line-height: 1.35; }
+    .semantic-block.author { margin-bottom: 16px; color: var(--text); font-size: .82rem; line-height: 1.45; }
+    .semantic-block.author > span { display: block; }
+    .semantic-block.footnote { margin-top: 18px; color: var(--muted); font-size: .76rem; line-height: 1.5; }
     .semantic-block.header { color: var(--muted); font-size: .76rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
     .semantic-block.footer { padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: .76rem; }
+    .semantic-block.aside_text { margin: 2px 0 16px; padding-left: 9px; border-left: 2px solid var(--line-strong); color: var(--muted); font-size: .76rem; }
+    .semantic-block.formula { margin: 14px 0; padding: 8px 10px; border-left: 2px solid var(--accent); font-family: "Times New Roman", serif; font-size: 1rem; }
     .semantic-block.table { overflow-x: auto; padding: 2px 0 8px; }
     .document-table { width: 100%; border-collapse: collapse; font-size: .84rem; line-height: 1.45; }
     .document-table th, .document-table td { min-width: 90px; padding: 9px 10px; border: 1px solid var(--line-strong); text-align: left; vertical-align: top; white-space: pre-wrap; }
@@ -436,6 +514,24 @@
     .failure-message { margin-top: 6px; line-height: 1.5; }
     .success-note { color: var(--text); }
     .downloads { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .action-menu { position: relative; }
+    .action-menu > summary { list-style: none; }
+    .action-menu > summary::-webkit-details-marker { display: none; }
+    .action-popover {
+      position: absolute;
+      z-index: 12;
+      top: calc(100% + 6px);
+      right: 0;
+      display: grid;
+      min-width: 190px;
+      gap: 4px;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--panel);
+      box-shadow: 0 8px 24px #17203324;
+    }
+    .action-popover .download { width: 100%; text-align: left; white-space: nowrap; }
     .copy-control { display: inline-flex; align-items: center; gap: 7px; }
     .copy-status { min-width: 0; color: var(--text); font-size: .72rem; font-weight: 700; }
     .copy-status.error { color: var(--accent); }
@@ -457,11 +553,6 @@
 
     @media (max-width: 900px) {
       .shell { padding: 18px; }
-      header { align-items: flex-start; flex-direction: column; }
-      .privacy { text-align: left; }
-      .risk-card { grid-template-columns: 1fr; }
-      .composition-banner { grid-template-columns: 1fr; }
-      .composition-note { grid-column: 1; }
       .examples { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
       .workspace { grid-template-columns: 1fr; }
       .preview-wrap { min-height: 420px; }
@@ -476,8 +567,8 @@
       .button { flex: 1; }
       .examples { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .card-head { align-items: flex-start; flex-direction: column; }
-      .categories { align-items: flex-start; flex-direction: column; }
       .inspector-grid { grid-template-columns: 1fr 1fr; }
+      .inspector-primary { grid-template-columns: 1fr; }
       .downloads { display: grid; width: 100%; grid-template-columns: 1fr 1fr; }
       .copy-control { grid-column: 1 / -1; }
       .copy-control .download { flex: 1; }
@@ -485,33 +576,22 @@
       .tabs { padding-inline: 8px; }
       .tab { padding-inline: 10px; }
       .tab-panel { padding: 14px; }
+      .timing-list { grid-template-columns: 1fr; }
     }
     @media (prefers-reduced-motion: reduce) {
       .button:hover:not(:disabled) { transform: none; }
+      .confidence-evidence, .presentation-source-link { transition: none !important; }
     }
   </style>
 </head>
 <body>
-  <script id="composition-data" type="application/json">__OCR_COMPOSITION_JSON__</script>
   <main class="shell">
     <header>
       <div>
-        <div class="eyebrow" aria-hidden="true">Local evidence viewer</div>
         <h1>Not So Smart OCR</h1>
-        <p class="subtitle">A local document parser that keeps text, layout, evidence, and failures visible.</p>
+        <p class="subtitle">Evidence-linked document extraction.</p>
       </div>
-      <div class="privacy">Private execution path<br>25 MB maximum</div>
     </header>
-
-    <section class="composition-banner" id="composition-banner" aria-labelledby="composition-label" aria-live="polite">
-      <div class="composition-heading">
-        <strong id="composition-label">Pipeline configuration</strong>
-        <span class="composition-scope" id="composition-scope">Loading</span>
-      </div>
-      <p class="composition-summary" id="composition-summary">Loading the configured local pipeline.</p>
-      <p class="composition-note" id="composition-note">Configuration is shown before processing so reduced and full paths cannot be confused.</p>
-    </section>
-
     <form class="toolbar" id="upload-form">
       <label class="file-field" for="source-file">
         <input id="source-file" name="file" type="file" accept=".bmp,.jpeg,.jpg,.png,.tif,.tiff,.webp,.pdf">
@@ -522,17 +602,17 @@
       <button class="button" id="clear-button" type="button" disabled>Clear</button>
     </form>
 
-    <nav class="examples" aria-label="Example documents">
+    <nav id="examples" class="examples" aria-label="Example documents">
       <span class="examples-label">Try a public example</span>
       <button class="example-button" type="button" data-example="clinical-table">
         <img class="example-preview" src="/api/examples/clinical-table" alt="Synthetic clinical table preview" loading="lazy">
         <span class="example-name">Clinical table</span>
         <span class="example-kind">Structured data</span>
       </button>
-      <button class="example-button" type="button" data-example="handwriting">
-        <img class="example-preview" src="/api/examples/handwriting" alt="Handwritten page preview" loading="lazy">
-        <span class="example-name">Handwriting</span>
-        <span class="example-kind">Multilingual text</span>
+      <button class="example-button" type="button" data-example="formula-scan">
+        <img class="example-preview" src="/api/examples/formula-scan" alt="Formula scan preview" loading="lazy">
+        <span class="example-name">Formula scan</span>
+        <span class="example-kind">Historical mathematics</span>
       </button>
       <button class="example-button" type="button" data-example="academic-paper">
         <img class="example-preview" src="/api/examples/academic-paper" alt="Academic paper preview" loading="lazy">
@@ -544,54 +624,35 @@
         <span class="example-name">Code</span>
         <span class="example-kind">Mixed typography</span>
       </button>
-      <button class="example-button" type="button" data-example="photographed-table">
-        <img class="example-preview" src="/api/examples/photographed-table" alt="Photographed table preview" loading="lazy">
-        <span class="example-name">Photo table</span>
-        <span class="example-kind">Perspective scan</span>
-      </button>
-      <button class="example-button" type="button" data-example="multi-column-page">
-        <img class="example-preview" src="/api/examples/multi-column-page" alt="Multi-column document preview" loading="lazy">
-        <span class="example-name">Multi-column page</span>
+      <button class="example-button" type="button" data-example="financial-table">
+        <img class="example-preview" src="/api/examples/financial-table" alt="Financial table preview" loading="lazy">
+        <span class="example-name">Financial table</span>
         <span class="example-kind">Dense layout</span>
+      </button>
+      <button class="example-button" type="button" data-example="scanned-form">
+        <img class="example-preview" src="/api/examples/scanned-form" alt="Scanned form preview" loading="lazy">
+        <span class="example-name">Scanned form</span>
+        <span class="example-kind">Fields and lines</span>
       </button>
     </nav>
 
     <div class="activity-line" id="activity-line" hidden>
       <div class="status-line" id="status-line" role="status" aria-live="polite" aria-atomic="true"></div>
       <div class="client-timer" id="client-timer" data-state="idle" aria-label="Client request timing" hidden>
-        <span class="timer-label">Client wall time</span>
+        <span class="timer-label">Total time taken</span>
         <strong class="timer-value" id="client-elapsed">0.0 s</strong>
         <span class="timer-state" id="client-timer-state">Idle</span>
       </div>
     </div>
-    <div class="metadata" id="metadata" aria-label="Processing metadata"></div>
     <details class="timing-card" id="timing-card" hidden>
       <summary><span>Pipeline execution</span><span class="timing-total" id="timing-total"></span></summary>
       <div class="timing-list" id="timing-list"></div>
     </details>
 
-    <section class="risk-card" id="risk-card" aria-labelledby="risk-title" hidden>
-      <div class="risk-summary">
-        <div class="risk-heading">
-          <h2 id="risk-title">Evidence diagnostics</h2>
-          <span class="risk-badge" id="risk-badge"></span>
-        </div>
-        <p class="risk-copy" id="risk-copy"></p>
-      </div>
-      <div class="risk-metrics" aria-label="Current page evidence diagnostics">
-        <div class="risk-metric"><span class="label">Provider confidence</span><span class="risk-value" id="risk-confidence">-</span><span class="risk-detail" id="risk-confidence-detail"></span></div>
-        <div class="risk-metric"><span class="label">Primary regions</span><span class="risk-value" id="risk-primary">-</span></div>
-        <div class="risk-metric"><span class="label">Unreadable / conflicting</span><span class="risk-value" id="risk-unresolved">-</span></div>
-        <div class="risk-metric"><span class="label">Alternative disagreements</span><span class="risk-value" id="risk-disagreements">-</span></div>
-        <div class="risk-metric"><span class="label">Execution failures</span><span class="risk-value" id="risk-failures">-</span></div>
-        <div class="risk-reasons" id="risk-reasons" aria-label="Review reasons and region categories"></div>
-      </div>
-    </section>
-
     <section class="workspace" aria-label="OCR result workspace">
-      <article class="card">
+      <article class="card source-card" aria-label="Page evidence">
         <div class="card-head">
-          <span class="card-title">Page preview</span>
+          <span class="card-title">Page evidence</span>
           <div class="page-controls">
             <button class="icon-button" id="previous-page" type="button" disabled>Previous</button>
             <span class="page-count" id="page-count">No pages</span>
@@ -599,8 +660,10 @@
           </div>
         </div>
         <div class="categories" id="region-categories" hidden>
-          <span class="category-label">Overlay categories</span>
-          <div class="category-list" id="category-list" role="group" aria-label="Filter overlay categories"></div>
+          <details class="layers-control" id="layers-control">
+            <summary>Layers <span id="layer-count"></span></summary>
+            <div class="category-list" id="category-list" role="group" aria-label="Filter overlay layers"></div>
+          </details>
         </div>
         <div class="preview-wrap">
           <div class="empty-state" id="preview-empty">
@@ -609,79 +672,125 @@
           </div>
           <canvas id="page-canvas" tabindex="0" aria-label="OCR page with region overlays"></canvas>
         </div>
-        <div class="inspector" id="inspector">
-          <div class="inspector-head">
-            <span class="reread-status" id="reread-status" role="status" aria-live="polite" aria-atomic="true"></span>
-            <button class="download inspector-action" id="reread-handwriting" type="button" hidden disabled>Reread handwriting</button>
-          </div>
-          <div class="inspector-grid">
-            <div class="datum"><span class="label">Kind</span><span class="value" id="region-kind">None selected</span></div>
-            <div class="datum"><span class="label">Confidence</span><span class="value" id="region-confidence">-</span></div>
-            <div class="datum"><span class="label">Provider</span><span class="value" id="region-provider">-</span></div>
-            <div class="datum"><span class="label">Reading order</span><span class="value" id="region-order">-</span></div>
-            <div class="datum"><span class="label">Bounding box</span><span class="value" id="region-box">-</span></div>
-            <div class="datum"><span class="label">Resolution</span><span class="value" id="region-resolution">-</span></div>
-            <div class="datum region-text"><span class="label">Provenance</span><span class="value" id="region-provenance">-</span></div>
-            <div class="datum region-text"><span class="label">Alternatives</span><span class="value" id="region-alternatives">-</span></div>
-            <div class="datum region-text"><span class="label">Structure</span><span class="value" id="region-structure">-</span></div>
-            <div class="datum region-text"><span class="label">Text</span><span class="value" id="region-text">Click an overlay to inspect its evidence.</span></div>
-          </div>
-          <div class="region-list" id="region-list" aria-label="Regions on this page"></div>
-        </div>
       </article>
-
       <article class="card output-card">
         <div class="card-head">
           <span class="card-title">Document output</span>
           <div class="downloads">
-            <span class="copy-control">
-              <button class="download" id="copy-json" type="button" data-copy-state="idle" disabled>Copy API response JSON</button>
-              <span class="copy-status" id="copy-status" role="status" aria-live="polite" aria-atomic="true"></span>
-            </span>
-            <a class="download" id="download-json" download aria-disabled="true">Download result JSON</a>
-            <a class="download" id="download-markdown" download aria-disabled="true">Download Markdown</a>
+            <details class="action-menu">
+              <summary class="download">Copy</summary>
+              <div class="action-popover">
+                <button class="download" id="copy-text" type="button" data-copy-state="idle" data-label="Raw text" disabled>Raw text</button>
+                <button class="download" id="copy-markdown" type="button" data-copy-state="idle" data-label="Markdown" disabled>Markdown</button>
+                <button class="download" id="copy-json" type="button" data-copy-state="idle" data-label="Response JSON" disabled>Response JSON</button>
+              </div>
+            </details>
+            <details class="action-menu">
+              <summary class="download">Download</summary>
+              <div class="action-popover">
+                <a class="download" id="download-markdown" aria-disabled="true">Markdown</a>
+                <a class="download" id="download-json" aria-disabled="true">Result JSON</a>
+              </div>
+            </details>
+            <span class="copy-status" id="copy-status" role="status" aria-live="polite" aria-atomic="true"></span>
           </div>
         </div>
         <div class="tabs" role="tablist" aria-label="Output views">
-          <button class="tab" role="tab" type="button" aria-selected="true" aria-controls="panel-rendered" id="tab-rendered">Rendered</button>
-          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-layout" id="tab-layout" tabindex="-1">Regions</button>
-          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-processed" id="tab-processed" tabindex="-1">Processed</button>
-          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-raw" id="tab-raw" tabindex="-1">Region JSON</button>
-          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-json" id="tab-json" tabindex="-1">JSON</button>
-          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-failures" id="tab-failures" tabindex="-1">Failures</button>
+          <button class="tab" role="tab" type="button" aria-selected="true" aria-controls="panel-rendered" id="tab-rendered">Text output</button>
+          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-visual" id="tab-visual" tabindex="-1">Visual</button>
+          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-markdown" id="tab-markdown" tabindex="-1">Markdown</button>
         </div>
-        <div class="tab-panel active" role="tabpanel" id="panel-rendered" aria-labelledby="tab-rendered">
-          <div class="empty-state"><strong>No result yet</strong>Parsed text will remain linked to its source regions.</div>
+        <details class="review-details" id="review-details" hidden>
+          <summary id="review-summary">Review required</summary>
+          <ul class="review-list" id="review-list"></ul>
+        </details>
+        <div class="tab-panel active empty-panel confidence-review" role="tabpanel" id="panel-rendered" aria-labelledby="tab-rendered">
+          <div class="rendered-toolbar" id="rendered-toolbar" hidden>
+            <button class="confidence-toggle" id="confidence-toggle" type="button" aria-pressed="true" aria-label="Turn provider confidence highlights off">Confidence</button>
+          </div>
+          <div class="rendered-view" id="rendered-view">
+            <div class="empty-state"><strong>Ready to extract</strong>Choose a document or public example to begin.</div>
+          </div>
         </div>
-        <div class="tab-panel" role="tabpanel" id="panel-layout" aria-labelledby="tab-layout" hidden></div>
-        <div class="tab-panel" role="tabpanel" id="panel-processed" aria-labelledby="tab-processed" hidden></div>
-        <div class="tab-panel" role="tabpanel" id="panel-raw" aria-labelledby="tab-raw" aria-describedby="raw-scope" hidden>
-          <p class="view-note" id="raw-scope"><strong>Final post-stage region JSON.</strong> This view contains page-numbered regions after all pipeline stages. Use JSON for the complete API response.</p>
-          <pre>[]</pre>
+        <div class="tab-panel visual-panel" role="tabpanel" id="panel-visual" aria-labelledby="tab-visual" hidden>
+          <div class="inspector empty" id="inspector">
+            <div class="inspector-empty">Select a region on the page to inspect its evidence.</div>
+            <div class="inspector-head">
+              <span class="reread-status" id="reread-status" role="status" aria-live="polite" aria-atomic="true"></span>
+              <button class="download inspector-action" id="reread-handwriting" type="button" hidden disabled>Reread handwriting</button>
+            </div>
+            <div class="inspector-primary">
+              <canvas class="region-crop" id="region-crop" aria-label="Selected source crop" hidden></canvas>
+              <div>
+                <div class="datum region-transcription"><span class="label">Transcription</span><span class="value" id="region-text">Click an overlay to inspect its evidence.</span></div>
+                <div class="datum"><span class="label">Aligned alternatives</span><span class="value" id="region-alternatives">None</span></div>
+              </div>
+            </div>
+            <div class="review-actions" id="review-actions" hidden>
+              <select id="review-alternative" aria-label="Alternative transcription"></select>
+              <button class="download" id="accept-alternative" type="button">Accept</button>
+              <button class="download" id="edit-region" type="button">Edit</button>
+              <input id="region-edit-text" aria-label="Corrected transcription" hidden>
+              <button class="download" id="save-region-edit" type="button" hidden>Save edit</button>
+              <button class="download" id="keep-unresolved" type="button">Keep unresolved</button>
+            </div>
+            <div class="inspector-grid">
+              <div class="datum"><span class="label">Kind</span><span class="value" id="region-kind">None selected</span></div>
+              <div class="datum"><span class="label" id="region-confidence-label">Recognition score</span><span class="value" id="region-confidence">Not available</span></div>
+              <div class="datum"><span class="label">Provider</span><span class="value" id="region-provider">-</span></div>
+              <div class="datum"><span class="label">Reading order</span><span class="value" id="region-order">-</span></div>
+              <div class="datum"><span class="label">Bounding box</span><span class="value" id="region-box">-</span></div>
+              <div class="datum"><span class="label">Resolution</span><span class="value" id="region-resolution">-</span></div>
+              <details class="technical-details">
+                <summary>Technical details</summary>
+                <div class="technical-grid">
+                  <div class="datum"><span class="label">Provenance</span><span class="value" id="region-provenance">-</span></div>
+                  <div class="datum"><span class="label">Raw alternatives</span><span class="value" id="region-raw-alternatives">-</span></div>
+                  <div class="datum"><span class="label">Structure</span><span class="value" id="region-structure">-</span></div>
+                </div>
+              </details>
+            </div>
+            <div class="region-list" id="region-list" aria-label="Regions on this page"></div>
+          </div>
         </div>
-        <div class="tab-panel" role="tabpanel" id="panel-json" aria-labelledby="tab-json" hidden><pre>{}</pre></div>
-        <div class="tab-panel" role="tabpanel" id="panel-failures" aria-labelledby="tab-failures" hidden>
-          <div class="empty-state"><strong>No result yet</strong>Ingest, render, and OCR failures will be shown explicitly.</div>
+        <div class="tab-panel" role="tabpanel" id="panel-markdown" aria-labelledby="tab-markdown" hidden>
+          <div class="markdown-source" id="markdown-source" aria-label="Downloaded Markdown with line numbers">
+            <div class="empty-state"><strong>Ready to extract</strong>Exact downloaded Markdown will appear here.</div>
+          </div>
         </div>
       </article>
     </section>
+    <div class="confidence-inspector" id="confidence-inspector" role="tooltip" hidden>
+      <strong id="confidence-inspector-score"></strong>
+      <span id="confidence-inspector-source"></span>
+      <span>Confidence is not correctness.</span>
+    </div>
   </main>
 
   <script>
-    const composition = JSON.parse(document.getElementById("composition-data").textContent);
     const state = {
       response: null,
       pageIndex: 0,
-      selectedOverlay: -1,
+      selectedRegionKey: null,
+      hoveredRegionKey: null,
       image: null,
       imageRequest: 0,
+      resultRequest: 0,
       hiddenKinds: new Set(),
-      showAllRegions: false,
       selectedFile: null,
       clientTimerStartedAt: null,
       clientTimerId: null,
       copyResetId: null,
-      rereadBusy: false
+      rereadBusy: false,
+      recoveryRequestId: null,
+      recoveryController: null,
+      recoverySequence: 0,
+      confidenceReview: true,
+      activeEvidenceId: null,
+      pinnedConfidence: null,
+      renderedMarkdown: null,
+      renderedMarkdownSessionId: null,
+      renderedMarkdownRevision: null
     };
     const byId = (id) => document.getElementById(id);
     const INLINE_MAX_GAP_HEIGHTS = 3;
@@ -690,25 +799,31 @@
     const form = byId("upload-form");
     const canvas = byId("page-canvas");
     const context = canvas.getContext("2d");
+    const cropCanvas = byId("region-crop");
+    const cropContext = cropCanvas.getContext("2d");
     const rootStyle = getComputedStyle(document.documentElement);
-    const structureColor = rootStyle.getPropertyValue("--text").trim();
     const actionColor = rootStyle.getPropertyValue("--accent").trim();
     const neutralColor = rootStyle.getPropertyValue("--panel").trim();
-
-    renderComposition(composition);
-
-    function renderComposition(value) {
-      byId("composition-label").textContent = value.label;
-      byId("composition-scope").textContent = value.scope;
-      const tesseract = value.tesseract_roles.length
-        ? ` Tesseract: ${value.tesseract_roles.join(", ")}.`
-        : " Tesseract is not configured.";
-      const stages = value.stages.length ? value.stages.join(" + ") : "none";
-      byId("composition-summary").textContent =
-        `Primary OCR: ${value.primary_ocr}. Orientation: ${value.orientation}. Configured stages: ${stages}. Handwriting: ${value.handwriting}.${tesseract}`;
-      byId("composition-note").textContent = value.note;
-      byId("composition-banner").dataset.scope = value.scope;
-    }
+    const regionColors = {
+      title: "#1d4ed8",
+      heading: "#2563eb",
+      header: "#6b7280",
+      footer: "#4f46e5",
+      paragraph: "#a21caf",
+      line: "#7c3aed",
+      author: "#a21caf",
+      footnote: "#4f46e5",
+      text: "#a21caf",
+      figure: "#047857",
+      table: "#0369a1",
+      field: "#c026d3",
+      form_row: "#be185d",
+      control: "#c2410c",
+      formula: "#2563eb",
+      formula_candidate: "#64748b",
+      handwriting: "#be185d",
+      aside_text: "#c2410c"
+    };
 
     fileInput.addEventListener("change", () => {
       const file = fileInput.files[0];
@@ -724,26 +839,42 @@
 
     async function handleExample(button) {
       const name = button.dataset.example;
-      setStatus("Loading generated example...", false, "busy");
+      const label = button.querySelector(".example-name")?.textContent || "example";
+      state.selectedFile = null;
+      byId("parse-button").disabled = true;
+      document.querySelectorAll("[data-example]").forEach((item) => {
+        item.disabled = true;
+      });
+      button.setAttribute("aria-busy", "true");
+      setStatus(`Loading ${label}...`, false, "busy");
       try {
         const response = await fetch(`/api/examples/${encodeURIComponent(name)}`);
         if (!response.ok) throw new Error("The example could not be loaded");
         const blob = await response.blob();
-        const filename = response.headers.get("content-disposition")?.match(/filename="?([^";]+)"?/)?.[1] || `${name}.pdf`;
+        const dispositionName = response.headers
+          .get("content-disposition")
+          ?.match(/filename="?([^";]+)"?/)?.[1];
+        const extension = blob.type === "image/png" ? ".png" : ".pdf";
+        const filename = dispositionName || `${name}${extension}`;
         fileInput.value = "";
         state.selectedFile = new File(
           [blob],
           filename,
           { type: blob.type || "application/octet-stream" }
         );
-        byId("file-name").textContent = `${filename} · generated example`;
+        byId("file-name").textContent = `${filename} · example`;
         byId("parse-button").disabled = false;
         byId("clear-button").disabled = false;
-        setStatus("Generated example ready. Select Parse to run the local pipeline.", false, "success");
+        setStatus("Example ready. Select Parse to extract it locally.", false, "success");
       } catch (error) {
         state.selectedFile = null;
         byId("parse-button").disabled = true;
         setStatus(error.message, true);
+      } finally {
+        button.removeAttribute("aria-busy");
+        document.querySelectorAll("[data-example]").forEach((item) => {
+          item.disabled = false;
+        });
       }
     }
 
@@ -751,13 +882,14 @@
       event.preventDefault();
       const file = state.selectedFile;
       if (!file) return;
+      const resultRequest = ++state.resultRequest;
       const previousSessionId = state.response?.session_id;
       startClientTimer();
       resetResult();
       state.selectedFile = file;
       setBusy(
         true,
-        "Running local OCR and specialist stages. This backend returns the complete result when processing finishes; it does not stream OCR tokens."
+        "Extracting text and structure locally."
       );
       const body = new FormData();
       body.append("file", file);
@@ -774,32 +906,39 @@
         const response = await fetch("/api/process", { method: "POST", body });
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.detail || "The document could not be parsed");
+        if (resultRequest !== state.resultRequest) return;
         state.response = payload;
         state.pageIndex = 0;
-        state.selectedOverlay = -1;
+        state.selectedRegionKey = null;
         resetHiddenKinds();
         renderResult();
         timerOutcome = "complete";
-        const coverage = payload.coverage_assessment;
         const cleanupNote = cleanupFailed ? cleanupWarning : "";
+        const reviewRequired = (payload.uncertainty?.pages || []).some(
+          (page) => page.review_required
+        );
+        const pages = payload.result.pages.length;
         setStatus(
-          payload.result.status === "success"
-            ? `OCR execution succeeded. ${coverage.message}${cleanupNote}`
-            : `Parsing finished with status: ${payload.result.status}. ${coverage.message}${cleanupNote}`,
+          `Complete · ${pages} ${pages === 1 ? "page" : "pages"}${reviewRequired ? " · review flagged" : ""}${cleanupNote}`,
           false,
-          payload.result.status === "success" ? "success" : ""
+          payload.result.status === "success" && !reviewRequired ? "success" : ""
         );
         byId("clear-button").disabled = false;
       } catch (error) {
-        resetResult();
-        setStatus(`${error.message}${cleanupFailed ? cleanupWarning : ""}`, true);
+        if (resultRequest === state.resultRequest) {
+          resetResult();
+          setStatus(`${error.message}${cleanupFailed ? cleanupWarning : ""}`, true);
+        }
       } finally {
-        stopClientTimer(timerOutcome);
-        setBusy(false);
+        if (resultRequest === state.resultRequest) {
+          stopClientTimer(timerOutcome);
+          setBusy(false);
+        }
       }
     });
 
     byId("clear-button").addEventListener("click", async () => {
+      state.resultRequest += 1;
       const sessionId = state.response?.session_id;
       fileInput.value = "";
       state.selectedFile = null;
@@ -818,21 +957,66 @@
       }
     });
 
+    byId("copy-text").addEventListener("click", handleCopyText);
+    byId("copy-markdown").addEventListener("click", handleCopyMarkdown);
     byId("copy-json").addEventListener("click", handleCopyJson);
     byId("reread-handwriting").addEventListener("click", handleRereadHandwriting);
+    byId("accept-alternative").addEventListener("click", () => handleCorrection("accept"));
+    byId("edit-region").addEventListener("click", handleEditRegion);
+    byId("save-region-edit").addEventListener("click", () => handleCorrection("edit"));
+    byId("keep-unresolved").addEventListener("click", () => handleCorrection("keep_unresolved"));
+    byId("confidence-toggle").addEventListener("click", handleConfidenceReview);
+    window.addEventListener("pagehide", cancelRecovery, { once: true });
+
+    async function handleCopyText() {
+      const content = (state.response?.result?.pages || [])
+        .map((page) => page.text?.value || "")
+        .join("\n\n");
+      await handleCopy(byId("copy-text"), content, "Raw text copied");
+    }
+
+    async function handleCopyMarkdown() {
+      if (!state.response) return;
+      const sessionId = state.response.session_id;
+      const revision = state.response.revision;
+      try {
+        const response = await fetch(markdownUrl());
+        if (!response.ok) throw new Error("Markdown copy failed");
+        const markdown = await response.text();
+        if (
+          state.response?.session_id !== sessionId
+          || state.response?.revision !== revision
+        ) {
+          throw new Error("Document changed before Markdown could be copied");
+        }
+        await handleCopy(
+          byId("copy-markdown"),
+          markdown,
+          "Markdown copied"
+        );
+      } catch {
+        showCopyStatus(byId("copy-markdown"), "Markdown copy failed", "error");
+      }
+    }
 
     async function handleCopyJson() {
+      await handleCopy(
+        byId("copy-json"),
+        state.response ? JSON.stringify(state.response, null, 2) : "",
+        "JSON copied"
+      );
+    }
+
+    async function handleCopy(button, content, successMessage) {
       if (!state.response) return;
-      const content = JSON.stringify(state.response, null, 2);
-      const button = byId("copy-json");
       button.disabled = true;
       button.setAttribute("aria-busy", "true");
       button.textContent = "Copying...";
       try {
         await copyText(content);
-        showCopyStatus("JSON copied", "copied");
+        showCopyStatus(button, successMessage, "copied");
       } catch {
-        showCopyStatus("Copy failed", "error");
+        showCopyStatus(button, "Copy failed", "error");
       } finally {
         button.disabled = !state.response;
         button.setAttribute("aria-busy", "false");
@@ -840,35 +1024,156 @@
     }
 
     async function handleRereadHandwriting() {
-      const sessionId = state.response?.session_id;
-      const page = state.response?.result.pages[state.pageIndex];
-      const region = currentOverlays()[state.selectedOverlay];
-      if (!sessionId || !page || !region || !currentRegions().some((item) => item.id === region.id)) return;
+      await submitRegionRequest(
+        "handwriting",
+        {},
+        "Rereading the selected region locally...",
+        "Handwriting reread complete."
+      );
+    }
 
+    function handleEditRegion() {
+      const region = selectedRegion();
+      if (!region) return;
+      const input = byId("region-edit-text");
+      const save = byId("save-region-edit");
+      input.value = region.text || "";
+      input.hidden = false;
+      save.hidden = false;
+      input.focus();
+    }
+
+    async function handleCorrection(action) {
+      const extra = { action };
+      if (action === "accept") {
+        const alternativeIndex = Number(byId("review-alternative").value);
+        const alternative = selectedRegion()?.alternatives?.[alternativeIndex];
+        if (semanticKind(selectedRegion()) === "formula") {
+          const rendered = renderPresentationFormula(String(alternative?.text || ""));
+          if (rendered.failure) {
+            setRereadStatus(rendered.failure.message, true);
+            return;
+          }
+        }
+        extra.alternative_index = alternativeIndex;
+      } else if (action === "edit") {
+        const text = byId("region-edit-text").value;
+        if (semanticKind(selectedRegion()) === "formula") {
+          const rendered = renderPresentationFormula(text);
+          if (rendered.failure) {
+            setRereadStatus(rendered.failure.message, true);
+            return;
+          }
+        }
+        extra.text = text;
+      }
+      await submitRegionRequest(
+        "corrections",
+        extra,
+        "Saving review decision...",
+        action === "keep_unresolved" ? "Region kept unresolved." : "Correction saved."
+      );
+    }
+
+    async function submitRegionRequest(path, extra, pendingMessage, successMessage) {
+      const sessionId = state.response?.session_id;
+      const revision = state.response?.revision;
+      const page = state.response?.result.pages[state.pageIndex];
+      const region = selectedRegion();
+      if (
+        !sessionId
+        || !Number.isInteger(revision)
+        || !page
+        || !region
+        || !currentRegions().some((item) => item.id === region.id)
+      ) return;
+
+      cancelRecovery();
+      const requestId = `${sessionId}-${++state.recoverySequence}`;
+      const controller = new AbortController();
+      state.recoveryRequestId = requestId;
+      state.recoveryController = controller;
       state.rereadBusy = true;
       updateRereadAction(region);
-      setRereadStatus("Rereading the selected region locally...");
+      updateReviewActions(region);
+      setRereadStatus(pendingMessage);
       byId("parse-button").disabled = true;
       byId("clear-button").disabled = true;
       try {
-        const response = await fetch(`/api/sessions/${sessionId}/handwriting`, {
+        const response = await fetch(`/api/sessions/${sessionId}/${path}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ page_number: page.page_number, region_id: region.id })
+          signal: controller.signal,
+          body: JSON.stringify({
+            page_number: page.page_number,
+            region_id: region.id,
+            revision,
+            request_id: requestId,
+            ...extra
+          })
         });
         const payload = await response.json();
-        if (!response.ok) throw new Error(payload.detail || "The selected region could not be reread");
-        state.response = payload;
-        renderResult();
-        setRereadStatus("Handwriting reread complete.");
+        if (state.recoveryRequestId !== requestId) return;
+        if (payload.recovery_outcome?.status === "stale") {
+          if (payload.session_id === sessionId && payload.result) {
+            applyRevisionResponse(payload);
+          }
+          setRereadStatus("A newer document revision is already active.", true);
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(
+            payload.recovery_outcome?.message
+            || payload.detail
+            || "The selected region could not be updated"
+          );
+        }
+        if (
+          state.response?.session_id !== sessionId
+          || state.response?.revision !== revision
+        ) return;
+        applyRevisionResponse(payload);
+        setRereadStatus(recoveryStatusMessage(payload, successMessage));
       } catch (error) {
-        setRereadStatus(error.message, true);
+        if (error.name !== "AbortError") setRereadStatus(error.message, true);
       } finally {
+        if (state.recoveryRequestId !== requestId) return;
+        state.recoveryRequestId = null;
+        state.recoveryController = null;
         state.rereadBusy = false;
-        updateRereadAction(currentOverlays()[state.selectedOverlay]);
+        updateRereadAction(selectedRegion());
+        updateReviewActions(selectedRegion());
         byId("parse-button").disabled = !state.selectedFile;
         byId("clear-button").disabled = !state.response && !state.selectedFile;
       }
+    }
+
+    function applyRevisionResponse(payload) {
+      state.response = payload;
+      state.renderedMarkdown = null;
+      state.renderedMarkdownSessionId = null;
+      state.renderedMarkdownRevision = null;
+      clearInteraction();
+      renderResult();
+    }
+
+    function recoveryStatusMessage(payload, fallback) {
+      return {
+        accept: "Alternative accepted as the canonical revision.",
+        candidate_pending: "A candidate was added; review is still required.",
+        corrected: "Canonical text was updated.",
+        edit: "Human text saved as the canonical revision.",
+        keep_unresolved: "Region kept unresolved.",
+        unchanged_after_reread: "Reread matched the current canonical text.",
+        unresolved: "Reread finished without enough evidence to resolve the region."
+      }[payload.recovery_outcome?.status] || fallback;
+    }
+
+    function cancelRecovery() {
+      state.recoveryController?.abort();
+      state.recoveryController = null;
+      state.recoveryRequestId = null;
+      state.rereadBusy = false;
     }
 
     function setRereadStatus(message, isError = false) {
@@ -879,13 +1184,52 @@
 
     function updateRereadAction(region) {
       const button = byId("reread-handwriting");
+      const configured = state.response?.composition?.handwriting === "configured";
+      const candidate = Boolean(
+        region
+        && (
+          semanticKind(region) === "handwriting"
+          || region.structure?.handwriting_review
+        )
+      );
       const selectable = Boolean(
-        state.response?.session_id
+        configured
+        && candidate
+        && state.response?.session_id
         && region
         && currentRegions().some((item) => item.id === region.id)
       );
       button.hidden = !selectable;
       button.disabled = !selectable || state.rereadBusy;
+    }
+
+    function updateReviewActions(region) {
+      const canonical = region && currentRegions().some((item) => item.id === region.id);
+      const alternatives = canonical
+        ? (region.alternatives || [])
+          .map((alternative, index) => ({ alternative, index }))
+          .filter(({ alternative }) => (alternative.decision_state || "pending") === "pending")
+        : [];
+      const pending = Boolean(
+        canonical
+        && (region.resolution !== "resolved" || alternatives.length)
+      );
+      const controls = byId("review-actions");
+      controls.hidden = !pending;
+      byId("review-alternative").replaceChildren(...alternatives.map(({ alternative, index }) => {
+        const option = document.createElement("option");
+        option.value = String(index);
+        option.textContent = alternative.text || `Alternative ${index + 1}`;
+        return option;
+      }));
+      byId("review-alternative").hidden = alternatives.length === 0;
+      byId("accept-alternative").hidden = alternatives.length === 0;
+      controls.querySelectorAll("button, select, input").forEach((control) => {
+        control.disabled = state.rereadBusy;
+      });
+      byId("region-edit-text").hidden = true;
+      byId("region-edit-text").value = "";
+      byId("save-region-edit").hidden = true;
     }
 
     async function copyText(content) {
@@ -920,8 +1264,7 @@
       }
     }
 
-    function showCopyStatus(message, copyState) {
-      const button = byId("copy-json");
+    function showCopyStatus(button, message, copyState) {
       const status = byId("copy-status");
       window.clearTimeout(state.copyResetId);
       button.dataset.copyState = copyState;
@@ -930,7 +1273,7 @@
       status.classList.toggle("error", copyState === "error");
       state.copyResetId = window.setTimeout(() => {
         button.dataset.copyState = "idle";
-        button.textContent = "Copy API response JSON";
+        button.textContent = button.dataset.label;
         status.textContent = "";
         status.classList.remove("error");
       }, 1600);
@@ -987,7 +1330,9 @@
       parseButton.textContent = busy ? "Parsing..." : "Parse";
       parseButton.disabled = busy || !state.selectedFile;
       byId("clear-button").disabled = busy || (!state.response && !state.selectedFile);
-      byId("copy-json").disabled = busy || !state.response;
+      ["copy-text", "copy-markdown", "copy-json"].forEach((id) => {
+        byId(id).disabled = busy || !state.response;
+      });
       document.querySelectorAll("[data-example]").forEach((button) => {
         button.disabled = busy;
       });
@@ -1004,103 +1349,55 @@
     function renderResult() {
       const payload = state.response;
       const result = payload.result;
-      renderMetadata(payload);
       renderTiming(payload.timing, payload.page_execution, payload.stage_execution);
-      renderUncertainty();
+      renderReview(payload);
       renderRendered(result.pages, payload.presentation?.pages || []);
-      renderLayout(result.pages);
-      renderProcessed(result.pages, payload.presentation?.pages || []);
-      byId("panel-raw").querySelector("pre").textContent = JSON.stringify(
-        result.pages.map((page) => ({ page_number: page.page_number, regions: page.regions })),
-        null,
-        2
-      );
-      byId("panel-json").querySelector("pre").textContent = JSON.stringify(state.response, null, 2);
-      renderFailures(
-        result.failures,
-        payload.preview_failure,
-        payload.presentation?.pages || []
-      );
-      byId("download-json").href = `/api/sessions/${payload.session_id}/result.json`;
-      byId("download-markdown").href = `/api/sessions/${payload.session_id}/result.md`;
+      ["copy-text", "copy-markdown", "copy-json"].forEach((id) => {
+        byId(id).disabled = false;
+      });
+      byId("download-json").href = `/api/sessions/${payload.session_id}/result.json?revision=${payload.revision}`;
+      byId("download-markdown").href = markdownUrl();
       byId("download-json").setAttribute("aria-disabled", "false");
       byId("download-markdown").setAttribute("aria-disabled", "false");
-      byId("copy-json").disabled = false;
       renderPage();
     }
 
-    function renderUncertainty() {
-      const summary = state.response?.uncertainty;
-      const resultPage = state.response?.result.pages[state.pageIndex];
-      const page = summary?.pages?.find((item) => item.page_number === resultPage?.page_number);
-      const card = byId("risk-card");
-      if (!summary || !page) {
-        card.hidden = true;
-        return;
-      }
-
-      card.hidden = false;
-      card.dataset.state = page.review_required ? "review" : "clear";
-      const badge = byId("risk-badge");
-      badge.textContent = page.review_required
-        ? `Review required · page ${page.page_number}`
-        : `No review flags · page ${page.page_number}`;
-      badge.classList.toggle("clear", !page.review_required);
-      byId("risk-copy").textContent = summary.interpretation;
-      byId("risk-confidence").textContent = page.mean_primary_confidence == null
-        ? "Not available"
-        : `${(page.mean_primary_confidence * 100).toFixed(1)}%`;
-      byId("risk-confidence-detail").textContent = page.mean_primary_confidence == null
-        ? "No scored primary evidence"
-        : `Provider-reported · ${page.confidence_regions} of ${page.primary_regions} scored`;
-      byId("risk-primary").textContent = page.primary_regions;
-      byId("risk-unresolved").textContent = `${page.unresolved_evidence} / ${page.conflicting_evidence}`;
-      byId("risk-disagreements").textContent = page.disagreeing_alternatives;
-      byId("risk-failures").textContent = page.failure_count;
-      const reasons = page.risk_reasons.length ? page.risk_reasons : ["No deterministic review reasons"];
-      const tags = [
-        ...reasons.map((label) => ({ label, flag: page.risk_reasons.length > 0 })),
-        ...Object.entries(page.category_counts || {}).map(([category, count]) => ({
-          label: `${category} · ${count}`,
-          flag: false
-        }))
-      ];
-      byId("risk-reasons").replaceChildren(...tags.map(({ label, flag }) => {
-        const item = document.createElement("span");
-        item.className = `risk-reason${flag ? " flag" : ""}`;
-        item.textContent = label.replaceAll("_", " ");
+    function renderReview(payload) {
+      const notices = [];
+      const notedPages = new Set();
+      const add = (message, pageNumber = null) => {
+        const clean = String(message || "").trim().replaceAll("_", " ");
+        if (clean && !notices.includes(clean)) notices.push(clean);
+        if (Number.isInteger(pageNumber)) notedPages.add(pageNumber);
+      };
+      (payload.result?.failures || []).forEach((failure) => add(
+        `Page ${failure.page_number || "?"}: ${failure.code || failure.stage || "OCR failure"}. ${failure.message || ""}`,
+        failure.page_number
+      ));
+      (payload.uncertainty?.pages || []).forEach((page) => {
+        (page.risk_reasons || []).forEach((reason) => add(`Page ${page.page_number}: ${reason}`, page.page_number));
+      });
+      (payload.stage_execution || []).filter((run) => run.status === "failed").forEach((run) => add(
+        `Page ${run.page_number}: ${run.stage} ${run.failure_code || "failed"}`,
+        run.page_number
+      ));
+      (payload.uncertainty?.pages || [])
+        .filter((page) => page.review_required && !notedPages.has(page.page_number))
+        .forEach((page) => add(`Page ${page.page_number}: review required`, page.page_number));
+      const details = byId("review-details");
+      details.hidden = notices.length === 0;
+      details.open = false;
+      byId("review-summary").textContent = `Review required · ${notices.length}`;
+      byId("review-list").replaceChildren(...notices.map((message) => {
+        const item = document.createElement("li");
+        item.textContent = message;
         return item;
       }));
     }
 
-    function renderMetadata(payload) {
-      const result = payload.result;
-      const items = [
-        ["Status", result.status],
-        ["Backend", payload.backend],
-        ["Configured stages", payload.pipeline_stages.join(" + ") || "none"],
-        ["Version", payload.backend_version],
-        ["Backend pipeline", `${payload.elapsed_seconds.toFixed(3)} s`],
-        ["Geometry", payload.geometry],
-        ["Coverage", payload.coverage_assessment.status.replaceAll("_", " ")],
-        ["Schema", `v${result.schema_version}`]
-      ];
-      const metadata = byId("metadata");
-      metadata.replaceChildren(...items.map(([label, value]) => {
-        const chip = document.createElement("span");
-        chip.className = "chip";
-        if (label === "Status") chip.dataset.tone = value === "success" ? "success" : "error";
-        if (label === "Coverage" && value !== "assessed") chip.dataset.tone = "review";
-        const strong = document.createElement("strong");
-        strong.textContent = `${label}: `;
-        chip.append(strong, document.createTextNode(value));
-        return chip;
-      }));
-      metadata.classList.add("visible");
-    }
-
     function renderTiming(timing, pageExecution = [], stageExecution = []) {
       const card = byId("timing-card");
+      card.open = false;
       if (!timing) {
         card.hidden = true;
         return;
@@ -1165,29 +1462,419 @@
 
     function renderRendered(pages, presentations) {
       const panel = byId("panel-rendered");
+      panel.classList.remove("empty-panel");
+      byId("rendered-toolbar").hidden = false;
       const renderedPages = pagesWithTableContinuations(
         pages,
         state.response?.result?.table_continuations || []
       );
-      panel.replaceChildren(...renderedPages.map((page) => {
+      const renderedContent = renderedPages.map((page) => {
         const section = document.createElement("section");
         section.className = "rendered-page";
+        section.dataset.pageNumber = String(page.page_number);
+        const pageHead = document.createElement("div");
+        pageHead.className = "rendered-page-head";
         const heading = document.createElement("h2");
         heading.textContent = `Page ${page.page_number}`;
+        pageHead.append(heading);
         const presentation = presentations.find(
           (item) => item.page_number === page.page_number
         );
         const content = usablePresentation(presentation)
           ? renderStructuredPresentation(page, presentation)
           : renderCanonicalPage(page);
-        section.append(heading, content);
+        section.append(pageHead, content);
         return section;
-      }));
+      });
+      const view = byId("rendered-view");
+      view.replaceChildren(...renderedContent);
       if (!pages.length) {
         const empty = document.createElement("p");
         empty.textContent = "No pages were produced.";
-        panel.replaceChildren(empty);
+        view.replaceChildren(empty);
       }
+      byId("panel-rendered").classList.toggle(
+        "confidence-review",
+        state.confidenceReview
+      );
+    }
+
+    function handleConfidenceReview() {
+      state.confidenceReview = !state.confidenceReview;
+      const toggle = byId("confidence-toggle");
+      toggle.setAttribute("aria-pressed", String(state.confidenceReview));
+      toggle.setAttribute(
+        "aria-label",
+        `Turn provider confidence highlights ${state.confidenceReview ? "off" : "on"}`
+      );
+      byId("panel-rendered").classList.toggle("confidence-review", state.confidenceReview);
+    }
+
+    async function loadRenderedMarkdown() {
+      const sessionId = state.response?.session_id;
+      const revision = state.response?.revision;
+      const target = byId("markdown-source");
+      if (!sessionId || !Number.isInteger(revision) || !target) return;
+      if (
+        state.renderedMarkdownSessionId === sessionId
+        && state.renderedMarkdownRevision === revision
+        && state.renderedMarkdown !== null
+      ) {
+        renderMarkdownSource(target, state.renderedMarkdown);
+        return;
+      }
+      target.replaceChildren(renderMarkdownStatus("Loading Markdown..."));
+      try {
+        const response = await fetch(markdownUrl());
+        if (!response.ok) throw new Error("Markdown could not be loaded");
+        const markdown = await response.text();
+        if (
+          state.response?.session_id !== sessionId
+          || state.response?.revision !== revision
+        ) return;
+        state.renderedMarkdown = markdown;
+        state.renderedMarkdownSessionId = sessionId;
+        state.renderedMarkdownRevision = revision;
+        renderMarkdownSource(target, markdown);
+      } catch (error) {
+        if (
+          state.response?.session_id !== sessionId
+          || state.response?.revision !== revision
+        ) return;
+        target.replaceChildren(renderMarkdownStatus(error.message));
+      }
+    }
+
+    function markdownUrl() {
+      return `/api/sessions/${state.response?.session_id}/result.md?revision=${state.response?.revision}`;
+    }
+
+    function renderMarkdownStatus(message) {
+      const status = document.createElement("p");
+      status.className = "markdown-status";
+      status.textContent = message;
+      return status;
+    }
+
+    function renderMarkdownSource(target, markdown) {
+      const lines = documentMarkdownLines(markdown);
+      const list = document.createElement("ol");
+      list.className = "markdown-lines";
+      list.setAttribute("aria-label", `${lines.length} lines of Markdown`);
+      lines.forEach((line) => {
+        const item = document.createElement("li");
+        const code = document.createElement("code");
+        code.textContent = line || "\u00a0";
+        item.append(code);
+        list.append(item);
+      });
+      target.replaceChildren(list);
+    }
+
+    function documentMarkdownLines(markdown) {
+      const lines = String(markdown).split(/\r?\n/);
+      return lines;
+    }
+
+    function validConfidence(value) {
+      if (value === null || value === undefined || value === "") return false;
+      return Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 1;
+    }
+
+    function confidenceLevel(confidence) {
+      if (confidence >= 0.9) return "high";
+      if (confidence >= 0.7) return "medium";
+      return "low";
+    }
+
+    function formatConfidence(confidence) {
+      return `${Number((confidence * 100).toFixed(2))}%`;
+    }
+
+    function decorateConfidence(element, confidence, inline = false, evidence = {}) {
+      element.classList.add("confidence-evidence");
+      if (inline) element.classList.add("confidence-inline");
+      element.dataset.confidenceLevel = validConfidence(confidence)
+        ? confidenceLevel(confidence)
+        : "unknown";
+      element.dataset.confidencePercent = validConfidence(confidence)
+        ? formatConfidence(confidence)
+        : "Unknown";
+      element.dataset.confidenceScope = evidence.scope || "region";
+      element.dataset.confidenceKind = evidence.confidenceKind || "Recognition score";
+      element.dataset.confidenceProvider = evidence.provider || "Unreported provider";
+      if (evidence.id) element.dataset.evidenceId = evidence.id;
+      if (Number.isInteger(evidence.pageNumber)) {
+        element.dataset.evidencePageNumber = String(evidence.pageNumber);
+      }
+    }
+
+    function appendEvidenceRun(parent, regions, separator = " ") {
+      const usable = regions.filter(
+        (region) => region && region.resolution === "resolved" && region.text
+      );
+      usable.forEach((region, index) => {
+        if (index) parent.append(document.createTextNode(separator));
+        const marker = document.createElement("span");
+        marker.textContent = region.text;
+        decorateConfidence(marker, region.confidence, true, {
+          id: region.id,
+          provider: region.provider,
+          scope: confidenceScope(region),
+          confidenceKind: confidenceKind(region)
+        });
+        parent.append(marker);
+      });
+      if (!usable.length) return false;
+      parent.classList.add("confidence-host");
+      parent.tabIndex = 0;
+      parent.setAttribute("aria-describedby", "confidence-inspector");
+      return true;
+    }
+
+    function confidenceScope(region) {
+      const kind = String(region?.kind || "").toLowerCase();
+      const provenance = region?.text_provenance || {};
+      if (kind === "table_cell") return "cell";
+      if (
+        region?.provider === "tesseract"
+        && provenance.method === "tesseract_tsv"
+        && Number.isInteger(provenance.word_num)
+      ) return "word";
+      if (/(^|_)(word|token)(_|$)/.test(kind) && !String(region?.text || "").includes(" ")) {
+        return "word";
+      }
+      return String(region?.text || "").includes(" ") ? "line or region" : "region";
+    }
+
+    function confidenceKind(region) {
+      const role = region?.structure?.role;
+      if (role === "table" && validConfidence(region?.structure?.detection_confidence)) {
+        return "Detection score";
+      }
+      if (semanticKind(region) === "control") return "State score";
+      return "Recognition score";
+    }
+
+    const renderedView = byId("rendered-view");
+    renderedView.addEventListener("pointerover", (event) => {
+      if (state.pinnedConfidence) return;
+      const target = confidenceTarget(event.target);
+      if (!target) return;
+      state.hoveredRegionKey = evidenceKeyForTarget(target);
+      showConfidenceInspector(target);
+    });
+    renderedView.addEventListener("pointerout", (event) => {
+      if (state.pinnedConfidence || confidenceTarget(event.relatedTarget)) return;
+      state.hoveredRegionKey = null;
+      hideConfidenceInspector();
+    });
+    renderedView.addEventListener("focusin", (event) => {
+      if (state.pinnedConfidence) return;
+      const target = confidenceTarget(event.target);
+      if (target) showConfidenceInspector(target);
+    });
+    renderedView.addEventListener("focusout", (event) => {
+      if (state.pinnedConfidence || renderedView.contains(event.relatedTarget)) return;
+      hideConfidenceInspector();
+    });
+    renderedView.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      const host = event.target.closest?.(".confidence-host");
+      const markers = host ? [...host.querySelectorAll(".confidence-evidence")] : [];
+      if (markers.length < 2) return;
+      event.preventDefault();
+      const current = Number(host.dataset.confidenceIndex) || 0;
+      const offset = event.key === "ArrowRight" ? 1 : -1;
+      const index = (current + offset + markers.length) % markers.length;
+      host.dataset.confidenceIndex = String(index);
+      showConfidenceInspector(markers[index]);
+    });
+    renderedView.addEventListener("click", (event) => {
+      const target = confidenceTarget(event.target);
+      if (!target) {
+        clearInteraction();
+        return;
+      }
+      if (state.pinnedConfidence === target) {
+        state.pinnedConfidence = null;
+        clearRegionSelection();
+        hideConfidenceInspector();
+        return;
+      }
+      state.pinnedConfidence = target;
+      selectEvidenceTarget(target);
+      showConfidenceInspector(target);
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      const inspectorOpen = !byId("confidence-inspector").hidden;
+      if (inspectorOpen) {
+        state.pinnedConfidence = null;
+        hideConfidenceInspector();
+        return;
+      }
+      if (state.selectedRegionKey) clearRegionSelection();
+    });
+
+    function confidenceTarget(target) {
+      if (!(target instanceof Element)) return null;
+      if (target.matches(".confidence-evidence")) return target;
+      const host = target.closest(".confidence-host");
+      const markers = host ? host.querySelectorAll(".confidence-evidence") : [];
+      return markers[Number(host?.dataset.confidenceIndex) || 0] || null;
+    }
+
+    function showConfidenceInspector(target) {
+      const pinned = state.pinnedConfidence === target;
+      const pageNumber = evidencePageNumber(target);
+      const pageIndex = state.response?.result.pages.findIndex(
+        (page) => page.page_number === pageNumber
+      );
+      if (Number.isInteger(pageIndex) && pageIndex >= 0 && pageIndex !== state.pageIndex) {
+        state.pageIndex = pageIndex;
+        resetHiddenKinds();
+        renderPage();
+        if (pinned) state.pinnedConfidence = target;
+      }
+      const inspector = byId("confidence-inspector");
+      const percent = target.dataset.confidencePercent;
+      byId("confidence-inspector-score").textContent = percent === "Unknown"
+        ? "Confidence: Not available"
+        : `${target.dataset.confidenceKind}: ${percent} · Uncalibrated`;
+      byId("confidence-inspector-source").textContent = target.dataset.confidenceScope;
+      renderedView.querySelector(".confidence-active")?.classList.remove("confidence-active");
+      target.classList.add("confidence-active");
+      inspector.hidden = false;
+      const box = target.getBoundingClientRect();
+      const inspectorBox = inspector.getBoundingClientRect();
+      inspector.style.left = `${Math.max(8, Math.min(
+        box.left,
+        window.innerWidth - inspectorBox.width - 8
+      ))}px`;
+      inspector.style.top = `${Math.max(8, box.top - inspectorBox.height - 8)}px`;
+      state.activeEvidenceId = target.dataset.evidenceId || null;
+      drawPage();
+    }
+
+    function hideConfidenceInspector() {
+      byId("confidence-inspector").hidden = true;
+      renderedView.querySelector(".confidence-active")?.classList.remove("confidence-active");
+      state.activeEvidenceId = null;
+      drawPage();
+    }
+
+    function dismissConfidenceTooltip() {
+      state.pinnedConfidence = null;
+      state.hoveredRegionKey = null;
+      hideConfidenceInspector();
+    }
+
+    function clearInteraction() {
+      state.selectedRegionKey = null;
+      state.hoveredRegionKey = null;
+      state.activeEvidenceId = null;
+      state.pinnedConfidence = null;
+      hideConfidenceInspector();
+      updateInspector(null);
+      if (visualTabActive()) renderRegionList(currentOverlays());
+      else renderRegionList([]);
+      drawPage();
+    }
+
+    function showRegionConfidenceInspector(region, clientX, clientY) {
+      const inspector = byId("confidence-inspector");
+      const confidence = displayConfidence(region);
+      byId("confidence-inspector-score").textContent = validConfidence(confidence.value)
+        ? `${confidence.label}: ${formatConfidence(confidence.value)} · Uncalibrated`
+        : `${confidence.label}: Not available`;
+      byId("confidence-inspector-source").textContent = confidence.scope;
+      inspector.hidden = false;
+      const inspectorBox = inspector.getBoundingClientRect();
+      inspector.style.left = `${Math.max(8, Math.min(
+        clientX + 12,
+        window.innerWidth - inspectorBox.width - 8
+      ))}px`;
+      inspector.style.top = `${Math.max(8, Math.min(
+        clientY - inspectorBox.height - 12,
+        window.innerHeight - inspectorBox.height - 8
+      ))}px`;
+      state.activeEvidenceId = region.id;
+      const linked = [...renderedView.querySelectorAll(".confidence-evidence")].find(
+        (item) => item.dataset.evidenceId === region.id
+      );
+      renderedView.querySelector(".confidence-active")?.classList.remove("confidence-active");
+      linked?.classList.add("confidence-active");
+      drawPage();
+    }
+
+    function displayConfidence(region) {
+      const structure = region?.structure || {};
+      if (structure.role === "layout_block") {
+        return {
+          label: "Layout score",
+          value: structure.layout_confidence,
+          scope: "layout block"
+        };
+      }
+      if (structure.role === "table" && validConfidence(structure.detection_confidence)) {
+        return {
+          label: "Detection score",
+          value: structure.detection_confidence,
+          scope: "table detection"
+        };
+      }
+      if (semanticKind(region) === "control") {
+        return {
+          label: "State score",
+          value: region?.resolution === "resolved" ? structure.state_confidence : null,
+          scope: "control state"
+        };
+      }
+      return {
+        label: "Recognition score",
+        value: region?.confidence,
+        scope: confidenceScope(region)
+      };
+    }
+
+    function evidenceKey(pageNumber, evidenceId) {
+      if (!state.response?.session_id || !evidenceId) return null;
+      return `${state.response.session_id}:p${pageNumber}:${evidenceId}`;
+    }
+
+    function evidenceKeyForTarget(target) {
+      return evidenceKey(
+        evidencePageNumber(target),
+        target.dataset.evidenceId
+      );
+    }
+
+    function evidencePageNumber(target) {
+      const sourcePageNumber = Number(target.dataset.evidencePageNumber);
+      if (Number.isInteger(sourcePageNumber) && sourcePageNumber > 0) return sourcePageNumber;
+      return Number(target.closest(".rendered-page")?.dataset.pageNumber);
+    }
+
+    function selectEvidenceTarget(target) {
+      const pageNumber = evidencePageNumber(target);
+      const pageIndex = state.response?.result.pages.findIndex(
+        (page) => page.page_number === pageNumber
+      );
+      if (!Number.isInteger(pageIndex) || pageIndex < 0) return;
+      if (pageIndex !== state.pageIndex) {
+        state.pageIndex = pageIndex;
+        resetHiddenKinds();
+        renderPage();
+      }
+      const source = pageOverlays().find(
+        (region) => region.id === target.dataset.evidenceId
+      );
+      if (!source) return;
+      state.selectedRegionKey = regionKey(source);
+      updateInspector(source);
+      if (visualTabActive()) renderRegionList(currentOverlays());
+      drawPage();
     }
 
     function pagesWithTableContinuations(pages, continuations) {
@@ -1301,7 +1988,7 @@
         const source = canonicalById.get(sourceId);
         if (!source || claimedIds.has(sourceId)) return;
         const matching = [source];
-        const outcome = renderPresentationBlock(block);
+        const outcome = renderPresentationBlock(block, source);
         claimedIds.add(sourceId);
         const order = presentationOrder(
           source,
@@ -1372,40 +2059,60 @@
       });
     }
 
-    function renderPresentationBlock(block) {
+    function renderPresentationBlock(block, source) {
       const failures = Array.isArray(block.validation?.failures)
         ? [...block.validation.failures]
         : [];
       const rawText = String(block.raw_text ?? "");
       if (failures.length) return { node: null, failures };
+      const kind = semanticKind(source);
       const container = document.createElement("section");
       container.className = "presentation-block";
       container.dataset.category = block.category || "unknown";
-      if (block.category === "table") {
+      container.dataset.regionKind = kind;
+      container.dataset.sourceKind = source.kind || "text";
+      if (kind === "table") {
+        if (block.category !== "table") {
+          return { node: null, failures: [{ code: "source_semantics_mismatch" }] };
+        }
         const rendered = renderSafePresentationTable(rawText);
         if (rendered.failure) return { node: null, failures: [rendered.failure] };
         container.append(rendered.table);
+        decoratePresentationSource(container, block, source);
         return { node: container, failures: [] };
       }
-      if (block.category === "formula") {
+      if (kind === "formula") {
+        if (block.category !== "formula") {
+          return { node: null, failures: [{ code: "source_semantics_mismatch" }] };
+        }
         const rendered = renderPresentationFormula(rawText);
         if (rendered.failure) return { node: null, failures: [rendered.failure] };
         container.append(rendered.formula);
-        return { node: container, failures: [] };
-      }
-      if (["plain", "text"].includes(block.category)) {
-        container.append(...renderPresentationMarkdown(rawText));
+        decoratePresentationSource(container, block, source);
         return { node: container, failures: [] };
       }
       const tags = {
         title: "h3",
-        "section-header": "h4",
-        "list-item": "li",
+        heading: "h4",
+        aside_text: "aside",
+        footer: "footer",
+        list: "li"
       };
-      const element = document.createElement(tags[block.category] || "p");
-      element.className = `presentation-${block.category || "text"}`;
-      element.textContent = rawText;
-      if (block.category === "list-item") {
+      const element = document.createElement(tags[kind] || "div");
+      element.className = `semantic-block ${kind}`;
+      const marker = document.createElement("span");
+      marker.textContent = rawText;
+      decorateConfidence(marker, source.confidence, true, {
+        id: source.id,
+        provider: source.provider,
+        scope: confidenceScope(source),
+        confidenceKind: confidenceKind(source)
+      });
+      element.append(marker);
+      container.classList.add("confidence-host");
+      container.tabIndex = 0;
+      container.setAttribute("aria-describedby", "confidence-inspector");
+      if (kind === "list") {
         const list = document.createElement("ul");
         list.append(element);
         container.append(list);
@@ -1413,6 +2120,20 @@
         container.append(element);
       }
       return { node: container, failures: [] };
+    }
+
+    function decoratePresentationSource(element, block, source) {
+      const rendering = block.rendering || {};
+      decorateConfidence(element, rendering.source_confidence, false, {
+        id: rendering.source_region_id || source.id,
+        pageNumber: rendering.source_page_number,
+        provider: source.provider,
+        scope: rendering.source_confidence_scope || "source region",
+        confidenceKind: rendering.source_confidence_kind || "Recognition score"
+      });
+      element.classList.add("confidence-host", "presentation-source-link");
+      element.tabIndex = 0;
+      element.setAttribute("aria-describedby", "confidence-inspector");
     }
 
     function renderPresentationFallback(regions) {
@@ -1694,6 +2415,7 @@
         ) {
           previous.text += ` ${region.text}`;
           previous.lastRegion = region;
+          previous.regions.push(region);
           return;
         }
         groups.push({
@@ -1703,34 +2425,114 @@
           role: region.structure?.role || "",
           inline,
           region,
+          regions: [region],
           lastRegion: region,
           sourceIndex
         });
       });
-      return groups.map(renderSemanticBlock);
+      return groups.map(renderSemanticBlock).filter(Boolean);
     }
 
     function renderSemanticBlock(group) {
       const kind = group.kind;
       if (kind === "table") return renderDocumentTable(group.region);
       if (kind === "form_row") return renderFormRow(group.region, group.sourceIndex);
-      const tag = kind === "title" ? "h3" : kind === "heading" ? "h4" : "div";
+      if (kind === "author") return renderAuthor(group.region, group.sourceIndex);
+      if (kind === "control") return renderControl(group.region);
+      const tag = {
+        title: "h3",
+        heading: "h4",
+        aside_text: "aside",
+        footer: "footer"
+      }[kind] || "div";
       const block = document.createElement(tag);
-      block.className = `semantic-block ${kind}`;
-      block.dataset.regionKind = kind;
+      const displayKind = kind === "formula" && !formulaMathReady(group.region)
+        ? "formula_candidate"
+        : kind;
+      block.className = `semantic-block ${displayKind}`;
+      block.dataset.regionKind = displayKind;
       block.dataset.sourceKind = group.sourceKind;
       if (group.role) block.dataset.regionRole = group.role;
       const label = kind === "field"
         ? group.region.structure?.label || group.region.structure?.field_name
         : null;
       const displayedText = renderedLiteral(group.text, group.region.resolution);
+      if (
+        kind === "formula"
+        && formulaMathReady(group.region)
+        && group.region.resolution === "resolved"
+      ) {
+        const rendered = renderPresentationFormula(group.text);
+        if (!rendered.failure) {
+          block.append(rendered.formula);
+          decorateConfidence(block, group.region.confidence, true, {
+            id: group.region.id,
+            provider: group.region.provider,
+            scope: confidenceScope(group.region),
+            confidenceKind: confidenceKind(group.region)
+          });
+          block.classList.add("confidence-host");
+          block.tabIndex = 0;
+          block.setAttribute("aria-describedby", "confidence-inspector");
+          return block;
+        }
+      }
+      const ownedSources = group.role === "layout_block"
+        ? (group.region.structure?.child_evidence_ids || [])
+          .map((evidenceId) => group.sourceIndex.get(evidenceId))
+        : [];
       if (label) {
         const strong = document.createElement("strong");
         strong.textContent = `${label}: `;
-        block.append(strong, document.createTextNode(displayedText));
+        block.append(strong);
+        appendEvidenceRun(block, [group.region]);
+      } else if (kind === "formula" && group.region.resolution === "resolved") {
+        appendEvidenceRun(block, [{ ...group.region, text: displayedText }]);
+      } else if (ownedSources.length) {
+        appendEvidenceRun(block, ownedSources);
+      } else if (group.inline) {
+        appendEvidenceRun(block, group.regions);
       } else {
-        block.textContent = displayedText || "";
+        appendEvidenceRun(block, [{ ...group.region, text: displayedText }]);
       }
+      if (!block.childNodes.length) {
+        if (kind !== "formula") return null;
+        block.textContent = "[unreadable formula]";
+      }
+      return block;
+    }
+
+    function renderControl(region) {
+      const block = document.createElement("div");
+      block.className = "semantic-block control confidence-host";
+      block.dataset.regionKind = "control";
+      block.dataset.resolution = region.resolution || "resolved";
+      block.tabIndex = 0;
+      block.setAttribute("aria-describedby", "confidence-inspector");
+      const marker = document.createElement("span");
+      marker.textContent = region.text || "[?]";
+      decorateConfidence(marker, region.confidence, true, {
+        id: region.id,
+        provider: region.provider,
+        scope: "control state",
+        confidenceKind: "State score"
+      });
+      block.append(marker);
+      return block;
+    }
+
+    function renderAuthor(region, sourceIndex) {
+      const block = document.createElement("div");
+      block.className = "semantic-block author";
+      block.dataset.regionKind = "author";
+      (region.structure?.lines || []).forEach((line) => {
+        const item = document.createElement("span");
+        appendEvidenceRun(
+          item,
+          (line.evidence_ids || []).map((evidenceId) => sourceIndex.get(evidenceId))
+        );
+        block.append(item);
+      });
       return block;
     }
 
@@ -1740,15 +2542,10 @@
       block.dataset.regionKind = "form_row";
       (region.structure?.fields || region.structure?.segments || []).forEach((segment) => {
         const item = document.createElement("span");
-        const text = canonicalEvidenceText(segment.evidence_ids, sourceIndex);
-        const field = text.match(/^(.{1,80}?):\s*(.*)$/s);
-        if (field) {
-          const label = document.createElement("strong");
-          label.textContent = `${field[1]}:`;
-          item.append(label, document.createTextNode(field[2]));
-        } else {
-          item.textContent = text;
-        }
+        appendEvidenceRun(
+          item,
+          (segment.evidence_ids || []).map((evidenceId) => sourceIndex.get(evidenceId))
+        );
         block.append(item);
       });
       return block;
@@ -1756,6 +2553,7 @@
 
     function canonicalLayoutText(region, sourceIndex) {
       if (region.structure?.role !== "layout_block") return region.text || "";
+      if (region.structure?.block_type === "formula") return region.text || "";
       const groups = region.structure?.block_type === "form_row"
         ? region.structure?.fields || region.structure?.segments
         : region.structure?.lines;
@@ -1793,9 +2591,9 @@
       wrapper.dataset.regionKind = "table";
       wrapper.dataset.sourceKind = region.kind || "table";
       wrapper.dataset.regionRole = region.structure?.role || "table";
-      const cells = normalizedTableCells(region.structure?.cells || []);
+      const cells = normalizedTableCells(region.structure?.cells || [], region.id);
       if (!cells.length) {
-        wrapper.textContent = renderedLiteral(region.text, region.resolution);
+        appendEvidenceRun(wrapper, [region]);
         return wrapper;
       }
 
@@ -1836,7 +2634,18 @@
             }
           }
           const resolution = cell.resolution || "resolved";
-          element.textContent = renderedLiteral(cell.text, resolution);
+          const marker = document.createElement("span");
+          marker.textContent = renderedLiteral(cell.text, resolution);
+          decorateConfidence(marker, cell.confidence, true, {
+            id: cell.evidenceId,
+            pageNumber: cell.sourcePageNumber,
+            provider: cell.source || region.provider,
+            scope: "cell"
+          });
+          element.classList.add("confidence-host");
+          element.tabIndex = 0;
+          element.setAttribute("aria-describedby", "confidence-inspector");
+          element.append(marker);
           row.append(element);
         }
         body.append(row);
@@ -1846,8 +2655,8 @@
       return wrapper;
     }
 
-    function normalizedTableCells(cells) {
-      const normalized = cells.flatMap((cell) => {
+    function normalizedTableCells(cells, tableId) {
+      const normalized = cells.flatMap((cell, index) => {
         if (!cell || typeof cell !== "object") return [];
         const rows = Array.isArray(cell.row_nums) && cell.row_nums.length
           ? cell.row_nums.map(Number)
@@ -1855,7 +2664,17 @@
         const columns = Array.isArray(cell.column_nums) && cell.column_nums.length
           ? cell.column_nums.map(Number)
           : Number.isInteger(cell.column_index) ? [cell.column_index] : [];
-        return rows.length && columns.length ? [{ ...cell, rows, columns }] : [];
+        return rows.length && columns.length
+          ? [{
+              ...cell,
+              rows,
+              columns,
+              evidenceId: String(cell.continuation_source?.cell_id || cellEvidenceId(tableId, cell, index)),
+              sourcePageNumber: Number.isInteger(cell.continuation_source?.page_number)
+                ? cell.continuation_source.page_number
+                : null
+            }]
+          : [];
       });
       const indexed = normalized.filter((cell) => !Array.isArray(cell.row_nums));
       if (indexed.length && Math.min(...indexed.map((cell) => cell.rows[0])) >= 1) {
@@ -1867,222 +2686,31 @@
       return normalized.sort((left, right) => left.rows[0] - right.rows[0] || left.columns[0] - right.columns[0]);
     }
 
+    function cellEvidenceId(tableId, cell, index) {
+      return String(cell.id || `${tableId}-cell-${index + 1}`);
+    }
+
     function renderedLiteral(value, resolution) {
       const text = String(value || "");
       if (!resolution || resolution === "resolved") return text;
       return "";
     }
 
-    function renderLayout(pages) {
-      const panel = byId("panel-layout");
-      const note = document.createElement("p");
-      note.className = "view-note";
-      note.textContent = "Canonical and review-relevant semantic regions are shown by default. Reveal all evidence to inspect source, challenger, and risk regions.";
-      const control = document.createElement("label");
-      control.className = "view-control";
-      const input = document.createElement("input");
-      input.type = "checkbox";
-      input.checked = state.showAllRegions;
-      input.addEventListener("change", () => {
-        state.showAllRegions = input.checked;
-        renderLayout(pages);
-      });
-      control.append(input, document.createTextNode("Show all evidence regions"));
-      const table = document.createElement("table");
-      table.className = "layout-table";
-      const head = document.createElement("thead");
-      const headRow = document.createElement("tr");
-      ["Page", "Order", "Category", "Bounding box", "Provider", "Resolution"].forEach((label) => {
-        const cell = document.createElement("th");
-        cell.scope = "col";
-        cell.textContent = label;
-        headRow.append(cell);
-      });
-      head.append(headRow);
-      const body = document.createElement("tbody");
-      pages.forEach((page) => {
-        const regions = state.showAllRegions ? orderedRegions(page.regions) : displayRegions(page);
-        regions.forEach((region) => {
-          const row = document.createElement("tr");
-          const box = normalizedBox(region.bounding_box);
-          [
-            page.page_number,
-            region.reading_order ?? "-",
-            semanticKind(region),
-            box ? `${box.left}, ${box.top}, ${box.right}, ${box.bottom}` : "-",
-            region.provider || "-",
-            region.resolution || "-"
-          ].forEach((value) => {
-            const cell = document.createElement("td");
-            cell.textContent = value;
-            row.append(cell);
-          });
-          body.append(row);
-        });
-      });
-      table.append(head, body);
-      if (!body.childElementCount) {
-        const empty = document.createElement("p");
-        empty.textContent = state.showAllRegions
-          ? "No evidence regions were produced."
-          : "No canonical or review-relevant regions were produced.";
-        panel.replaceChildren(note, control, empty);
-        return;
-      }
-      panel.replaceChildren(note, control, table);
-    }
-
-    function renderProcessed(pages, presentations = []) {
-      const panel = byId("panel-processed");
-      const presentationSummary = document.createElement("section");
-      presentationSummary.className = "rendered-page";
-      const presentationHeading = document.createElement("h2");
-      presentationHeading.textContent = "Structured presentation";
-      presentationSummary.append(presentationHeading);
-      if (!presentations.length) {
-        const note = document.createElement("p");
-        note.textContent = "No local presentation model ran for this document.";
-        presentationSummary.append(note);
-      } else {
-        presentations.forEach((presentation) => {
-          const note = document.createElement("p");
-          const validation = presentation.validation?.status || presentation.status;
-          const count = Array.isArray(presentation.blocks) ? presentation.blocks.length : 0;
-          const selected = Array.isArray(presentation.blocks)
-            ? presentation.blocks.filter((block) => block.rendering?.status === "selected").length
-            : 0;
-          note.textContent = `Page ${presentation.page_number}: ${presentation.provider || "local model"} · ${validation} · ${selected}/${count} blocks used in Rendered`;
-          presentationSummary.append(note);
-        });
-      }
-      panel.replaceChildren(presentationSummary, ...pages.map((page) => {
-        const section = document.createElement("section");
-        section.className = "rendered-page";
-        const heading = document.createElement("h2");
-        heading.textContent = `Page ${page.page_number}`;
-        const text = document.createElement("p");
-        text.textContent = page.text.value || "No text detected.";
-        section.append(heading, text);
-        return section;
-      }));
-      if (!pages.length) panel.textContent = "No processed pages were produced.";
-    }
-
-    function renderFailures(failures, previewFailure, presentations = []) {
-      const panel = byId("panel-failures");
-      const allFailures = [...(failures || [])];
-      if (previewFailure) allFailures.push(previewFailure);
-      const executionSection = document.createElement("section");
-      executionSection.className = "failure-section";
-      const executionHeading = document.createElement("h3");
-      executionHeading.textContent = "Execution failures";
-      executionSection.append(executionHeading);
-      if (!allFailures.length) {
-        const note = document.createElement("p");
-        note.className = "success-note";
-        note.textContent = `No execution failures were reported. ${state.response.coverage_assessment.message}`;
-        executionSection.append(note);
-      } else {
-        executionSection.append(...allFailures.map((failure) => {
-          const item = document.createElement("div");
-          item.className = "failure";
-          const code = document.createElement("div");
-          code.className = "failure-code";
-          code.textContent = `${failure.stage}/${failure.code}${failure.page_number ? ` · page ${failure.page_number}` : ""}`;
-          const message = document.createElement("div");
-          message.className = "failure-message";
-          message.textContent = failure.message;
-          item.append(code, message);
-          return item;
-        }));
-      }
-
-      const presentationSection = document.createElement("section");
-      presentationSection.className = "failure-section";
-      const presentationHeading = document.createElement("h3");
-      presentationHeading.textContent = "Presentation status";
-      presentationSection.append(presentationHeading);
-      const presentationIssues = presentations.filter((page) =>
-        ["failed", "skipped"].includes(page.status)
-        || page.validation?.status === "failed"
-      );
-      if (!presentationIssues.length) {
-        const note = document.createElement("p");
-        note.className = "success-note";
-        note.textContent = "No presentation failures or skips were reported.";
-        presentationSection.append(note);
-      } else {
-        presentationSection.append(...presentationIssues.map((page) => {
-          const item = document.createElement("div");
-          item.className = "failure";
-          const code = document.createElement("div");
-          code.className = "failure-code";
-          const validationFailure = page.validation?.failures?.[0];
-          const reason = page.failure?.code || validationFailure?.code || page.status;
-          code.textContent = `presentation/${reason} · page ${page.page_number}`;
-          const message = document.createElement("div");
-          message.className = "failure-message";
-          message.textContent = page.failure?.message
-            || validationFailure?.message
-            || page.message
-            || "Presentation was not available.";
-          item.append(code, message);
-          return item;
-        }));
-      }
-
-      const reviewSection = document.createElement("section");
-      reviewSection.className = "failure-section";
-      const reviewHeading = document.createElement("h3");
-      reviewHeading.textContent = "Unresolved evidence and review flags";
-      reviewSection.append(reviewHeading);
-      const reviewPages = (state.response.uncertainty?.pages || []).filter((page) => page.review_required);
-      if (!reviewPages.length) {
-        const note = document.createElement("p");
-        note.className = "success-note";
-        note.textContent = "No unresolved evidence or review flags were reported.";
-        reviewSection.append(note);
-      } else {
-        reviewSection.append(...reviewPages.map((page) => {
-          const item = document.createElement("div");
-          item.className = "review-flag";
-          const code = document.createElement("div");
-          code.className = "failure-code";
-          code.textContent = `Review flag · page ${page.page_number}`;
-          const message = document.createElement("div");
-          message.className = "failure-message";
-          message.textContent = reviewFlagSummary(page);
-          item.append(code, message);
-          return item;
-        }));
-      }
-      panel.replaceChildren(executionSection, presentationSection, reviewSection);
-    }
-
-    function reviewFlagSummary(page) {
-      const details = [
-        page.unresolved_evidence ? `${page.unresolved_evidence} unreadable` : "",
-        page.conflicting_evidence ? `${page.conflicting_evidence} conflicting` : "",
-        page.disagreeing_alternatives ? `${page.disagreeing_alternatives} alternative disagreements` : "",
-        ...(page.risk_reasons || []).map((reason) => String(reason).replaceAll("_", " "))
-      ].filter(Boolean);
-      return details.length ? details.join(" · ") : "Page routed for review.";
-    }
-
     byId("previous-page").addEventListener("click", () => changePage(-1));
     byId("next-page").addEventListener("click", () => changePage(1));
     function changePage(offset) {
       state.pageIndex += offset;
-      state.selectedOverlay = -1;
+      clearInteraction();
       resetHiddenKinds();
+      byId("layers-control").open = false;
       renderPage();
     }
 
     function resetHiddenKinds() {
       state.hiddenKinds.clear();
       state.hiddenKinds.add("text");
+      state.hiddenKinds.add("line");
       state.hiddenKinds.add("table_candidate");
-      state.hiddenKinds.add("table");
       state.hiddenKinds.add("table_cell");
     }
 
@@ -2093,11 +2721,14 @@
       const imageUrls = payload ? payload.page_images : [];
       const total = Math.max(pages.length, imageUrls.length);
       const hasPage = state.pageIndex >= 0 && state.pageIndex < total;
-      renderUncertainty();
       byId("page-count").textContent = hasPage ? `${state.pageIndex + 1} / ${total}` : "No pages";
       byId("previous-page").disabled = !hasPage || state.pageIndex === 0;
       byId("next-page").disabled = !hasPage || state.pageIndex >= total - 1;
-      state.selectedOverlay = -1;
+      state.selectedRegionKey = null;
+      state.hoveredRegionKey = null;
+      state.activeEvidenceId = null;
+      state.pinnedConfidence = null;
+      byId("confidence-inspector").hidden = true;
       updateInspector(null);
       renderRegionList([]);
       renderCategories();
@@ -2122,7 +2753,7 @@
         canvas.classList.add("visible");
         byId("preview-empty").hidden = true;
         drawPage();
-        renderRegionList(currentOverlays());
+        if (visualTabActive()) renderRegionList(currentOverlays());
       };
       image.onerror = () => {
         if (imageRequest !== state.imageRequest) return;
@@ -2153,7 +2784,7 @@
           const row = (cell.row_nums || [])[0];
           const column = (cell.column_nums || [])[0];
           overlays.push({
-            id: cell.id || `${region.id}-cell-${cellIndex + 1}`,
+            id: cellEvidenceId(region.id, cell, cellIndex),
             kind: "table_cell",
             text: cell.text || "",
             confidence: cell.confidence,
@@ -2178,7 +2809,8 @@
 
     function normalPreviewRegion(region) {
       const role = region.structure?.role;
-      if (["table_source", "table_candidate", "coverage_risk", "layout_block", "presentation_challenger"].includes(role)) return false;
+      if (role === "layout_block") return true;
+      if (["table_source", "table_candidate", "coverage_risk", "presentation_challenger"].includes(role)) return false;
       if (["table_candidate", "coverage_risk", "layout_block"].includes(region.kind)) return false;
       if (semanticKind(region) === "table") {
         return Array.isArray(region.structure?.cells) && region.structure.cells.length > 0;
@@ -2194,6 +2826,7 @@
       });
       const container = byId("region-categories");
       container.hidden = categories.size === 0;
+      byId("layer-count").textContent = categories.size ? `(${categories.size})` : "";
       byId("category-list").replaceChildren(...Array.from(categories, ([kind, count]) => {
         const button = document.createElement("button");
         const visible = !state.hiddenKinds.has(kind);
@@ -2202,7 +2835,7 @@
         button.className = "category-button";
         button.setAttribute("aria-pressed", String(visible));
         button.setAttribute("aria-label", `${visible ? "Hide" : "Show"} ${label} overlays, ${count}`);
-        button.style.setProperty("--category-color", regionColor());
+        button.style.setProperty("--category-color", regionColor(kind));
         const swatch = document.createElement("span");
         swatch.className = "category-swatch";
         swatch.setAttribute("aria-hidden", "true");
@@ -2220,22 +2853,35 @@
     }
 
     function handleCategory(kind) {
+      const selected = selectedRegion();
       if (state.hiddenKinds.has(kind)) state.hiddenKinds.delete(kind);
       else state.hiddenKinds.add(kind);
-      state.selectedOverlay = -1;
-      updateInspector(null);
+      dismissConfidenceTooltip();
+      if (selected && state.hiddenKinds.has(categoryKey(selected))) clearRegionSelection();
       renderCategories();
-      renderRegionList(currentOverlays());
+      if (visualTabActive()) renderRegionList(currentOverlays());
       drawPage();
     }
 
     function categoryKey(regionOrKind) {
+      if (
+        typeof regionOrKind === "object"
+        && regionOrKind !== null
+        && semanticKind(regionOrKind) === "formula"
+        && !formulaMathReady(regionOrKind)
+      ) return "formula_candidate";
       const kind = typeof regionOrKind === "object" && regionOrKind !== null
         ? regionOrKind.kind
         : regionOrKind;
       if (kind === "table_candidate") return kind;
       if (kind === "table_cell") return kind;
       return semanticKind(regionOrKind);
+    }
+
+    function formulaMathReady(region) {
+      return !["heuristic", "specialist_pending"].includes(
+        region?.structure?.formula_recognition
+      );
     }
 
     function semanticKind(regionOrKind) {
@@ -2251,6 +2897,7 @@
       if (value.includes("title")) return "title";
       if (value.includes("header")) return "header";
       if (value.includes("table")) return "table";
+      if (value.includes("formula") || value.includes("equation")) return "formula";
       if (value.includes("list")) return "list";
       if (value.includes("figure") || value.includes("image")) return "figure";
       if (value.includes("form") || value.includes("field")) return "field";
@@ -2277,22 +2924,17 @@
       context.clearRect(0, 0, canvas.width, canvas.height);
       context.drawImage(state.image, 0, 0);
       context.lineWidth = Math.max(2, canvas.width / 800);
+      const selectedIndex = selectedRegionIndex();
       currentOverlays().forEach((region, index) => {
         const box = region.bounding_box;
-        const color = index === state.selectedOverlay ? actionColor : regionColor();
+        const selected = index === selectedIndex;
+        const color = selected ? actionColor : regionColor(region);
         context.strokeStyle = color;
-        const structural = ["table", "table_cell", "table_candidate"].includes(
-          categoryKey(region)
-        );
-        if (!structural) {
-          context.fillStyle = `${color}1f`;
-          context.fillRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
-        }
+        context.fillStyle = `${color}${selected ? "24" : "0d"}`;
+        context.fillRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
         context.strokeRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
-        if (structural && index !== state.selectedOverlay) return;
-        const label = index === state.selectedOverlay
-          ? `${index + 1} ${region.kind.replaceAll("_", " ")}`
-          : String(index + 1);
+        const kind = overlayCategoryLabel(categoryKey(region));
+        const label = selected ? `${index + 1} ${kind}` : kind;
         const fontSize = Math.max(12, Math.round(canvas.width / 110));
         context.font = `600 ${fontSize}px system-ui`;
         const labelWidth = context.measureText(label).width + 10;
@@ -2302,18 +2944,30 @@
         context.fillStyle = neutralColor;
         context.fillText(label, box.left + 5, labelTop + fontSize + 1);
       });
+      const linked = pageOverlays().find(
+        (region) => region.id === state.activeEvidenceId
+      );
+      if (!linked) return;
+      const box = linked.bounding_box;
+      context.save();
+      context.lineWidth = Math.max(3, canvas.width / 500);
+      context.strokeStyle = actionColor;
+      context.fillStyle = `${actionColor}1f`;
+      context.fillRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
+      context.strokeRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
+      context.restore();
     }
 
-    function regionColor() {
-      return structureColor;
+    function regionColor(regionOrKind) {
+      return regionColors[categoryKey(regionOrKind)] || regionColors.text;
     }
 
-    canvas.addEventListener("click", (event) => {
+    function canvasRegionIndex(event) {
       const bounds = canvas.getBoundingClientRect();
       const x = (event.clientX - bounds.left) * canvas.width / bounds.width;
       const y = (event.clientY - bounds.top) * canvas.height / bounds.height;
       const regions = currentOverlays();
-      const index = regions
+      return regions
         .map((region, regionIndex) => ({ region, regionIndex }))
         .filter(({ region }) => {
           const box = region.bounding_box;
@@ -2323,7 +2977,31 @@
           (left, right) =>
             boxArea(left.region.bounding_box) - boxArea(right.region.bounding_box)
         )[0]?.regionIndex ?? -1;
+    }
+
+    canvas.addEventListener("pointermove", (event) => {
+      const regions = currentOverlays();
+      const index = canvasRegionIndex(event);
+      const region = index >= 0 ? regions[index] : null;
+      const key = region ? regionKey(region) : null;
+      if (key === state.hoveredRegionKey) return;
+      state.hoveredRegionKey = key;
+      if (!region) {
+        if (!state.pinnedConfidence) hideConfidenceInspector();
+        return;
+      }
+      showRegionConfidenceInspector(region, event.clientX, event.clientY);
+    });
+
+    canvas.addEventListener("pointerleave", () => {
+      state.hoveredRegionKey = null;
+      if (!state.pinnedConfidence) hideConfidenceInspector();
+    });
+
+    canvas.addEventListener("click", (event) => {
+      const index = canvasRegionIndex(event);
       selectRegion(index);
+      if (index < 0) dismissConfidenceTooltip();
     });
 
     function boxArea(box) {
@@ -2332,39 +3010,135 @@
 
     function renderRegionList(regions) {
       const list = byId("region-list");
+      const selectedIndex = selectedRegionIndex(regions);
       list.replaceChildren(...regions.map((region, index) => {
         const button = document.createElement("button");
         button.type = "button";
-        button.className = `region-button${index === state.selectedOverlay ? " active" : ""}`;
+        button.className = `region-button${index === selectedIndex ? " active" : ""}`;
         button.textContent = `${index + 1} ${region.kind}: ${region.text || "No text"}`;
         button.title = `Region ${index + 1}: ${region.kind}`;
         button.addEventListener("click", () => selectRegion(index));
+        button.addEventListener("focus", () => {
+          const box = button.getBoundingClientRect();
+          showRegionConfidenceInspector(region, box.right, box.top);
+        });
+        button.addEventListener("blur", () => {
+          if (!state.pinnedConfidence) hideConfidenceInspector();
+        });
         return button;
       }));
     }
 
-    function selectRegion(index) {
+    function selectRegion(index, toggle = true) {
       const regions = currentOverlays();
-      state.selectedOverlay = index >= 0 ? index : -1;
-      updateInspector(state.selectedOverlay >= 0 ? regions[state.selectedOverlay] : null);
+      const region = index >= 0 ? regions[index] : null;
+      const key = region ? regionKey(region) : null;
+      state.selectedRegionKey = toggle && key === state.selectedRegionKey ? null : key;
+      updateInspector(selectedRegion());
       renderRegionList(regions);
+      drawPage();
+    }
+
+    function regionKey(region) {
+      return evidenceKey(
+        state.response?.result.pages[state.pageIndex]?.page_number,
+        region?.id
+      );
+    }
+
+    function selectedRegionIndex(regions = currentOverlays()) {
+      return regions.findIndex((region) => regionKey(region) === state.selectedRegionKey);
+    }
+
+    function selectedRegion() {
+      const regions = currentOverlays();
+      const index = selectedRegionIndex(regions);
+      return index >= 0 ? regions[index] : null;
+    }
+
+    function clearRegionSelection() {
+      state.selectedRegionKey = null;
+      updateInspector(null);
+      if (visualTabActive()) renderRegionList(currentOverlays());
       drawPage();
     }
 
     function updateInspector(region) {
       if (!state.rereadBusy) setRereadStatus("");
       updateRereadAction(region);
+      updateReviewActions(region);
+      byId("inspector").classList.toggle("empty", !region);
       byId("region-kind").textContent = region?.kind || "None selected";
-      byId("region-confidence").textContent = region?.confidence == null ? "-" : `${(region.confidence * 100).toFixed(1)}%`;
+      const confidence = displayConfidence(region);
+      byId("region-confidence-label").textContent = confidence.label;
+      byId("region-confidence").textContent = validConfidence(confidence.value)
+        ? `${formatConfidence(confidence.value)} · Uncalibrated`
+        : "Not available";
       byId("region-provider").textContent = region?.provider || "-";
       byId("region-order").textContent = region?.reading_order ?? "-";
       const box = region?.bounding_box;
       byId("region-box").textContent = box ? `${box.left}, ${box.top}, ${box.right}, ${box.bottom} px` : "-";
       byId("region-resolution").textContent = region?.resolution || "-";
       byId("region-provenance").textContent = region?.text_provenance ? JSON.stringify(region.text_provenance) : "-";
-      byId("region-alternatives").textContent = region?.alternatives?.length ? JSON.stringify(region.alternatives) : "-";
+      byId("region-alternatives").textContent = alignedAlternatives(region);
+      byId("region-raw-alternatives").textContent = region?.alternatives?.length ? JSON.stringify(region.alternatives) : "-";
       byId("region-structure").textContent = region?.structure ? JSON.stringify(region.structure) : "-";
       byId("region-text").textContent = region?.text || "Click an overlay to inspect its evidence.";
+      byId("inspector").querySelector(".technical-details").open = false;
+      drawRegionCrop(region);
+    }
+
+    function alignedAlternatives(region) {
+      if (!region?.alternatives?.length) return "None";
+      const regionBox = normalizedBox(region.bounding_box);
+      if (!regionBox) return "None";
+      const aligned = region.alternatives.filter((alternative) => {
+        const box = normalizedBox(
+          alternative.bounding_box
+          || alternative.text_provenance?.fallback_bounding_box
+        );
+        if (!box) return false;
+        const width = Math.max(1, box.right - box.left);
+        const height = Math.max(1, box.bottom - box.top);
+        const overlapWidth = Math.max(0, Math.min(box.right, regionBox.right) - Math.max(box.left, regionBox.left));
+        const overlapHeight = Math.max(0, Math.min(box.bottom, regionBox.bottom) - Math.max(box.top, regionBox.top));
+        return overlapWidth * overlapHeight / (width * height) >= 0.5;
+      });
+      if (!aligned.length) return "None";
+      return aligned.map((alternative) => {
+        const score = validConfidence(alternative.confidence)
+          ? ` · ${formatConfidence(alternative.confidence)}`
+          : "";
+        return `${alternative.text}${score}`;
+      }).join("\n");
+    }
+
+    function drawRegionCrop(region) {
+      const box = normalizedBox(region?.bounding_box);
+      cropCanvas.hidden = !state.image || !box;
+      if (cropCanvas.hidden) return;
+      const padding = 6;
+      const left = Math.max(0, box.left - padding);
+      const top = Math.max(0, box.top - padding);
+      const right = Math.min(state.image.naturalWidth, box.right + padding);
+      const bottom = Math.min(state.image.naturalHeight, box.bottom + padding);
+      const width = Math.max(1, right - left);
+      const height = Math.max(1, bottom - top);
+      const scale = Math.min(1, 480 / width, 150 / height);
+      cropCanvas.width = Math.max(1, Math.round(width * scale));
+      cropCanvas.height = Math.max(1, Math.round(height * scale));
+      cropContext.clearRect(0, 0, cropCanvas.width, cropCanvas.height);
+      cropContext.drawImage(
+        state.image,
+        left,
+        top,
+        width,
+        height,
+        0,
+        0,
+        cropCanvas.width,
+        cropCanvas.height
+      );
     }
 
     const tabs = Array.from(document.querySelectorAll(".tab"));
@@ -2381,6 +3155,8 @@
     });
 
     function activateTab(tab) {
+      clearInteraction();
+      byId("layers-control").open = false;
       tabs.forEach((item) => {
         item.setAttribute("aria-selected", String(item === tab));
         item.tabIndex = item === tab ? 0 : -1;
@@ -2390,21 +3166,38 @@
         panel.classList.toggle("active", active);
         panel.hidden = !active;
       });
+      if (tab.id === "tab-visual") renderRegionList(currentOverlays());
+      else renderRegionList([]);
+      if (tab.id === "tab-markdown") void loadRenderedMarkdown();
+    }
+
+    function visualTabActive() {
+      return byId("tab-visual").getAttribute("aria-selected") === "true";
     }
 
     function resetResult() {
+      cancelRecovery();
       state.response = null;
       state.pageIndex = 0;
-      state.selectedOverlay = -1;
+      state.selectedRegionKey = null;
+      state.hoveredRegionKey = null;
       state.image = null;
       state.imageRequest += 1;
       state.hiddenKinds.clear();
-      state.showAllRegions = false;
-      byId("metadata").classList.remove("visible");
+      state.confidenceReview = true;
+      state.activeEvidenceId = null;
+      state.pinnedConfidence = null;
+      byId("confidence-inspector").hidden = true;
+      state.renderedMarkdown = null;
+      state.renderedMarkdownSessionId = null;
+      state.renderedMarkdownRevision = null;
       byId("timing-card").hidden = true;
-      byId("risk-card").hidden = true;
+      byId("review-details").hidden = true;
+      byId("review-details").open = false;
       byId("region-categories").hidden = true;
+      byId("layers-control").open = false;
       canvas.classList.remove("visible");
+      cropCanvas.hidden = true;
       byId("preview-empty").hidden = false;
       byId("preview-empty").textContent = "Select a document and parse it to inspect pixel-space bounding boxes.";
       byId("page-count").textContent = "No pages";
@@ -2413,24 +3206,39 @@
       byId("clear-button").disabled = true;
       updateInspector(null);
       renderRegionList([]);
-      byId("download-json").removeAttribute("href");
-      byId("download-markdown").removeAttribute("href");
-      byId("download-json").setAttribute("aria-disabled", "true");
-      byId("download-markdown").setAttribute("aria-disabled", "true");
-      byId("copy-json").disabled = true;
+      ["copy-text", "copy-markdown", "copy-json"].forEach((id) => {
+        const button = byId(id);
+        button.disabled = true;
+        button.dataset.copyState = "idle";
+        button.textContent = button.dataset.label;
+      });
+      ["download-json", "download-markdown"].forEach((id) => {
+        byId(id).removeAttribute("href");
+        byId(id).setAttribute("aria-disabled", "true");
+      });
       window.clearTimeout(state.copyResetId);
       state.copyResetId = null;
-      byId("copy-json").dataset.copyState = "idle";
-      byId("copy-json").textContent = "Copy API response JSON";
       byId("copy-status").textContent = "";
       byId("copy-status").classList.remove("error");
-      byId("panel-rendered").textContent = "No result yet.";
-      byId("panel-layout").textContent = "No result yet.";
-      byId("panel-processed").textContent = "No result yet.";
-      byId("panel-raw").querySelector("pre").textContent = "[]";
-      byId("panel-json").querySelector("pre").textContent = "{}";
-      byId("panel-failures").textContent = "No result yet.";
+      byId("rendered-toolbar").hidden = true;
+      byId("confidence-toggle").disabled = false;
+      byId("confidence-toggle").setAttribute("aria-pressed", "true");
+      byId("confidence-toggle").setAttribute("aria-label", "Turn provider confidence highlights off");
+      byId("panel-rendered").classList.add("confidence-review");
+      byId("panel-rendered").classList.add("empty-panel");
+      setEmptyContent("rendered-view", "Ready to extract", "Choose a document or public example to begin.");
+      setEmptyContent("markdown-source", "Ready to extract", "Exact downloaded Markdown will appear here.");
       activateTab(byId("tab-rendered"));
+    }
+
+    function setEmptyContent(id, title, copy) {
+      const panel = byId(id);
+      const empty = document.createElement("div");
+      const heading = document.createElement("strong");
+      empty.className = "empty-state";
+      heading.textContent = title;
+      empty.append(heading, document.createTextNode(copy));
+      panel.replaceChildren(empty);
     }
   </script>
 </body>

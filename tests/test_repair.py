@@ -11,6 +11,7 @@ from ocr_pipeline.contracts import (
     EvidenceText,
     Failure,
     PageResult,
+    TextAlternative,
     TextRegion,
 )
 from ocr_pipeline.openrouter import OpenRouterError
@@ -96,6 +97,7 @@ def test_selective_repair_accepts_only_independent_literal_agreement(
     image_path = tmp_path / "page.png"
     Image.new("RGB", (100, 80), "white").save(image_path)
     document = _document()
+    document.pages[0].regions[0].text_provenance = {"method": "initial-local"}
     primary_crop: Path | None = None
 
     def primary(crop: Path, prompt: str, schema: dict[str, object]) -> SimpleNamespace:
@@ -121,18 +123,65 @@ def test_selective_repair_accepts_only_independent_literal_agreement(
     )
 
     assert repaired.pages[0].regions[0].text == "  Cafe\u0301\r\nNorth  "
-    assert repaired.pages[0].regions[0].provider == "local"
+    assert repaired.pages[0].regions[0].confidence is None
+    assert repaired.pages[0].regions[0].provider == "primary-model-provider"
     assert repaired.pages[0].regions[0].text_provenance == {
         "mode": "hosted_patch",
+        "accepted_correction": {
+            "provider": "primary-model-provider",
+            "model": "primary-model",
+        },
         "primary_model": "primary-model",
         "primary_provider": "primary-model-provider",
         "verifier_model": "verifier-model",
         "verifier_provider": "verifier-model-provider",
     }
+    assert repaired.pages[0].regions[0].alternatives[0].text == ""
+    assert repaired.pages[0].regions[0].alternatives[0].confidence == 0.2
+    assert repaired.pages[0].regions[0].alternatives[0].provider == "local"
+    assert repaired.pages[0].regions[0].alternatives[0].text_provenance == {
+        "method": "initial-local"
+    }
+    assert repaired.pages[0].regions[0].alternatives[0].decision_state == "superseded"
     assert repaired.pages[0].route == "accept_hosted_patch"
     assert records[0]["status"] == "accepted"
     assert records[0]["reason"] == "independent_agreement"
     assert records[0]["reported_cost"] == 0.3
+
+
+def test_selective_repair_preserves_history_and_rejects_only_pending_candidates(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (100, 80), "white").save(image_path)
+    document = _document("Accession No. Accession No. Accession No.")
+    document.pages[0].regions[0].alternatives = [
+        TextAlternative("older", 0.7, "reader-a", decision_state="accepted"),
+        TextAlternative("candidate", 0.8, "reader-b", decision_state="pending"),
+    ]
+
+    def primary(*_args: object) -> SimpleNamespace:
+        return _result("Accession No.", model="primary-model", cost=0.0)
+
+    def verifier(*_args: object) -> SimpleNamespace:
+        return _result("Accession No.", model="verifier-model", cost=0.0)
+
+    repaired, records = repair_risky_regions(
+        document,
+        {1: image_path},
+        primary,
+        verifier,
+    )
+
+    assert records[0]["status"] == "accepted"
+    assert [
+        (alternative.text, alternative.decision_state)
+        for alternative in repaired.pages[0].regions[0].alternatives
+    ] == [
+        ("older", "accepted"),
+        ("candidate", "rejected"),
+        ("Accession No. Accession No. Accession No.", "superseded"),
+    ]
 
 
 def test_selective_repair_abstains_without_improvement(tmp_path: Path) -> None:
@@ -164,6 +213,7 @@ def test_selective_repair_accepts_repeated_text_replacement(tmp_path: Path) -> N
     image_path = tmp_path / "page.png"
     Image.new("RGB", (100, 80), "white").save(image_path)
     document = _document("Accession No. Accession No. Accession No.")
+    document.pages[0].regions[0].text_provenance = {"method": "initial-local"}
 
     def primary(*_args: object) -> SimpleNamespace:
         return _result("Accession No.", model="primary-model", cost=0.0)
@@ -179,6 +229,23 @@ def test_selective_repair_accepts_repeated_text_replacement(tmp_path: Path) -> N
     )
 
     assert repaired.pages[0].regions[0].text == "Accession No."
+    assert repaired.pages[0].regions[0].provider == "primary-model-provider"
+    assert [
+        (
+            alternative.text,
+            alternative.provider,
+            alternative.text_provenance,
+            alternative.decision_state,
+        )
+        for alternative in repaired.pages[0].regions[0].alternatives
+    ] == [
+        (
+            "Accession No. Accession No. Accession No.",
+            "local",
+            {"method": "initial-local"},
+            "superseded",
+        )
+    ]
     assert records[0]["status"] == "accepted"
 
 

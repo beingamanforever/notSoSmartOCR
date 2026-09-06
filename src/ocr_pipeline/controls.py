@@ -22,6 +22,7 @@ MARK_MODEL = {
     "origin": "Open Source Vision Foundation",
     "license": "Apache-2.0",
 }
+MATH_TYPES = frozenset({"equation", "formula", "math"})
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,11 @@ class GeometricControlStage:
         regions: list[TextRegion],
     ) -> list[TextRegion]:
         cv2, np, gray = _load_gray(image_path)
+        detection_group_size = (
+            1
+            if _form_like_regions(regions, self.label_provider)
+            else self.minimum_group_size
+        )
         detections = _square_detections(gray, cv2, np)
         detections = [
             detection
@@ -69,6 +75,7 @@ class GeometricControlStage:
                 regions,
                 self.label_provider,
             )
+            and not _inside_math_region(detection.bounding_box, regions)
         ]
         anchored_marks = _anchored_marks(
             gray,
@@ -78,8 +85,11 @@ class GeometricControlStage:
             cv2,
             np,
         )
-        if len(anchored_marks) >= self.minimum_group_size:
-            detections = _merge_detections(detections, anchored_marks)
+        anchored_marks = _supported_anchored_groups(
+            anchored_marks,
+            detection_group_size,
+        )
+        detections = _merge_detections(detections, anchored_marks)
         table_marks = _table_marks(gray, regions, detections, cv2, np)
         detections = [
             detection
@@ -105,14 +115,25 @@ class GeometricControlStage:
         geometric_count = sum(
             detection.source != "table_mark" for detection in detections
         )
-        if geometric_count < self.minimum_group_size:
+        if geometric_count < detection_group_size:
             supported = [
                 (detection, label)
                 for detection, label in zip(detections, labels, strict=True)
                 if detection.source != "square"
-                or detection.state != "unselected"
                 or label is None
                 or _explicit_control_label(label)
+                or (
+                    detection.state != "unselected"
+                    and (
+                        _descriptive_control_label(label)
+                        or _supported_short_option_label(
+                            detection,
+                            label,
+                            detections,
+                            labels,
+                        )
+                    )
+                )
             ]
             detections = [detection for detection, _ in supported]
             labels = [label for _, label in supported]
@@ -169,6 +190,17 @@ class GeometricControlStage:
 def detect_controls(image_path: Path) -> list[ControlDetection]:
     cv2, np, gray = _load_gray(image_path)
     return _square_detections(gray, cv2, np)
+
+
+def _form_like_regions(regions: list[TextRegion], label_provider: str | None) -> bool:
+    labels = {
+        region.id
+        for region in regions
+        if region.resolution == "resolved"
+        and ":" in region.text
+        and (label_provider is None or region.provider == label_provider)
+    }
+    return len(labels) >= 6
 
 
 def _load_gray(image_path: Path) -> tuple[Any, Any, Any]:
@@ -234,6 +266,8 @@ def _anchored_marks(
     for region in regions:
         if region.kind in {"checkbox", "table", "coverage_risk", "page_text"}:
             continue
+        if _math_region(region):
+            continue
         if label_provider is not None and region.provider != label_provider:
             continue
         if not _readable_label(region.text):
@@ -260,6 +294,7 @@ def _anchored_marks(
                 bottom,
             )
         )
+        region_detections = []
         for slot in slots:
             for detection in _marks_in_slot(gray, slot, line_height, cv2, np):
                 if _overlaps_detection(detection.bounding_box, existing + detections):
@@ -276,8 +311,72 @@ def _anchored_marks(
                     label_provider,
                 ):
                     continue
-                detections.append(detection)
+                region_detections.append(detection)
+        if region_detections:
+            detections.append(
+                min(
+                    region_detections,
+                    key=lambda detection: (
+                        _horizontal_gap(detection.bounding_box, box),
+                        abs(_center(detection.bounding_box)[1] - _center(box)[1]),
+                    ),
+                )
+            )
     return detections
+
+
+def _supported_anchored_groups(
+    detections: list[ControlDetection],
+    minimum_group_size: int,
+) -> list[ControlDetection]:
+    if minimum_group_size == 1:
+        return detections
+
+    remaining = set(range(len(detections)))
+    supported = []
+    while remaining:
+        pending = [remaining.pop()]
+        group = []
+        while pending:
+            index = pending.pop()
+            group.append(index)
+            linked = {
+                candidate
+                for candidate in remaining
+                if any(
+                    _marks_share_axis(
+                        detections[candidate].bounding_box,
+                        detections[member].bounding_box,
+                    )
+                    for member in group
+                )
+            }
+            remaining.difference_update(linked)
+            pending.extend(linked)
+        if len(group) >= minimum_group_size:
+            supported.extend(detections[index] for index in sorted(group))
+    return supported
+
+
+def _marks_share_axis(first: BoundingBox, second: BoundingBox) -> bool:
+    first_side = _side(first)
+    second_side = _side(second)
+    if min(first_side, second_side) <= 0:
+        return False
+    if not 0.6 <= first_side / second_side <= 1.67:
+        return False
+    first_x, first_y = _center(first)
+    second_x, second_y = _center(second)
+    tolerance = max(first_side, second_side)
+    return abs(first_x - second_x) <= tolerance or abs(first_y - second_y) <= tolerance
+
+
+def _horizontal_gap(first: BoundingBox, second: BoundingBox) -> int:
+    if first.right <= second.left:
+        return second.left - first.right
+    if second.right <= first.left:
+        return first.left - second.right
+    return 0
 
 
 def _marks_in_slot(
@@ -802,19 +901,23 @@ def _header_rows(
     cells: dict[tuple[int, int], dict[str, Any]],
 ) -> list[int]:
     rows = sorted({row for row, _ in cells})
+    leading_rows = set(rows[:2])
     return [
         row
         for row in rows
-        if sum(
-            _header_text(cell.get("text", ""))
-            for (cell_row, _), cell in cells.items()
-            if cell_row == row
-        )
-        >= 3
-        or any(
+        if any(
             _control_header(cell.get("text", ""))
             for (cell_row, _), cell in cells.items()
             if cell_row == row
+        )
+        or (
+            row in leading_rows
+            and sum(
+                _header_text(cell.get("text", ""))
+                for (cell_row, _), cell in cells.items()
+                if cell_row == row
+            )
+            >= 3
         )
     ]
 
@@ -847,6 +950,13 @@ def _control_columns(
         for column, header in headers.items()
         if _control_header(header.get("text", ""))
     }
+    header_columns = sorted(headers)
+    inferred_grid = len(header_columns) >= 3 and header_columns == list(
+        range(header_columns[0], header_columns[-1] + 1)
+    )
+    if not inferred_grid:
+        return columns
+
     data_rows = sorted({row for row, _ in cells if header_row < row < next_header})
     for row in data_rows:
         mark_columns = [
@@ -991,17 +1101,18 @@ def _has_table_mark_shape(component: Any, cv2: Any, np: Any) -> bool:
     )
     if lines is None:
         return False
-    longest_diagonal = max(
-        (
-            float(np.hypot(right - left, bottom - top))
-            for left, top, right, bottom in lines.reshape(-1, 4)
-            if 15
-            <= abs(float(np.degrees(np.arctan2(bottom - top, right - left))))
-            <= 80
-        ),
-        default=0.0,
+    diagonal_lengths = {False: 0.0, True: 0.0}
+    for left, top, right, bottom in lines.reshape(-1, 4):
+        if right < left:
+            left, top, right, bottom = right, bottom, left, top
+        angle = float(np.degrees(np.arctan2(bottom - top, right - left)))
+        if 15 <= abs(angle) <= 80:
+            length = float(np.hypot(right - left, bottom - top))
+            diagonal_lengths[angle > 0] = max(diagonal_lengths[angle > 0], length)
+    minimum_dimension = min(width, height)
+    return max(diagonal_lengths.values()) >= minimum_dimension * 0.35 and all(
+        length >= minimum_dimension * 0.18 for length in diagonal_lengths.values()
     )
-    return longest_diagonal >= min(width, height) * 0.35
 
 
 def _has_mark_shape(component: Any, cv2: Any, np: Any) -> bool:
@@ -1352,6 +1463,7 @@ def _control_region(
     resolution = "resolved"
     if state == "ambiguous" or (label is None and detection.label is None):
         resolution = "unreadable"
+    state_confidence = detection.confidence if resolution == "resolved" else None
     symbol = {"selected": "[x]", "unselected": "[ ]", "ambiguous": "[?]"}[state]
     label_text = detection.label or _semantic_label(label_regions)
     label_ids = list(detection.label_ids) or [region.id for region in label_regions]
@@ -1373,9 +1485,13 @@ def _control_region(
         "control_type": "checkbox",
         "state": state,
         "observed_state": observed_state,
+        "state_confidence": state_confidence,
+        "observed_mark_confidence": detection.confidence,
         "selection_supported": selection_supported,
         "label": label_text or None,
         "label_evidence_ids": label_ids,
+        "association_status": "linked" if label_text else "unmatched",
+        "association_confidence": None,
         "ink_ratio": round(detection.ink_ratio, 4),
         "model": model,
     }
@@ -1385,7 +1501,7 @@ def _control_region(
         id=f"p{page_number}-controls-checkbox-{index}",
         kind="checkbox",
         text=f"{symbol} {label_text}".strip(),
-        confidence=detection.confidence,
+        confidence=state_confidence,
         bounding_box=detection.bounding_box,
         reading_order=(
             detection.reading_order
@@ -1456,6 +1572,34 @@ def _contains_readable_text(
         ):
             return True
     return False
+
+
+def _inside_math_region(
+    control: BoundingBox,
+    regions: list[TextRegion],
+) -> bool:
+    center_x, center_y = _center(control)
+    return any(
+        _math_region(region)
+        and region.bounding_box.left <= center_x <= region.bounding_box.right
+        and region.bounding_box.top <= center_y <= region.bounding_box.bottom
+        for region in regions
+    )
+
+
+def _math_region(region: TextRegion) -> bool:
+    structure = region.structure if isinstance(region.structure, dict) else {}
+    values = (
+        region.kind,
+        structure.get("role"),
+        structure.get("semantic_class"),
+        structure.get("block_type"),
+    )
+    return any(
+        isinstance(value, str)
+        and value.strip().casefold().replace("-", "_") in MATH_TYPES
+        for value in values
+    )
 
 
 def _inside_text_region(
@@ -1609,6 +1753,46 @@ def _explicit_control_label(region: TextRegion) -> bool:
         "control_label",
         "form_field",
     }
+
+
+def _descriptive_control_label(region: TextRegion) -> bool:
+    return any(
+        sum(character.isalnum() for character in token) >= 2
+        for token in region.text.split()
+    )
+
+
+def _supported_short_option_label(
+    detection: ControlDetection,
+    label: TextRegion,
+    detections: list[ControlDetection],
+    labels: list[TextRegion | None],
+) -> bool:
+    label_text = _short_option_text(label.text)
+    if label_text is None:
+        return False
+    side = _side(detection.bounding_box)
+    center_x, center_y = _center(detection.bounding_box)
+    for peer, peer_label in zip(detections, labels, strict=True):
+        if peer is detection or peer_label is None:
+            continue
+        peer_text = _short_option_text(peer_label.text)
+        if peer_text is None or peer_text == label_text:
+            continue
+        peer_side = _side(peer.bounding_box)
+        peer_x, peer_y = _center(peer.bounding_box)
+        if 0.75 <= peer_side / max(1, side) <= 1.25 and min(
+            abs(peer_x - center_x), abs(peer_y - center_y)
+        ) <= max(side, peer_side):
+            return True
+    return False
+
+
+def _short_option_text(text: str) -> str | None:
+    normalized = "".join(
+        character.casefold() for character in text if character.isalnum()
+    )
+    return normalized if len(normalized) == 1 else None
 
 
 def _center(box: BoundingBox) -> tuple[float, float]:

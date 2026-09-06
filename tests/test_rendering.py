@@ -1,4 +1,7 @@
-from ocr_pipeline.rendering import render_page_markdown
+from dataclasses import asdict
+
+from ocr_pipeline.contracts import BoundingBox, TextRegion
+from ocr_pipeline.rendering import render_evidence, render_page_markdown
 
 
 def _region(
@@ -18,6 +21,66 @@ def _region(
         "bounding_box": box,
         "text_provenance": {"merge_level": merge_level},
     }
+
+
+def test_resolved_formula_uses_owner_text_in_plain_and_markdown_rendering() -> None:
+    child = TextRegion(
+        id="child",
+        kind="word",
+        text="stale child text",
+        confidence=0.9,
+        bounding_box=BoundingBox(10, 10, 100, 30),
+        reading_order=1,
+        provider="reader",
+        structure={"layout_owner_id": "formula"},
+    )
+    formula = TextRegion(
+        id="formula",
+        kind="layout_block",
+        text=r"\int_0^1 x^2\,dx = \frac{1}{3}",
+        confidence=0.9,
+        bounding_box=BoundingBox(10, 10, 200, 40),
+        reading_order=2,
+        provider="canonical",
+        structure={
+            "role": "layout_block",
+            "block_type": "formula",
+            "lines": [{"evidence_ids": ["child"]}],
+        },
+    )
+    regions = [child, formula]
+
+    evidence = render_evidence(regions)
+
+    assert evidence.value == formula.text
+    assert (
+        render_page_markdown(
+            [asdict(region) for region in regions], evidence.evidence_ids
+        )
+        == f"$$\n{formula.text}\n$$"
+    )
+
+
+def test_heuristic_formula_text_is_not_wrapped_as_verified_math() -> None:
+    formula = TextRegion(
+        id="candidate",
+        kind="layout_block",
+        text="to = be",
+        confidence=None,
+        bounding_box=BoundingBox(10, 10, 80, 30),
+        reading_order=1,
+        provider="evidence-spatial-layout",
+        structure={
+            "role": "layout_block",
+            "block_type": "formula",
+            "formula_recognition": "heuristic",
+        },
+    )
+
+    evidence = render_evidence([formula])
+
+    assert evidence.value == "to = be"
+    assert render_page_markdown([asdict(formula)], evidence.evidence_ids) == "to = be"
 
 
 def test_markdown_groups_word_level_text_regions_on_the_same_row() -> None:
@@ -102,7 +165,7 @@ def test_markdown_leaves_unreadable_control_state_blank_without_changing_evidenc
 
     markdown = render_page_markdown([control], [])
 
-    assert markdown == "- Foley (specify type and specific orders)"
+    assert markdown == "- [?] Foley (specify type and specific orders)"
     assert control["text"] == "[?] Foley (specify type and specific orders)"
     assert control["resolution"] == "unreadable"
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import tempfile
 import unicodedata
 from pathlib import Path
@@ -15,7 +16,7 @@ from .cascade import (
     identify_risky_regions,
     regions_have_fewer_risks,
 )
-from .contracts import DocumentResult, TextRegion
+from .contracts import DocumentResult, TextAlternative, TextRegion
 from .openrouter import OpenRouterError
 
 PATCHABLE_RISKS = {
@@ -227,7 +228,14 @@ def repair_risky_regions(
                 )
                 continue
 
-            _record_hosted_patch(candidate, page_number, region_id, primary, verifier)
+            _record_hosted_patch(
+                candidate,
+                page_number,
+                region_id,
+                region,
+                primary,
+                verifier,
+            )
             current = candidate
             risks_by_id = identify_risky_regions(current)
             records.append(
@@ -389,13 +397,40 @@ def _record_hosted_patch(
     document: DocumentResult,
     page_number: int,
     region_id: str,
+    incumbent: TextRegion,
     primary: Mapping[str, Any],
     verifier: Mapping[str, Any],
 ) -> None:
     page = next(page for page in document.pages if page.page_number == page_number)
     region = next(region for region in page.regions if region.id == region_id)
+    correcting_provider = str(
+        primary.get("provider") or primary.get("model") or "hosted-visual-repair"
+    )
+    history = []
+    for alternative in region.alternatives:
+        historical = copy.deepcopy(alternative)
+        if historical.decision_state == "pending":
+            historical.decision_state = "rejected"
+        history.append(historical)
+    history.append(
+        TextAlternative(
+            text=incumbent.text,
+            confidence=incumbent.confidence,
+            provider=incumbent.provider,
+            text_provenance=copy.deepcopy(incumbent.text_provenance),
+            decision_state="superseded",
+        )
+    )
+    region.alternatives = history
+    region.confidence = None
+    region.provider = correcting_provider
+    region.resolution = "resolved"
     region.text_provenance = {
         "mode": "hosted_patch",
+        "accepted_correction": {
+            "provider": correcting_provider,
+            "model": primary.get("model"),
+        },
         "primary_model": primary.get("model"),
         "primary_provider": primary.get("provider"),
         "verifier_model": verifier.get("model"),

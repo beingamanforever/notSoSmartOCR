@@ -32,6 +32,8 @@ class CropReader(Protocol):
     @property
     def generation_config(self) -> object: ...
 
+    def check_health(self) -> None: ...
+
     def transcribe_crops(
         self,
         images: Sequence[Image.Image],
@@ -50,6 +52,7 @@ def create_server(
 ) -> ThreadingHTTPServer:
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("Falcon-OCR service must bind to loopback")
+    reader.check_health()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802

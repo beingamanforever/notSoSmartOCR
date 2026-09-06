@@ -267,6 +267,8 @@ def _merge_chain(
             cell["continuation_source"] = {
                 "page_number": part.page_number,
                 "table_id": part.table.id,
+                "cell_id": cell.get("id"),
+                "evidence_ids": copy.deepcopy(cell.get("evidence_ids", [])),
                 "row_nums": list(topology_cell.rows),
             }
             cells.append(cell)

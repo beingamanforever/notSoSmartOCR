@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from functools import partial
+from math import ceil, floor
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -44,6 +45,13 @@ VERTICAL_RESIDUAL_ASPECT_RATIO = 2.0
 VERTICAL_RESIDUAL_MARGIN_FRACTION = 0.2
 VERTICAL_RESIDUAL_MAX_OVERLAP = 0.2
 VERTICAL_RESIDUAL_MIN_CHARACTERS = 8
+MARGIN_ROUTER_MAX_SIZE = 512
+MARGIN_ROUTER_BAND_FRACTION = 0.2
+MARGIN_ROUTER_EDGE_FRACTION = 0.01
+MARGIN_ROUTER_DARK_PIXEL = 160
+MARGIN_ROUTER_MIN_DARK_RATIO = 0.006
+MARGIN_ROUTER_MIN_ROW_COVERAGE = 0.12
+MARGIN_ROUTER_MIN_COLUMN_COVERAGE = 0.1
 DOCTR_ARCH = "mobilenet_v3_small_page_orientation"
 DOCTR_MODEL = {
     "library": "python-doctr",
@@ -155,6 +163,7 @@ class OrientationReader:
         osd_detector: Callable[[Path], dict[str, object]] | None = None,
         osd_min_confidence: float = 15.0,
         orientation_detector: Callable[[Path], dict[str, object]] | None = None,
+        margin_reader: LocalReader | None = None,
         defer_restore: bool = False,
     ) -> None:
         if osd_min_confidence < 0:
@@ -163,6 +172,7 @@ class OrientationReader:
         self.name = f"{reader.name}-oriented"
         self.osd_min_confidence = osd_min_confidence
         self.orientation_detector = orientation_detector
+        self.margin_reader = margin_reader or reader
         self.defer_restore = defer_restore
         self.osd_detector = osd_detector
         if self.osd_detector is None and osd_executable:
@@ -183,6 +193,7 @@ class OrientationReader:
             "view_failures": {},
             "nested_reader_reviews": {},
             "view_reader_execution": {},
+            "margin_view_failures": {},
         }
         try:
             with Image.open(image_path) as source:
@@ -218,6 +229,7 @@ class OrientationReader:
                 angles,
                 assessment,
             )
+            rankable_views = list(views)
             if deferred_angles:
                 initial_score = views[0][2] if len(views) == 1 else None
                 accepted = _accept_upright_evidence(initial_score)
@@ -228,15 +240,31 @@ class OrientationReader:
                     "evidence": initial_score,
                 }
                 if not accepted:
-                    views.extend(
-                        self._read_views(
-                            normalized,
-                            root,
-                            page_number,
-                            deferred_angles,
-                            assessment,
-                        )
+                    expanded = self._read_views(
+                        normalized,
+                        root,
+                        page_number,
+                        deferred_angles,
+                        assessment,
                     )
+                    views.extend(expanded)
+                    rankable_views.extend(expanded)
+
+            margin_router = _vertical_margin_router(normalized, rankable_views)
+            assessment["vertical_margin_router"] = margin_router
+            margin_views = []
+            if (
+                margin_router["routed"]
+                and len(rankable_views) == 1
+                and rankable_views[0][0] == 0
+            ):
+                margin_views = self._read_margin_views(
+                    normalized,
+                    root,
+                    page_number,
+                    margin_router,
+                    assessment,
+                )
 
         if not views:
             failures = assessment["view_failures"]
@@ -250,7 +278,7 @@ class OrientationReader:
             self._fail(assessment, "orientation_views_failed", message)
             raise ReaderError("orientation_views_failed", message)
 
-        ranked, selection_reason = _rank_views(views)
+        ranked, selection_reason = _rank_views(rankable_views)
         angle, view_size, score, regions = ranked[0]
         assessment.update(
             {
@@ -315,10 +343,21 @@ class OrientationReader:
                 page_number=page_number,
                 assessment=assessment,
             )
+            margin_residuals = _recover_margin_residuals(
+                margin_views,
+                selected_angle=angle,
+                selected_regions=[*restored, *residuals],
+                original_size=original_size,
+                target_size=view_size if self.defer_restore else original_size,
+                target_angle=angle if self.defer_restore else 0,
+                page_number=page_number,
+                assessment=assessment,
+            )
         except ReaderError as error:
             self._fail(assessment, error.code, str(error))
             raise
         restored.extend(residuals)
+        restored.extend(margin_residuals)
         assessment["vertical_residual_recovery"] = {
             "method": "orthogonal_margin_residual",
             "recovered_regions": len(residuals),
@@ -334,6 +373,29 @@ class OrientationReader:
                 }
             ),
         }
+        assessment["side_margin_recovery"] = {
+            "method": "side_margin_crop_rotation",
+            "recovered_regions": len(margin_residuals),
+            "source_margins": sorted(
+                {
+                    str(region.text_provenance["orientation_residual"]["source_margin"])
+                    for region in margin_residuals
+                    if region.text_provenance is not None
+                }
+            ),
+        }
+        if margin_router["routed"] and not margin_residuals:
+            failures = assessment["margin_view_failures"]
+            if margin_views:
+                reason = "side_margin_recovery_unsupported"
+            elif any(
+                failure.get("code") != "empty_output" for failure in failures.values()
+            ):
+                reason = "side_margin_recovery_failed"
+            else:
+                reason = "side_margin_recovery_empty"
+            review_reasons.append(reason)
+            assessment["status"] = "review_recommended"
         self._save_assessment(page_number, assessment)
         return restored
 
@@ -554,6 +616,61 @@ class OrientationReader:
             score = _orientation_score(regions)
             assessment["view_scores"][str(angle)] = score
             views.append((angle, image.size, score, regions))
+        return views
+
+    def _read_margin_views(
+        self,
+        source: Image.Image,
+        root: Path,
+        page_number: int,
+        router: dict[str, object],
+        assessment: dict[str, Any],
+    ) -> list[
+        tuple[str, tuple[int, int, int, int], int, tuple[int, int], list[TextRegion]]
+    ]:
+        views = []
+        margins = router.get("margins")
+        routed_sides = router.get("routed_sides")
+        if not isinstance(margins, dict) or not isinstance(routed_sides, list):
+            return views
+        for side in routed_sides:
+            stats = margins.get(side)
+            if not isinstance(side, str) or not isinstance(stats, dict):
+                continue
+            crop_values = stats.get("crop")
+            if not (
+                isinstance(crop_values, list)
+                and len(crop_values) == 4
+                and all(isinstance(value, int) for value in crop_values)
+            ):
+                continue
+            crop_box = (
+                crop_values[0],
+                crop_values[1],
+                crop_values[2],
+                crop_values[3],
+            )
+            crop = source.crop(crop_box)
+            for angle in (90, 270):
+                image = crop.transpose(ROTATIONS[angle])
+                path = root / f"page-margin-{side}-{angle}.png"
+                image.save(path, format="PNG")
+                key = f"{side}:{angle}"
+                try:
+                    regions = self.margin_reader.read(path, page_number)
+                except ReaderError as error:
+                    assessment["margin_view_failures"][key] = {
+                        "code": error.code,
+                        "message": str(error),
+                    }
+                    continue
+                if not regions:
+                    assessment["margin_view_failures"][key] = {
+                        "code": "empty_output",
+                        "message": "The reader returned no text regions",
+                    }
+                    continue
+                views.append((side, crop_box, angle, image.size, regions))
         return views
 
     def _nested_reader_execution(
@@ -952,6 +1069,242 @@ def _recover_vertical_residuals(
     return recovered
 
 
+def _recover_margin_residuals(
+    views: list[
+        tuple[str, tuple[int, int, int, int], int, tuple[int, int], list[TextRegion]]
+    ],
+    *,
+    selected_angle: int,
+    selected_regions: list[TextRegion],
+    original_size: tuple[int, int],
+    target_size: tuple[int, int],
+    target_angle: int,
+    page_number: int,
+    assessment: dict[str, Any],
+) -> list[TextRegion]:
+    candidates: list[
+        tuple[TextRegion, str, tuple[int, int, int, int], int, BoundingBox]
+    ] = []
+    selected_text = {_normalized_text(region.text) for region in selected_regions}
+    for side, crop_box, angle, view_size, regions in views:
+        crop_left, crop_top, crop_right, crop_bottom = crop_box
+        crop_size = (crop_right - crop_left, crop_bottom - crop_top)
+        for region in regions:
+            if not _is_margin_residual_source(region):
+                continue
+            try:
+                crop_region = _restore_box(
+                    region.bounding_box,
+                    angle,
+                    crop_size,
+                    view_size,
+                )
+            except ReaderError:
+                continue
+            restored_box = BoundingBox(
+                crop_region.left + crop_left,
+                crop_region.top + crop_top,
+                crop_region.right + crop_left,
+                crop_region.bottom + crop_top,
+            )
+            if not _is_vertical_margin_box(
+                restored_box,
+                original_size,
+                minimum_aspect_ratio=0.5,
+            ):
+                continue
+            target_box = (
+                restored_box
+                if target_angle == 0
+                else _rotate_box(
+                    restored_box,
+                    target_angle,
+                    original_size,
+                    target_size,
+                )
+            )
+            if _normalized_text(region.text) in selected_text:
+                continue
+            if any(
+                _box_overlap(target_box, selected.bounding_box)
+                > VERTICAL_RESIDUAL_MAX_OVERLAP
+                for selected in selected_regions
+            ):
+                continue
+            candidates.append((region, side, crop_box, angle, target_box))
+
+    supported = [
+        candidate
+        for candidate in candidates
+        if _has_margin_support(candidate, candidates)
+    ]
+    accepted: list[
+        tuple[TextRegion, str, tuple[int, int, int, int], int, BoundingBox]
+    ] = []
+    for candidate in sorted(
+        supported,
+        key=lambda item: (
+            -_box_area(item[4]),
+            -(item[0].confidence or 0.0),
+            item[1],
+            item[3],
+            item[0].reading_order,
+        ),
+    ):
+        if any(_box_overlap(candidate[4], existing[4]) >= 0.5 for existing in accepted):
+            continue
+        accepted.append(candidate)
+
+    existing_ids = {region.id for region in selected_regions}
+    next_order = max((region.reading_order for region in selected_regions), default=0)
+    recovered = []
+    for source, side, crop_box, angle, box in sorted(
+        accepted,
+        key=lambda item: (item[1], item[3], item[0].reading_order),
+    ):
+        identifier = len(recovered) + 1
+        region_id = f"p{page_number}-orientation-residual-{identifier}"
+        while region_id in existing_ids:
+            identifier += 1
+            region_id = f"p{page_number}-orientation-residual-{identifier}"
+        existing_ids.add(region_id)
+        provenance = dict(source.text_provenance or {})
+        provenance["orientation_residual"] = {
+            "method": "side_margin_crop_rotation",
+            "source_view_angle": angle,
+            "selected_view_angle": selected_angle,
+            "source_margin": side,
+            "source_crop": list(crop_box),
+            "original_provider": source.provider,
+        }
+        recovered.append(
+            _annotate_region(
+                replace(
+                    source,
+                    id=region_id,
+                    bounding_box=box,
+                    reading_order=next_order + len(recovered) + 1,
+                    text_provenance=provenance,
+                    alternatives=list(source.alternatives),
+                ),
+                assessment,
+            )
+        )
+    return recovered
+
+
+def _vertical_margin_router(
+    image: Image.Image,
+    views: list[tuple[int, tuple[int, int], dict[str, object], list[TextRegion]]],
+) -> dict[str, object]:
+    upright = next((regions for angle, _, _, regions in views if angle == 0), None)
+    if upright is None:
+        return {
+            "routed": False,
+            "reason": "upright_view_unavailable",
+            "margins": {},
+            "routed_sides": [],
+        }
+
+    width, height = image.size
+    scale = min(1.0, MARGIN_ROUTER_MAX_SIZE / max(width, height))
+    reduced = image.convert("L").resize(
+        (max(1, round(width * scale)), max(1, round(height * scale))),
+        Image.Resampling.BOX,
+    )
+    reduced_width, reduced_height = reduced.size
+    covered = bytearray(reduced_width * reduced_height)
+    for region in upright:
+        box = region.bounding_box
+        left = max(0, min(reduced_width, floor(box.left * scale)))
+        top = max(0, min(reduced_height, floor(box.top * scale)))
+        right = max(0, min(reduced_width, ceil(box.right * scale)))
+        bottom = max(0, min(reduced_height, ceil(box.bottom * scale)))
+        if left >= right or top >= bottom:
+            continue
+        row = bytes([1]) * (right - left)
+        for y in range(top, bottom):
+            start = y * reduced_width + left
+            covered[start : start + len(row)] = row
+
+    pixels = list(reduced.getdata())
+    edge = max(1, round(reduced_width * MARGIN_ROUTER_EDGE_FRACTION))
+    band = max(edge + 1, round(reduced_width * MARGIN_ROUTER_BAND_FRACTION))
+    ranges = {
+        "left": (edge, band),
+        "right": (reduced_width - band, reduced_width - edge),
+    }
+    crop_boxes = {
+        "left": [0, 0, max(1, ceil(width * MARGIN_ROUTER_BAND_FRACTION)), height],
+        "right": [
+            min(width - 1, floor(width * (1 - MARGIN_ROUTER_BAND_FRACTION))),
+            0,
+            width,
+            height,
+        ],
+    }
+    margins = {
+        side: {
+            **_uncovered_margin_ink(
+                pixels,
+                covered,
+                reduced_width,
+                reduced_height,
+                left,
+                right,
+            ),
+            "crop": crop_boxes[side],
+        }
+        for side, (left, right) in ranges.items()
+        if left < right
+    }
+    routed_sides = [
+        side
+        for side, stats in margins.items()
+        if stats["dark_ratio"] >= MARGIN_ROUTER_MIN_DARK_RATIO
+        and stats["row_coverage"] >= MARGIN_ROUTER_MIN_ROW_COVERAGE
+        and stats["column_coverage"] >= MARGIN_ROUTER_MIN_COLUMN_COVERAGE
+    ]
+    return {
+        "routed": bool(routed_sides),
+        "reason": (
+            "uncovered_side_margin_ink" if routed_sides else "no_margin_evidence"
+        ),
+        "margins": margins,
+        "routed_sides": routed_sides,
+    }
+
+
+def _uncovered_margin_ink(
+    pixels: list[int],
+    covered: bytearray,
+    width: int,
+    height: int,
+    left: int,
+    right: int,
+) -> dict[str, float]:
+    dark_pixels = 0
+    dark_rows = 0
+    dark_columns: set[int] = set()
+    minimum_row_pixels = max(2, (right - left) // 50)
+    for y in range(height):
+        row_dark = 0
+        offset = y * width
+        for x in range(left, right):
+            index = offset + x
+            if not covered[index] and pixels[index] < MARGIN_ROUTER_DARK_PIXEL:
+                row_dark += 1
+                dark_columns.add(x)
+        dark_pixels += row_dark
+        dark_rows += int(row_dark >= minimum_row_pixels)
+    area = max((right - left) * height, 1)
+    return {
+        "dark_ratio": round(dark_pixels / area, 6),
+        "row_coverage": round(dark_rows / max(height, 1), 6),
+        "column_coverage": round(len(dark_columns) / max(right - left, 1), 6),
+    }
+
+
 def _is_vertical_residual_source(region: TextRegion) -> bool:
     if region.kind not in {"text", "word"} or region.resolution != "resolved":
         return False
@@ -965,9 +1318,22 @@ def _is_vertical_residual_source(region: TextRegion) -> bool:
     return width >= height * VERTICAL_RESIDUAL_ASPECT_RATIO
 
 
+def _is_margin_residual_source(region: TextRegion) -> bool:
+    if region.kind not in {"text", "word"} or region.resolution != "resolved":
+        return False
+    if (
+        not region.text.strip()
+        or (region.confidence or 0.0) < VERTICAL_RESIDUAL_CONFIDENCE
+    ):
+        return False
+    return True
+
+
 def _is_vertical_margin_box(
     box: BoundingBox,
     page_size: tuple[int, int],
+    *,
+    minimum_aspect_ratio: float = VERTICAL_RESIDUAL_ASPECT_RATIO,
 ) -> bool:
     width = box.right - box.left
     height = box.bottom - box.top
@@ -976,7 +1342,7 @@ def _is_vertical_margin_box(
     in_side_margin = center <= page_width * VERTICAL_RESIDUAL_MARGIN_FRACTION or (
         center >= page_width * (1 - VERTICAL_RESIDUAL_MARGIN_FRACTION)
     )
-    return height >= width * VERTICAL_RESIDUAL_ASPECT_RATIO and in_side_margin
+    return height >= width * minimum_aspect_ratio and in_side_margin
 
 
 def _has_vertical_support(
@@ -991,6 +1357,41 @@ def _has_vertical_support(
         for other, other_angle, other_box in candidates
         if other_angle == angle and _horizontal_overlap(box, other_box) >= 0.5
     )
+    return aligned_characters >= VERTICAL_RESIDUAL_MIN_CHARACTERS
+
+
+def _has_margin_support(
+    candidate: tuple[
+        TextRegion,
+        str,
+        tuple[int, int, int, int],
+        int,
+        BoundingBox,
+    ],
+    candidates: list[
+        tuple[
+            TextRegion,
+            str,
+            tuple[int, int, int, int],
+            int,
+            BoundingBox,
+        ]
+    ],
+) -> bool:
+    region, side, _, angle, box = candidate
+    text = _normalized_text(region.text)
+    aligned_characters = 0
+    for other_candidate in candidates:
+        if other_candidate is candidate:
+            continue
+        other, other_side, _, other_angle, other_box = other_candidate
+        other_text = _normalized_text(other.text)
+        if (
+            other_side == side
+            and _horizontal_overlap(box, other_box) >= 0.5
+            and (other_angle == angle or other_text == text)
+        ):
+            aligned_characters += len(other_text)
     return aligned_characters >= VERTICAL_RESIDUAL_MIN_CHARACTERS
 
 
@@ -1097,11 +1498,6 @@ def _annotate_region(
     }
     if assessment["nested_reader_reviews"]:
         orientation["nested_reader_reviews"] = dict(assessment["nested_reader_reviews"])
-    selected_execution = assessment["view_reader_execution"].get(
-        str(assessment["angle"])
-    )
-    if selected_execution is not None:
-        orientation["reader_execution"] = deepcopy(selected_execution)
     if "orientation_prediction" in assessment:
         orientation["orientation_prediction"] = assessment["orientation_prediction"]
     if "orientation_detector_failure" in assessment:

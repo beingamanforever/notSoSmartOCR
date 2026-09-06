@@ -18,6 +18,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 from .cascade import add_runtime_risk_evidence
 from .cross_page_tables import CrossPageTableStage
 from .contracts import (
+    ALTERNATIVE_DECISION_STATES,
     BoundingBox,
     DocumentResult,
     Failure,
@@ -562,20 +563,49 @@ def _region_needs_review(region: TextRegion) -> bool:
     structure = region.structure or {}
     if structure.get("coverage_status") == "insufficient_control_group":
         return True
+    if structure.get("block_type") == "formula" and structure.get(
+        "formula_recognition"
+    ) not in {"specialist_supported", "human_accepted"}:
+        return True
     handwriting_review = structure.get("handwriting_review")
     if isinstance(handwriting_review, dict) and handwriting_review.get("required"):
         return True
     cells = structure.get("cells", [])
     if isinstance(cells, list) and any(
-        isinstance(cell, dict) and cell.get("resolution") != "resolved"
-        for cell in cells
+        not isinstance(cell, dict) or _cell_needs_review(cell) for cell in cells
     ):
         return True
     text = " ".join(region.text.casefold().split())
     return any(
-        " ".join(alternative.text.casefold().split()) != text
+        alternative.decision_state not in ALTERNATIVE_DECISION_STATES
+        or (
+            alternative.decision_state == "pending"
+            and " ".join(alternative.text.casefold().split()) != text
+        )
         for alternative in region.alternatives
     )
+
+
+def _cell_needs_review(cell: dict[str, object]) -> bool:
+    if cell.get("resolution") != "resolved":
+        return True
+    text = " ".join(str(cell.get("text", "")).casefold().split())
+    alternatives = cell.get("alternatives", [])
+    if not isinstance(alternatives, list):
+        return True
+    for alternative in alternatives:
+        if not isinstance(alternative, dict):
+            return True
+        decision_state = alternative.get("decision_state", "pending")
+        if decision_state not in ALTERNATIVE_DECISION_STATES:
+            return True
+        alternative_text = alternative.get("text")
+        if decision_state == "pending" and (
+            not isinstance(alternative_text, str)
+            or " ".join(alternative_text.casefold().split()) != text
+        ):
+            return True
+    return False
 
 
 def _prepare_pages(
