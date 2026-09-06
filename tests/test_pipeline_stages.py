@@ -64,8 +64,24 @@ def test_render_evidence_keeps_controls_structured_without_duplicate_text() -> N
 
     evidence = render_evidence([label, control])
 
-    assert evidence.value == "Fall prevention"
-    assert evidence.evidence_ids == ["label"]
+    assert evidence.value == "Fall prevention [x]"
+    assert evidence.evidence_ids == ["label", "control"]
+
+
+def test_render_evidence_keeps_every_control_state_symbol_intact() -> None:
+    regions = []
+    for index, (symbol, resolution) in enumerate(
+        (("[ ]", "resolved"), ("[x]", "resolved"), ("[?]", "unreadable")),
+        start=1,
+    ):
+        control = _region(f"control-{index}", f"{symbol} Option {index}", index)
+        control.kind = "checkbox"
+        control.resolution = resolution
+        control.structure = {"role": "control"}
+        regions.append(control)
+
+    # "[ ]" contains a space, so the symbol cannot be taken as the first token.
+    assert render_evidence(regions).value == "[ ] [x] [?]"
 
 
 def test_resolved_region_with_conflicting_alternative_routes_review(

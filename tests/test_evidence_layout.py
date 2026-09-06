@@ -773,7 +773,7 @@ def test_control_label_keeps_the_controls_presentation_rank() -> None:
             control_result.structure["presentation_rank"]  # type: ignore[index]
         )
     )
-    assert render_evidence(result).value == "Before Fall risk After"
+    assert render_evidence(result).value == "Before Fall risk [x] After"
 
 
 def test_every_eligible_source_has_exactly_one_owner_and_unmatched_evidence_remains() -> (

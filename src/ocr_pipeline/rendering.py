@@ -11,6 +11,7 @@ from .table_topology import TableTopology, TableTopologyError, validate_table_to
 
 INLINE_MAX_GAP_HEIGHTS = 3
 UNREADABLE_HANDWRITING = "[unreadable handwriting]"
+CONTROL_SYMBOLS = ("[x]", "[ ]", "[?]")
 
 
 def render_evidence(regions: list[TextRegion]) -> EvidenceText:
@@ -24,8 +25,10 @@ def render_evidence(regions: list[TextRegion]) -> EvidenceText:
     rendered = [
         (region, _plain_text(region))
         for region in ordered
-        if (region.resolution == "resolved" or region.kind == "handwriting")
-        and region.kind != "checkbox"
+        if (
+            region.resolution == "resolved"
+            or region.kind in {"handwriting", "checkbox"}
+        )
         and (region.structure or {}).get("role") != "table_source"
         and not (region.structure or {}).get("layout_owner_id")
     ]
@@ -36,6 +39,12 @@ def render_evidence(regions: list[TextRegion]) -> EvidenceText:
 
 
 def _plain_text(region: TextRegion) -> str:
+    if region.kind == "checkbox":
+        # Only the state symbol: the label is already its own evidence region.
+        return next(
+            (symbol for symbol in CONTROL_SYMBOLS if region.text.startswith(symbol)),
+            "",
+        )
     if region.resolution == "resolved":
         return region.text
     if region.kind == "handwriting":

@@ -762,7 +762,7 @@ def test_control_stage_recovers_label_anchored_x_and_tick(tmp_path: Path) -> Non
     )
 
 
-def test_control_stage_rejects_label_anchored_slashed_circle(
+def test_control_stage_reports_label_anchored_slashed_circle_for_review(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "null-mark.png"
@@ -784,7 +784,91 @@ def test_control_stage_rejects_label_anchored_slashed_circle(
         stages=[GeometricControlStage(minimum_group_size=1)],
     )
 
-    assert all(region.kind != "checkbox" for region in result.pages[0].regions)
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert [control.text for control in controls] == [
+        "[?] TAPS SCORE (Substance Abuse Disorder)"
+    ]
+    assert controls[0].resolution == "unreadable"
+    assert controls[0].text_provenance["method"] == "label_anchored_residual_ink"
+    assert controls[0].text_provenance["label_evidence_ids"] == ["taps"]
+    assert result.pages[0].route == "review"
+
+
+def test_control_stage_rejects_empty_checkbox_outline_as_null_mark(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "empty-box.png"
+    image = Image.new("L", (420, 100), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((330, 38, 348, 56), outline="black", width=2)
+    image.save(source)
+    label = _region("alcohol", "Alcohol:", (60, 36, 325, 56), 1)
+
+    result = process_document(
+        source,
+        FixedReader([label]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert all(
+        control.text_provenance["method"] != "label_anchored_residual_ink"
+        for control in controls
+    )
+
+
+def test_control_stage_reports_ring_drawn_over_printed_option(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "circled-option.png"
+    image = Image.new("L", (420, 100), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((60, 44), "Non-Smoker / Smoker", fill="black")
+    draw.ellipse((56, 38, 135, 62), outline="black", width=2)
+    image.save(source)
+    label = _region("social", "Non-Smoker / Smoker", (60, 42, 200, 60), 1)
+
+    result = process_document(
+        source,
+        FixedReader([label]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    rings = [
+        region
+        for region in result.pages[0].regions
+        if region.kind == "checkbox"
+        and region.text_provenance["method"] == "enclosing_ring_annotation"
+    ]
+    assert len(rings) == 1
+    assert rings[0].text_provenance["label_evidence_ids"] == ["social"]
+    assert rings[0].resolution == "unreadable"
+    assert result.pages[0].route == "review"
+
+
+def test_control_stage_rejects_ruled_rectangle_as_ring(tmp_path: Path) -> None:
+    source = tmp_path / "ruled-box.png"
+    image = Image.new("L", (420, 140), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((40, 30, 380, 120), outline="black", width=2)
+    image.save(source)
+    label = _region("comments", "Comments:", (60, 40, 160, 58), 1)
+
+    result = process_document(
+        source,
+        FixedReader([label]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    assert all(
+        region.kind != "checkbox"
+        or region.text_provenance["method"] != "enclosing_ring_annotation"
+        for region in result.pages[0].regions
+    )
 
 
 def test_control_stage_recovers_anchored_marks_without_label_punctuation(

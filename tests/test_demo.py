@@ -1506,7 +1506,7 @@ def test_demo_reports_evidence_uncertainty_without_changing_result_schema() -> N
                     "page_number": 1,
                     "review_required": True,
                     "mean_primary_confidence": 0.925,
-                    "primary_regions": 4,
+                    "primary_regions": 5,
                     "confidence_regions": 2,
                     "unresolved_evidence": 1,
                     "conflicting_evidence": 2,
@@ -1550,7 +1550,7 @@ def test_demo_adds_review_only_local_page_presentation_without_replacing_evidenc
 
     page = payload["result"]["pages"][0]
     assert page["text"]["value"] == (
-        "Primary text Value [unreadable handwriting] | Value |\n| --- |\n| 42 |"
+        "Primary text Value [unreadable handwriting] [?] | Value |\n| --- |\n| 42 |"
     )
     assert "presentation" not in page
     assert payload["presentation"] == {
@@ -1713,7 +1713,7 @@ def test_demo_preserves_and_validates_category_routed_presentation_blocks() -> N
     assert payload["presentation"]["schema_version"] == 2
     assert "presentation" not in page
     assert page["text"]["value"] == (
-        "Primary text Value a / b | Value |\n| --- |\n| 42 |"
+        "Primary text Value a / b [?] | Value |\n| --- |\n| 42 |"
     )
     assert presentation["canonical_unchanged"] is True
     assert presentation["validation"] == {
