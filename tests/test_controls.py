@@ -787,11 +787,16 @@ def test_control_stage_reports_label_anchored_slashed_circle_for_review(
     controls = [
         region for region in result.pages[0].regions if region.kind == "checkbox"
     ]
+    # The glyph records what was drawn. Its meaning stays unresolved until the form's
+    # conventions or a reviewer establish it, so this is an annotation, not a selection.
     assert [control.text for control in controls] == [
-        "[?] TAPS SCORE (Substance Abuse Disorder)"
+        "∅ TAPS SCORE (Substance Abuse Disorder)"
     ]
+    assert controls[0].structure["control_type"] == "annotation"
+    assert controls[0].structure["annotation_shape"] == "slashed_loop"
+    assert controls[0].structure["interpretation_status"] == "unresolved"
     assert controls[0].resolution == "unreadable"
-    assert controls[0].text_provenance["method"] == "label_anchored_residual_ink"
+    assert controls[0].text_provenance["method"] == "label_anchored_null_glyph"
     assert controls[0].text_provenance["label_evidence_ids"] == ["taps"]
     assert result.pages[0].route == "review"
 
@@ -848,6 +853,15 @@ def test_control_stage_reports_ring_drawn_over_printed_option(
     assert rings[0].text_provenance["label_evidence_ids"] == ["social"]
     assert rings[0].resolution == "unreadable"
     assert result.pages[0].route == "review"
+    # A ring means the enclosed option was chosen, so the target is a relationship to the
+    # region it surrounds, not just a label sitting next to a mark.
+    assert rings[0].structure["control_type"] == "annotation"
+    assert rings[0].structure["annotation_shape"] == "ring"
+    assert rings[0].structure["annotation_target"] == {
+        "relation": "encloses",
+        "evidence_ids": ["social"],
+    }
+    assert rings[0].structure["interpretation_status"] == "unresolved"
 
 
 def test_control_stage_rejects_ruled_rectangle_as_ring(tmp_path: Path) -> None:
@@ -1956,3 +1970,106 @@ def test_a_capital_letter_is_not_a_ring_annotation(tmp_path: Path) -> None:
         or region.text_provenance["method"] != "enclosing_ring_annotation"
         for region in result.pages[0].regions
     )
+
+
+def test_mark_shape_vocabulary_names_ticks_crosses_and_null_glyphs() -> None:
+    """A tick, a cross and a slashed loop must be told apart, not merged into "a mark"."""
+    cv2 = pytest.importorskip("cv2")
+    numpy = pytest.importorskip("numpy")
+    from ocr_pipeline.controls import _mark_shape
+
+    def canvas():
+        return numpy.zeros((40, 40), dtype="uint8")
+
+    tick = canvas()
+    cv2.line(tick, (8, 20), (16, 30), 255, 3)
+    cv2.line(tick, (16, 30), (32, 8), 255, 3)
+
+    cross = canvas()
+    cv2.line(cross, (6, 6), (34, 34), 255, 3)
+    cv2.line(cross, (34, 6), (6, 34), 255, 3)
+
+    slashed = canvas()
+    cv2.ellipse(slashed, (20, 20), (13, 9), 0, 0, 360, 255, 3)
+    cv2.line(slashed, (8, 30), (32, 10), 255, 3)
+
+    assert _mark_shape(tick, cv2, numpy) == "tick"
+    assert _mark_shape(cross, cv2, numpy) == "cross"
+    assert _mark_shape(slashed, cv2, numpy) == "slashed_loop"
+    assert _mark_shape(canvas(), cv2, numpy) == "unknown"
+
+
+def test_boxed_marks_record_the_glyph_without_breaking_task_list_syntax() -> None:
+    """A ticked box and a crossed box differ in structure, not in the markdown text."""
+    cv2 = pytest.importorskip("cv2")
+    numpy = pytest.importorskip("numpy")
+    from ocr_pipeline.controls import BOXED_GLYPHS, _boxed_mark_shape
+
+    def inner(draw):
+        canvas = numpy.full((40, 40), 255, dtype="uint8")
+        draw(canvas)
+        return canvas
+
+    ticked = inner(
+        lambda c: (
+            cv2.line(c, (8, 20), (16, 30), 0, 3),
+            cv2.line(c, (16, 30), (32, 8), 0, 3),
+        )
+    )
+    crossed = inner(
+        lambda c: (
+            cv2.line(c, (6, 6), (34, 34), 0, 3),
+            cv2.line(c, (34, 6), (6, 34), 0, 3),
+        )
+    )
+
+    assert _boxed_mark_shape(ticked, 255.0, cv2, numpy) == "tick"
+    assert _boxed_mark_shape(crossed, 255.0, cv2, numpy) == "cross"
+    assert BOXED_GLYPHS["tick"] == "☑"
+    assert BOXED_GLYPHS["cross"] == "☒"
+    assert BOXED_GLYPHS["empty"] == "☐"
+
+
+def test_prose_with_incidental_colons_is_not_treated_as_a_form() -> None:
+    """A contract clause mentioning times and sections must not lose mark corroboration.
+
+    `_form_like_regions` drops the required mark-group size from six to one, so declaring
+    prose "form-like" is what let a single spurious mark become a checked box.
+    """
+    from ocr_pipeline.controls import _form_like_regions
+
+    def prose(identifier: str, text: str) -> TextRegion:
+        return TextRegion(
+            id=identifier,
+            kind="word",
+            text=text,
+            confidence=0.95,
+            bounding_box=BoundingBox(0, 0, 40, 12),
+            reading_order=1,
+            provider="reader",
+        )
+
+    incidental = [
+        prose(f"c{index}", text)
+        for index, text in enumerate(
+            ["9:00", "3:1", "Section:", "10:30", "A:B", "ratio:", "1:2", "see:"]
+        )
+    ]
+    assert not _form_like_regions(incidental, "reader"), (
+        "colons inside prose are not field labels"
+    )
+
+    real_labels = [
+        prose(f"f{index}", label)
+        for index, label in enumerate(
+            [
+                "Patient Name:",
+                "DOB:",
+                "Allergies:",
+                "Gender:",
+                "Date of Service:",
+                "Member Id No:",
+            ]
+        )
+    ]
+    assert _form_like_regions(real_labels, "reader"), "trailing colons are field labels"

@@ -11,7 +11,8 @@ from .table_topology import TableTopology, TableTopologyError, validate_table_to
 
 INLINE_MAX_GAP_HEIGHTS = 3
 UNREADABLE_HANDWRITING = "[unreadable handwriting]"
-CONTROL_SYMBOLS = ("[x]", "[ ]", "[?]")
+MARK_GLYPHS = ("✓", "✗", "∅", "◯")
+CONTROL_SYMBOLS = ("[x]", "[ ]", "[?]", *MARK_GLYPHS)
 
 
 def render_evidence(regions: list[TextRegion]) -> EvidenceText:
@@ -199,7 +200,12 @@ def _markdown_block(
             block = f"- {text}" if text else ""
         else:
             label = str(_structure(region).get("label") or "").strip()
-            block = f"- [?] {label}" if label else ""
+            # A slashed loop is evidence of what was drawn, so it keeps its glyph instead
+            # of collapsing into the unknown-state marker.
+            marker = str(_structure(region).get("mark_glyph") or "[?]")
+            if not _structure(region).get("annotation_shape"):
+                marker = "[?]"
+            block = f"- {marker} {label}" if label else ""
     elif kind == "field":
         label = str(
             _structure(region).get("label")
@@ -282,7 +288,7 @@ def _display_cell_text(cell: dict[str, Any]) -> str:
 
 def _control_label(text: str) -> str:
     stripped = text.strip()
-    for prefix in ("[?]", "[x]", "[X]", "[ ]"):
+    for prefix in ("[?]", "[x]", "[X]", "[ ]", *MARK_GLYPHS):
         if stripped.startswith(prefix):
             return stripped.removeprefix(prefix).strip()
     return stripped

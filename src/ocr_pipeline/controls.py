@@ -23,6 +23,26 @@ MARK_MODEL = {
     "license": "Apache-2.0",
 }
 MATH_TYPES = frozenset({"equation", "formula", "math"})
+# What a mark looks like, kept separate from what it means. A tick or cross beside a label
+# selects an option; a slashed loop or a ring is an annotation whose meaning the form's
+# conventions decide. U+2205 is what frontier readers emit for the null glyph.
+MARK_GLYPHS = {
+    "tick": "✓",
+    "cross": "✗",
+    "slashed_loop": "∅",
+    "ring": "◯",
+}
+# A mark inside a printed box is a selection; the glyph still matters, because a reviewer
+# checking a disputed field wants to see whether it was ticked or crossed.
+BOXED_GLYPHS = {
+    "tick": "☑",
+    "cross": "☒",
+    "empty": "☐",
+    "unknown": "☑",
+}
+NULL_MARK_GLYPH = MARK_GLYPHS["slashed_loop"]
+# Shapes that annotate an answer area rather than select a listed option.
+ANNOTATION_SHAPES = frozenset({"slashed_loop", "ring"})
 # A hand-drawn ring encircles words, so it is wider than it is tall.
 MINIMUM_RING_ASPECT = 1.6
 
@@ -34,6 +54,7 @@ class ControlDetection:
     confidence: float
     ink_ratio: float
     source: str = "square"
+    shape: str = "unknown"
     label: str | None = None
     label_ids: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
@@ -200,11 +221,15 @@ def detect_controls(image_path: Path) -> list[ControlDetection]:
 
 
 def _form_like_regions(regions: list[TextRegion], label_provider: str | None) -> bool:
+    # A field label ends with its colon. Counting any word that merely contains one made
+    # times, ratios and section references look like form fields, so a dense printed
+    # contract was declared form-like and lone spurious marks lost their corroboration
+    # requirement. This matches _field_anchor in anchored_ink.py.
     labels = {
         region.id
         for region in regions
         if region.resolution == "resolved"
-        and ":" in region.text
+        and region.text.rstrip().endswith((":", "："))
         and (label_provider is None or region.provider == label_provider)
     }
     return len(labels) >= 6
@@ -242,7 +267,7 @@ def _square_detections(gray: Any, cv2: Any, np: Any) -> list[ControlDetection]:
     boxes = _remove_input_grids(_deduplicate(boxes))
 
     detections = [
-        _classify(gray, box, np)
+        _classify(gray, box, cv2, np)
         for box in sorted(boxes, key=lambda item: (item.top, item.left))
     ]
     minimum_reliable_side = round(min(gray.shape) * 0.01)
@@ -253,6 +278,7 @@ def _square_detections(gray: Any, cv2: Any, np: Any) -> list[ControlDetection]:
             min(0.5, detection.confidence),
             detection.ink_ratio,
             detection.source,
+            detection.shape,
         )
         if _side(detection.bounding_box) < minimum_reliable_side
         else detection
@@ -544,9 +570,9 @@ def _marks_in_slot(
             0,
         ).astype("uint8")
         beyond_tick_reach = tick_limit is not None and slot.left + left >= tick_limit
-        if not _has_null_mark_shape(component, cv2, np) and (
-            beyond_tick_reach or not _has_mark_shape(component, cv2, np)
-        ):
+        shape = _mark_shape(component, cv2, np)
+        null_mark = shape == "slashed_loop"
+        if not null_mark and (beyond_tick_reach or shape == "unknown"):
             continue
         box = BoundingBox(
             slot.left + left,
@@ -561,7 +587,10 @@ def _marks_in_slot(
                 "selected",
                 min(0.9, 0.6 + ink_ratio * 0.5),
                 ink_ratio,
-                "anchored_mark",
+                # A slashed loop is an annotation written in the answer area, not a tick in
+                # a box, so it is carried through as its own kind rather than a selection.
+                "null_mark" if null_mark else "anchored_mark",
+                shape,
             )
         )
     return detections
@@ -801,7 +830,7 @@ def _candidate_scope_marks(
                 top + box_top + box_height,
             )
         )
-    return [_classify(gray, box, np) for box in _deduplicate(boxes)]
+    return [_classify(gray, box, cv2, np) for box in _deduplicate(boxes)]
 
 
 def _has_candidate_control_shape(component: Any, cv2: Any, np: Any) -> bool:
@@ -990,7 +1019,7 @@ def _same_cell_mark(
         left + box_left + box_width,
         top + box_top + box_height,
     )
-    return _classify(gray, box, np)
+    return _classify(gray, box, cv2, np)
 
 
 def _has_square_border(component: Any, np: Any) -> bool:
@@ -1235,6 +1264,30 @@ def _has_table_mark_shape(component: Any, cv2: Any, np: Any) -> bool:
     )
 
 
+def _mark_shape(component: Any, cv2: Any, np: Any) -> str:
+    """Name the glyph. A cross fills all four corners; a tick does not.
+
+    Returns "unknown" rather than guessing, so an unnamed mark stays visible evidence
+    instead of being rendered as a shape nobody observed.
+    """
+    if _has_null_mark_shape(component, cv2, np):
+        return "slashed_loop"
+    if not _has_mark_shape(component, cv2, np):
+        return "unknown"
+    height, width = component.shape
+    if not 0.5 <= width / height <= 2:
+        return "tick"
+    edge_height = max(1, height // 3)
+    edge_width = max(1, width // 3)
+    corners = (
+        component[:edge_height, :edge_width],
+        component[:edge_height, -edge_width:],
+        component[-edge_height:, :edge_width],
+        component[-edge_height:, -edge_width:],
+    )
+    return "cross" if all(np.any(corner) for corner in corners) else "tick"
+
+
 def _has_mark_shape(component: Any, cv2: Any, np: Any) -> bool:
     height, width = component.shape
     if float(np.mean(component > 0)) >= 0.85:
@@ -1433,7 +1486,10 @@ def _square_boxes(mask: Any, cv2: Any) -> list[BoundingBox]:
             and not _joins_text(mask, left, top, box_width, box_height)
         ):
             boxes.append(box)
-        elif 5 <= len(polygon) <= 6 and rectangularity >= 0.5:
+        elif 5 <= len(polygon) <= 6 and rectangularity >= 0.45:
+            # A mark drawn past the border notches the outer contour, so a ticked box
+            # scores far below an empty one (0.49 against 0.78 on the wellness form).
+            # Precision here comes from the same-row peer below, not from this floor.
             deformed_boxes.append(box)
     return boxes + [box for box in deformed_boxes if _has_square_row_peer(box, boxes)]
 
@@ -1596,7 +1652,7 @@ def _remove_input_grids(boxes: list[BoundingBox]) -> list[BoundingBox]:
     return [box for index, box in enumerate(boxes) if index not in grid_ids]
 
 
-def _classify(gray: Any, box: BoundingBox, np: Any) -> ControlDetection:
+def _classify(gray: Any, box: BoundingBox, cv2: Any, np: Any) -> ControlDetection:
     side = min(box.right - box.left, box.bottom - box.top)
     margin = max(2, round(side * 0.4))
     inner = gray[
@@ -1617,10 +1673,29 @@ def _classify(gray: Any, box: BoundingBox, np: Any) -> ControlDetection:
     faint_ratio = float(np.mean(inner < background - 20))
     ink_ratio = max(dark_ratio, faint_ratio * 0.75)
     if dark_ratio >= 0.2 or faint_ratio >= 0.45:
-        return ControlDetection(box, "selected", min(0.99, 0.75 + ink_ratio), ink_ratio)
+        shape = _boxed_mark_shape(inner, background, cv2, np)
+        return ControlDetection(
+            box, "selected", min(0.99, 0.75 + ink_ratio), ink_ratio, shape=shape
+        )
     if dark_ratio <= 0.05 and faint_ratio <= 0.15:
-        return ControlDetection(box, "unselected", 0.98, ink_ratio)
+        return ControlDetection(box, "unselected", 0.98, ink_ratio, shape="empty")
     return ControlDetection(box, "ambiguous", 0.5, ink_ratio)
+
+
+def _boxed_mark_shape(inner: Any, background: float, cv2: Any, np: Any) -> str:
+    """Name the glyph drawn inside a checkbox, so ☑ and ☒ are told apart."""
+    mask = np.where(inner < background - 20, 255, 0).astype("uint8")
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+    if count < 2:
+        return "unknown"
+    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    left, top, width, height = (int(stats[largest][index]) for index in range(4))
+    if min(width, height) < 3:
+        return "unknown"
+    component = np.where(
+        labels[top : top + height, left : left + width] == largest, 255, 0
+    ).astype("uint8")
+    return _mark_shape(component, cv2, np)
 
 
 def _control_region(
@@ -1655,12 +1730,27 @@ def _control_region(
     if state == "ambiguous" or (label is None and detection.label is None):
         resolution = "unreadable"
     state_confidence = detection.confidence if resolution == "resolved" else None
-    symbol = {"selected": "[x]", "unselected": "[ ]", "ambiguous": "[?]"}[state]
+    shape = detection.shape
+    if detection.source == "ring_mark":
+        shape = "ring"
+    boxed = detection.source == "square"
+    annotation = shape in ANNOTATION_SHAPES
+    # The glyph records what was drawn. It does not claim the field means "none": the
+    # form's conventions or a reviewer establish that, so interpretation stays unresolved.
+    # Checkbox text stays "[x]"/"[ ]" because that is GitHub task-list syntax and the
+    # Markdown export depends on it. The tick-versus-cross distinction rides in
+    # structure.mark_glyph instead, where the UI and the inspector can use it.
+    symbol = (
+        MARK_GLYPHS[shape]
+        if annotation
+        else {"selected": "[x]", "unselected": "[ ]", "ambiguous": "[?]"}[state]
+    )
     label_text = detection.label or _semantic_label(label_regions)
     label_ids = list(detection.label_ids) or [region.id for region in label_regions]
     source_ids = list(detection.source_ids)
     methods = {
         "anchored_mark": "label_anchored_residual_ink",
+        "null_mark": "label_anchored_null_glyph",
         "ring_mark": "enclosing_ring_annotation",
         "table_mark": "table_cell_residual_ink",
     }
@@ -1674,7 +1764,31 @@ def _control_region(
         text_provenance["source_evidence_ids"] = source_ids
     structure = {
         "role": "control",
-        "control_type": "checkbox",
+        "control_type": "annotation" if annotation else "checkbox",
+        # What the mark looks like, recorded for every control so a reviewer can see the
+        # tick or cross that produced a selection, not just the selection.
+        "mark_shape": shape,
+        "mark_glyph": (BOXED_GLYPHS if boxed else MARK_GLYPHS).get(shape),
+        **(
+            {
+                "annotation_shape": shape,
+                "interpretation_status": "unresolved",
+                # A ring means the enclosed option was chosen, so its target is recorded
+                # as a relationship rather than being conflated with the mark's label.
+                **(
+                    {
+                        "annotation_target": {
+                            "relation": "encloses",
+                            "evidence_ids": list(detection.label_ids),
+                        }
+                    }
+                    if shape == "ring" and detection.label_ids
+                    else {}
+                ),
+            }
+            if annotation
+            else {}
+        ),
         "state": state,
         "observed_state": observed_state,
         "state_confidence": state_confidence,

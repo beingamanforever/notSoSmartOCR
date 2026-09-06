@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from time import sleep
 
 from PIL import Image
 import pytest
@@ -150,8 +151,44 @@ def test_the_longest_digit_runs_are_verified_first_within_the_budget(
     assert "digit_verification" not in (regions[0].structure or {})
 
 
+def test_each_region_keeps_its_own_reread_when_crops_finish_out_of_order(
+    tmp_path: Path,
+) -> None:
+    """Crops are read concurrently, so the first reply is not the first region."""
+
+    class SlowestFirstReader:
+        name = "tesseract"
+
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            index = int(image_path.stem.rsplit("-", 1)[1])
+            sleep(0.05 / index)
+            return [
+                TextRegion(
+                    id=f"c-{index}",
+                    kind="text",
+                    text=f"{index}00",
+                    confidence=0.9,
+                    bounding_box=BoundingBox(0, 0, 10, 10),
+                    reading_order=1,
+                    provider=self.name,
+                    text_provenance={},
+                    resolution="resolved",
+                    structure={},
+                )
+            ]
+
+    regions = [_region(f"r-{n}", f"{n}00") for n in (1, 2, 3, 4)]
+
+    DigitVerificationStage(SlowestFirstReader()).apply(_page(tmp_path), 1, regions)
+
+    outcomes = [(region.structure or {})["digit_verification"] for region in regions]
+    assert [outcome["outcome"] for outcome in outcomes] == ["confirmed"] * 4
+
+
 def test_stage_rejects_invalid_configuration() -> None:
     with pytest.raises(ValueError, match="max_regions"):
         DigitVerificationStage(ScriptedReader([]), max_regions=0)
     with pytest.raises(ValueError, match="padding"):
         DigitVerificationStage(ScriptedReader([]), padding=-1)
+    with pytest.raises(ValueError, match="workers"):
+        DigitVerificationStage(ScriptedReader([]), workers=0)

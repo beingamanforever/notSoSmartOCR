@@ -8,6 +8,7 @@ about those values and surfaces disagreement as review evidence rather than gues
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Protocol
@@ -18,6 +19,8 @@ from .contracts import TextAlternative, TextRegion
 from .providers import ReaderError
 
 MEASURED_KINDS = frozenset({"text", "word"})
+# The second reader runs as a subprocess per crop, so crops overlap rather than queue.
+DEFAULT_WORKERS = 4
 # Evidence other specialists already reread on disagreement.
 EXCLUDED_OWNERS = frozenset(
     {
@@ -50,15 +53,19 @@ class DigitVerificationStage:
         text_provider: str | None = None,
         max_regions: int = 24,
         padding: int = 4,
+        workers: int = DEFAULT_WORKERS,
     ) -> None:
         if max_regions <= 0:
             raise ValueError("max_regions must be positive")
         if padding < 0:
             raise ValueError("padding must not be negative")
+        if workers <= 0:
+            raise ValueError("workers must be positive")
         self.reader = reader
         self.text_provider = text_provider
         self.max_regions = max_regions
         self.padding = padding
+        self.workers = workers
 
     def apply(
         self,
@@ -78,11 +85,20 @@ class DigitVerificationStage:
 
         try:
             with TemporaryDirectory() as root:
-                for index, region in enumerate(selected, start=1):
-                    candidate = self._read_region(page, region, Path(root), index)
-                    if candidate is None:
-                        continue
-                    _record(region, candidate, self.reader.name)
+                workers = min(self.workers, len(selected))
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    candidates = list(
+                        pool.map(
+                            lambda item: self._read_region(
+                                page, item[1], Path(root), item[0]
+                            ),
+                            enumerate(selected, start=1),
+                        )
+                    )
+                # Recorded in selection order so results do not depend on thread timing.
+                for region, candidate in zip(selected, candidates, strict=True):
+                    if candidate is not None:
+                        _record(region, candidate, self.reader.name)
         finally:
             page.close()
         return regions

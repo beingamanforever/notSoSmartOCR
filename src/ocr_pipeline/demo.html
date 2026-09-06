@@ -23,6 +23,10 @@
       --confidence-medium-soft: #fde7c9;
       --confidence-low: #b91c1c;
       --confidence-low-soft: #fbdada;
+      --positive: #15803d;
+      --positive-soft: #dcfce7;
+      --negative: var(--confidence-low);
+      --negative-soft: var(--confidence-low-soft);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
         "Segoe UI", sans-serif;
     }
@@ -39,7 +43,7 @@
     button, input, select { font: inherit; }
     button, a { -webkit-tap-highlight-color: transparent; }
     button:focus-visible, a:focus-visible, input:focus-visible,
-    select:focus-visible, canvas:focus-visible {
+    select:focus-visible, canvas:focus-visible, summary:focus-visible {
       outline: 2px solid var(--accent);
       outline-offset: 2px;
     }
@@ -357,8 +361,18 @@
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
-    .metric::before { content: attr(data-icon); font-size: .78rem; line-height: 1; }
+    .metric::before {
+      content: attr(data-icon);
+      color: var(--metric-tint);
+      font-size: .78rem;
+      line-height: 1;
+    }
     .metric[hidden] { display: none; }
+    #metric-time { --metric-tint: var(--accent); }
+    #metric-pages { --metric-tint: var(--confidence-high); }
+    #metric-chars { --metric-tint: var(--positive); }
+    #metric-size { --metric-tint: var(--confidence-medium); }
+
     .feedback { display: inline-flex; gap: 4px; }
     .feedback-button {
       display: inline-grid;
@@ -372,9 +386,50 @@
       cursor: pointer;
       transition: color 150ms ease, border-color 150ms ease, background-color 150ms ease;
     }
-    .feedback-button:hover:not(:disabled) { color: var(--text); border-color: var(--line-strong); }
-    .feedback-button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
     .feedback-button:disabled { opacity: .5; cursor: default; }
+    #feedback-up:hover:not(:disabled) { color: var(--positive); border-color: var(--positive); }
+    #feedback-up[aria-pressed="true"] {
+      color: var(--positive);
+      border-color: var(--positive);
+      background: var(--positive-soft);
+    }
+    #feedback-down:hover, #feedback-problem[open] > #feedback-down {
+      color: var(--negative);
+      border-color: var(--negative);
+    }
+    #feedback-down[data-sent] {
+      color: var(--negative);
+      border-color: var(--negative);
+      background: var(--negative-soft);
+    }
+
+    .action-popover.feedback-form { min-width: 232px; gap: 6px; padding: 10px; }
+    .feedback-form-title { color: var(--text); font-size: .74rem; font-weight: 750; }
+    .feedback-reason {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--text);
+      font-size: .75rem;
+      cursor: pointer;
+    }
+    .feedback-reason input { accent-color: var(--negative); margin: 0; }
+    .feedback-note {
+      width: 100%;
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      color: var(--text);
+      font: inherit;
+      font-size: .75rem;
+    }
+    #feedback-send {
+      border-color: var(--negative);
+      background: var(--negative-soft);
+      color: var(--negative);
+      text-align: center;
+    }
+    #feedback-send:disabled { border-color: var(--line); background: transparent; color: var(--muted); }
 
     .empty-state { max-width: 340px; color: var(--muted); text-align: center; line-height: 1.6; }
     /* Centre a placeholder wherever it lives: the panel, or a content container. */
@@ -390,8 +445,17 @@
     .inspector { padding: 14px 16px 16px; border-top: 1px solid var(--line); }
     .inspector-empty { display: none; color: var(--muted); text-align: center; line-height: 1.55; }
     .inspector.empty .inspector-grid, .inspector.empty .review-actions,
+    .inspector.empty .inspector-primary,
     .inspector.empty .inspector-action { display: none; }
     .inspector.empty .inspector-empty { display: block; }
+    /* Nothing to inspect yet: centre the prompt instead of stranding it at the top. */
+    .tab-panel.visual-panel.active:has(.inspector.empty .region-list:empty) {
+      display: grid;
+      place-items: center;
+    }
+    .inspector.empty:has(.region-list:empty) { min-height: 0; padding: 0; }
+    .inspector.empty:has(.region-list:empty) .inspector-head { display: none; }
+    .inspector.empty .region-list:empty { display: none; }
     .inspector-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
     .inspector-action { flex: 0 0 auto; }
     .reread-status { color: var(--muted); font-size: .72rem; }
@@ -481,6 +545,24 @@
       margin-bottom: 10px;
     }
     .rendered-toolbar[hidden] { display: none; }
+    .refining-note {
+      margin-right: auto;
+      display: none;
+      align-items: center;
+      gap: 7px;
+      color: var(--muted);
+      font-size: .78rem;
+    }
+    .rendered-toolbar.refining .refining-note { display: inline-flex; }
+    .refining-note::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--accent);
+      animation: refining-pulse 1.1s ease-in-out infinite;
+    }
+    @keyframes refining-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
     .confidence-toggle {
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -580,6 +662,7 @@
     }
     .control-state[data-state="selected"] { border-color: var(--confidence-high); color: var(--confidence-high); }
     .control-state[data-state="ambiguous"] { border-style: dashed; border-color: var(--confidence-medium); color: var(--confidence-medium); }
+    .control-state[data-state="annotation"] { border-style: dashed; border-color: var(--accent); color: var(--accent); }
     .control-label:empty::after { content: "unlabelled control"; color: var(--muted); font-style: italic; }
     .ink-note {
       display: inline-block; padding: 0 6px; border: 1px dashed var(--line-strong); border-radius: 10px;
@@ -688,6 +771,7 @@
     @media (prefers-reduced-motion: reduce) {
       .button:hover:not(:disabled) { transform: none; }
       .confidence-evidence, .presentation-source-link { transition: none !important; }
+      .refining-note::before { animation: none; opacity: .8; }
     }
   </style>
 </head>
@@ -821,18 +905,44 @@
               <span class="metric" id="metric-size" title="Source file size"></span>
             </div>
             <div class="feedback" id="feedback" hidden>
-              <button class="feedback-button" id="feedback-up" type="button"
+              <button class="feedback-button" id="feedback-up" type="button" aria-pressed="false"
                 aria-label="Report this result as good" title="Result looks right">
                 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                   <path d="M7 22V11l5-9 1.5 1a3 3 0 0 1 1 3l-.8 4H19a2 2 0 0 1 2 2.4l-1.4 7A2 2 0 0 1 17.6 22z"></path>
                 </svg>
               </button>
-              <button class="feedback-button" id="feedback-down" type="button"
-                aria-label="Report a problem with this result" title="Report a problem">
-                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <path d="M17 2v11l-5 9-1.5-1a3 3 0 0 1-1-3l.8-4H5a2 2 0 0 1-2-2.4l1.4-7A2 2 0 0 1 6.4 2z"></path>
-                </svg>
-              </button>
+              <details class="action-menu" id="feedback-problem">
+                <summary class="feedback-button" id="feedback-down" role="button"
+                  aria-label="Report a problem with this result" title="Report a problem">
+                  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M17 2v11l-5 9-1.5-1a3 3 0 0 1-1-3l.8-4H5a2 2 0 0 1-2-2.4l1.4-7A2 2 0 0 1 6.4 2z"></path>
+                  </svg>
+                </summary>
+                <div class="action-popover feedback-form">
+                  <span class="feedback-form-title">What went wrong?</span>
+                  <label class="feedback-reason">
+                    <input type="radio" name="feedback-reason" value="missing_text">Text is missing
+                  </label>
+                  <label class="feedback-reason">
+                    <input type="radio" name="feedback-reason" value="wrong_text">Text is wrong
+                  </label>
+                  <label class="feedback-reason">
+                    <input type="radio" name="feedback-reason" value="reading_order">Wrong reading order
+                  </label>
+                  <label class="feedback-reason">
+                    <input type="radio" name="feedback-reason" value="table">Table is wrong
+                  </label>
+                  <label class="feedback-reason">
+                    <input type="radio" name="feedback-reason" value="handwriting">Handwriting is wrong
+                  </label>
+                  <label class="feedback-reason">
+                    <input type="radio" name="feedback-reason" value="other">Something else
+                  </label>
+                  <input class="feedback-note" id="feedback-note" type="text" maxlength="500"
+                    aria-label="Optional detail" placeholder="Optional detail">
+                  <button class="download" id="feedback-send" type="button" disabled>Send report</button>
+                </div>
+              </details>
             </div>
           </div>
         </div>
@@ -847,6 +957,7 @@
         </details>
         <div class="tab-panel active empty-panel" role="tabpanel" id="panel-rendered" aria-labelledby="tab-rendered">
           <div class="rendered-toolbar" id="rendered-toolbar" hidden>
+            <span class="refining-note" role="status" aria-live="polite">Refining layout</span>
             <button class="confidence-toggle" id="confidence-toggle" type="button" aria-pressed="false" aria-label="Turn provider confidence highlights on">Confidence</button>
           </div>
           <div class="rendered-view" id="rendered-view">
@@ -919,7 +1030,7 @@
       resultRequest: 0,
       hiddenKinds: new Set(),
       selectedFile: null,
-      selectedFileSize: 0,
+      selectedExample: null,
       feedbackSent: null,
       clientTimerStartedAt: null,
       clientTimerId: null,
@@ -972,75 +1083,51 @@
     fileInput.addEventListener("change", () => {
       const file = fileInput.files[0];
       state.selectedFile = file || null;
-      state.selectedFileSize = state.selectedFile?.size || 0;
+      state.selectedExample = null;
       byId("file-name").textContent = file ? file.name : "Choose one image, PDF, or TIFF";
       byId("parse-button").disabled = !file;
       byId("clear-button").disabled = !file && !state.response;
     });
 
+    function hasSelection() {
+      return Boolean(state.selectedFile || state.selectedExample);
+    }
+
     document.querySelectorAll("[data-example]").forEach((button) => {
       button.addEventListener("click", () => handleExample(button));
     });
 
-    async function handleExample(button) {
+    // The example already lives on the server, so name it instead of downloading its
+    // bytes and posting them straight back over a slow link.
+    function handleExample(button) {
       const name = button.dataset.example;
       const label = button.querySelector(".example-name")?.textContent || "example";
+      fileInput.value = "";
       state.selectedFile = null;
-      state.selectedFileSize = state.selectedFile?.size || 0;
-      byId("parse-button").disabled = true;
-      document.querySelectorAll("[data-example]").forEach((item) => {
-        item.disabled = true;
-      });
-      button.setAttribute("aria-busy", "true");
-      setStatus(`Loading ${label}...`, false, "busy");
-      try {
-        const response = await fetch(`/api/examples/${encodeURIComponent(name)}`);
-        if (!response.ok) throw new Error("The example could not be loaded");
-        const blob = await response.blob();
-        const dispositionName = response.headers
-          .get("content-disposition")
-          ?.match(/filename="?([^";]+)"?/)?.[1];
-        const extension = blob.type === "image/png" ? ".png" : ".pdf";
-        const filename = dispositionName || `${name}${extension}`;
-        fileInput.value = "";
-        state.selectedFile = new File(
-          [blob],
-          filename,
-          { type: blob.type || "application/octet-stream" }
-        );
-        byId("file-name").textContent = `${filename} · example`;
-        byId("parse-button").disabled = false;
-        byId("clear-button").disabled = false;
-        setStatus("Example ready. Select Parse to extract it locally.", false, "success");
-      } catch (error) {
-        state.selectedFile = null;
-        state.selectedFileSize = state.selectedFile?.size || 0;
-        byId("parse-button").disabled = true;
-        setStatus(error.message, true);
-      } finally {
-        button.removeAttribute("aria-busy");
-        document.querySelectorAll("[data-example]").forEach((item) => {
-          item.disabled = false;
-        });
-      }
+      state.selectedExample = name;
+      byId("file-name").textContent = `${label} · example`;
+      byId("parse-button").disabled = false;
+      byId("clear-button").disabled = false;
+      setStatus("Example ready. Select Parse to extract it locally.", false, "success");
     }
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const file = state.selectedFile;
-      if (!file) return;
+      const example = state.selectedExample;
+      if (!file && !example) return;
       const resultRequest = ++state.resultRequest;
       const previousSessionId = state.response?.session_id;
       startClientTimer();
       resetResult();
       state.selectedFile = file;
-      state.selectedFileSize = state.selectedFile?.size || 0;
+      state.selectedExample = example;
       setBusy(
         true,
         "Extracting text and structure locally."
       );
       const body = new FormData();
-      body.append("file", file);
+      if (file) body.append("file", file);
       let cleanupFailed = false;
       let timerOutcome = "error";
       try {
@@ -1051,7 +1138,10 @@
             cleanupFailed = true;
           }
         }
-        const response = await fetch("/api/process", { method: "POST", body });
+        const query = example
+          ? `?defer_presentation=1&example=${encodeURIComponent(example)}`
+          : "?defer_presentation=1";
+        const response = await fetch(`/api/process${query}`, { method: "POST", body });
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.detail || "The document could not be parsed");
         if (resultRequest !== state.resultRequest) return;
@@ -1090,7 +1180,7 @@
       const sessionId = state.response?.session_id;
       fileInput.value = "";
       state.selectedFile = null;
-      state.selectedFileSize = state.selectedFile?.size || 0;
+      state.selectedExample = null;
       byId("file-name").textContent = "Choose one image, PDF, or TIFF";
       byId("parse-button").disabled = true;
       resetResult();
@@ -1126,7 +1216,8 @@
         if (menu.open) closeActionMenus(menu);
       });
       menu.addEventListener("click", (event) => {
-        if (event.target.closest(".action-popover")) closeActionMenus();
+        // The feedback form stays open while it is being filled in; it closes on send.
+        if (event.target.closest(".action-popover:not(.feedback-form)")) closeActionMenus();
       });
     });
 
@@ -1135,7 +1226,12 @@
     });
 
     byId("feedback-up").addEventListener("click", () => sendFeedback("good"));
-    byId("feedback-down").addEventListener("click", () => sendFeedback("problem"));
+    byId("feedback-send").addEventListener("click", () =>
+      sendFeedback("problem", selectedReason(), byId("feedback-note").value)
+    );
+    byId("feedback-problem").addEventListener("change", () => {
+      byId("feedback-send").disabled = !selectedReason();
+    });
     byId("accept-alternative").addEventListener("click", () => handleCorrection("accept"));
     byId("edit-region").addEventListener("click", handleEditRegion);
     byId("save-region-edit").addEventListener("click", () => handleCorrection("edit"));
@@ -1330,8 +1426,8 @@
         state.rereadBusy = false;
         updateRereadAction(selectedRegion());
         updateReviewActions(selectedRegion());
-        byId("parse-button").disabled = !state.selectedFile;
-        byId("clear-button").disabled = !state.response && !state.selectedFile;
+        byId("parse-button").disabled = !hasSelection();
+        byId("clear-button").disabled = !state.response && !hasSelection();
       }
     }
 
@@ -1544,8 +1640,8 @@
       const parseButton = byId("parse-button");
       form.setAttribute("aria-busy", String(busy));
       parseButton.textContent = busy ? "Parsing..." : "Parse";
-      parseButton.disabled = busy || !state.selectedFile;
-      byId("clear-button").disabled = busy || (!state.response && !state.selectedFile);
+      parseButton.disabled = busy || !hasSelection();
+      byId("clear-button").disabled = busy || (!state.response && !hasSelection());
       ["copy-icon", "copy-text", "copy-markdown", "copy-json"].forEach((id) => {
         byId(id).disabled = busy || !state.response;
       });
@@ -1558,8 +1654,8 @@
     }
 
     function showParsingLoader(message) {
-      const panel = byId("panel-rendered");
-      if (!panel) return;
+      const view = byId("rendered-view");
+      if (!view) return;
       const loader = document.createElement("div");
       loader.className = "empty-state loader";
       const blocks = document.createElement("div");
@@ -1570,7 +1666,7 @@
       const detail = document.createElement("span");
       detail.textContent = message || "Extracting text with its position.";
       loader.append(blocks, caption, detail);
-      panel.replaceChildren(loader);
+      view.replaceChildren(loader);
     }
 
     function setStatus(message, isError, tone = "") {
@@ -1596,6 +1692,33 @@
       renderMetrics(payload);
       resetFeedback();
       renderPage();
+      loadPresentation(payload);
+    }
+
+    async function loadPresentation(payload) {
+      if (payload.presentation?.status !== "pending") return;
+      const toolbar = byId("rendered-toolbar");
+      toolbar.classList.add("refining");
+      try {
+        const response = await fetch(`/api/sessions/${payload.session_id}/presentation`);
+        if (!response.ok) return;
+        const presentation = await response.json();
+        // The session may have moved on while the draft was generating.
+        if (state.response?.session_id !== payload.session_id) return;
+        state.response.presentation = presentation;
+        state.response.stage_execution.push(...(presentation.stage_execution || []));
+        renderTiming(
+          state.response.timing,
+          state.response.page_execution,
+          state.response.stage_execution
+        );
+        renderRendered(state.response.result.pages, presentation.pages || []);
+        renderPage();
+      } catch (error) {
+        // The canonical rendering already on screen stays valid without a draft.
+      } finally {
+        toolbar.classList.remove("refining");
+      }
     }
 
     function renderMetrics(payload) {
@@ -1608,23 +1731,32 @@
       setMetric("metric-time", "\u23F1", Number.isFinite(seconds) ? `${seconds.toFixed(2)} s` : "");
       setMetric("metric-pages", "\u25A4", pages.length ? String(pages.length) : "");
       setMetric("metric-chars", "Tt", characters ? formatCount(characters) : "");
-      setMetric("metric-size", "\u{1F5AB}", formatBytes(state.selectedFileSize));
+      setMetric("metric-size", "\u{1F5AB}", formatBytes(payload.source_bytes || 0));
       const metrics = byId("doc-metrics");
       metrics.hidden = !Array.from(metrics.children).some((item) => !item.hidden);
     }
 
-    function resetFeedback() {
-      state.feedbackSent = null;
-      const panel = byId("feedback");
-      panel.hidden = !state.response;
-      ["feedback-up", "feedback-down"].forEach((id) => {
-        const button = byId(id);
-        button.disabled = !state.response;
-        button.setAttribute("aria-pressed", "false");
-      });
+    function selectedReason() {
+      return byId("feedback-problem").querySelector("input:checked")?.value || null;
     }
 
-    async function sendFeedback(verdict) {
+    function resetFeedback() {
+      state.feedbackSent = null;
+      byId("feedback").hidden = !state.response;
+      byId("feedback-up").disabled = !state.response;
+      byId("feedback-up").setAttribute("aria-pressed", "false");
+      byId("feedback-problem").open = false;
+      byId("feedback-down").removeAttribute("data-sent");
+      byId("feedback-problem")
+        .querySelectorAll("input:checked")
+        .forEach((input) => {
+          input.checked = false;
+        });
+      byId("feedback-note").value = "";
+      byId("feedback-send").disabled = true;
+    }
+
+    async function sendFeedback(verdict, reason = null, note = "") {
       if (!state.response || state.feedbackSent === verdict) return;
       const page = state.response.result?.pages?.[state.pageIndex];
       try {
@@ -1635,6 +1767,8 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               verdict,
+              reason,
+              note,
               revision: state.response.revision,
               page_number: page?.page_number ?? null,
               filename: state.response.filename ?? null,
@@ -1644,7 +1778,8 @@
         if (!response.ok) throw new Error(`Feedback failed (${response.status})`);
         state.feedbackSent = verdict;
         byId("feedback-up").setAttribute("aria-pressed", String(verdict === "good"));
-        byId("feedback-down").setAttribute("aria-pressed", String(verdict === "problem"));
+        byId("feedback-down").toggleAttribute("data-sent", verdict === "problem");
+        byId("feedback-problem").open = false;
         setCopyStatus(
           verdict === "good" ? "Thanks, marked as good." : "Reported to the review team."
         );
@@ -2853,7 +2988,12 @@
       const chip = document.createElement("span");
       chip.className = "control-state";
       chip.dataset.state = state;
-      chip.textContent = { selected: "✓", unselected: "", ambiguous: "?" }[state] ?? "?";
+      // Show the glyph that was actually drawn. Collapsing a slashed loop or a ring into
+      // "?" discards the evidence a reviewer needs to interpret the mark.
+      const annotation = Boolean(region.structure?.annotation_shape);
+      chip.textContent = region.structure?.mark_glyph
+        || ({ selected: "✓", unselected: "", ambiguous: "?" }[state] ?? "?");
+      if (annotation) chip.dataset.state = "annotation";
       chip.setAttribute("aria-label", `${state} control`);
       const marker = document.createElement("span");
       marker.className = "control-label";
@@ -3559,6 +3699,7 @@
       state.renderedMarkdownSessionId = null;
       state.renderedMarkdownRevision = null;
       byId("timing-card").hidden = true;
+      byId("doc-metrics").hidden = true;
       byId("review-details").hidden = true;
       byId("review-details").open = false;
       byId("region-categories").hidden = true;
@@ -3588,6 +3729,7 @@
       byId("copy-status").textContent = "";
       byId("copy-status").classList.remove("error");
       byId("rendered-toolbar").hidden = true;
+      byId("rendered-toolbar").classList.remove("refining");
       byId("confidence-toggle").disabled = false;
       byId("confidence-toggle").setAttribute("aria-pressed", "false");
       byId("confidence-toggle").setAttribute("aria-label", "Turn provider confidence highlights on");

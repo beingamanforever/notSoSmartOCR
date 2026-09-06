@@ -7,6 +7,7 @@ import csv
 import io
 import json
 import math
+import os
 import subprocess
 import threading
 import time
@@ -468,6 +469,12 @@ def _phi4_adapter_payload(
     }
 
 
+# Tesseract's OpenMP path costs more than it returns: on an 8-core host a single crop
+# reads 2.5x faster with one thread, and concurrent crops otherwise oversubscribe the
+# machine badly. One process per crop, one thread per process.
+_SINGLE_THREADED_ENV = {**os.environ, "OMP_THREAD_LIMIT": "1"}
+
+
 class TesseractReader:
     name = "tesseract"
 
@@ -509,6 +516,7 @@ class TesseractReader:
                 text=True,
                 timeout=self.timeout_seconds,
                 check=False,
+                env=_SINGLE_THREADED_ENV,
             )
         except FileNotFoundError as error:
             raise ReaderError("reader_unavailable", str(error)) from error
