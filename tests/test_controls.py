@@ -1932,3 +1932,27 @@ class FixedReader:
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
         return self.regions
+
+
+def test_a_capital_letter_is_not_a_ring_annotation(tmp_path: Path) -> None:
+    """At scan resolution a capital O satisfies every ring test except its shape:
+    an annotation encircles words, so it is wider than it is tall."""
+    source = tmp_path / "prose.png"
+    image = Image.new("L", (600, 200), "white")
+    draw = ImageDraw.Draw(image)
+    # a letter-shaped ring: roughly square, hollow, with an enclosed hole
+    draw.ellipse((60, 60, 96, 100), outline="black", width=4)
+    image.save(source)
+    label = _region("line", "Agreement between the parties", (40, 55, 560, 105), 1)
+
+    result = process_document(
+        source,
+        FixedReader([label]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    assert all(
+        region.kind != "checkbox"
+        or region.text_provenance["method"] != "enclosing_ring_annotation"
+        for region in result.pages[0].regions
+    )

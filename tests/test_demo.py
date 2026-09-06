@@ -587,7 +587,7 @@ def test_demo_processes_multi_page_tiff_and_clears_session() -> None:
         assert example.content.startswith(b"%PDF")
         assert example.headers["content-disposition"].startswith("inline;")
         for example_name in (
-            "formula-scan",
+            "contract-amendment",
             "academic-paper",
             "code",
             "financial-table",
@@ -699,8 +699,8 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     assert html.count("Not So Smart OCR") == 2
     assert "!SoSmartOCR" not in html
     assert html.count('class="example-button" type="button" data-example=') == 6
-    assert 'data-example="clinical-table"' in html
-    assert 'data-example="formula-scan"' in html
+    assert 'data-example="contract-agreement"' in html
+    assert 'data-example="contract-amendment"' in html
     assert 'data-example="academic-paper"' in html
     assert 'data-example="code"' in html
     assert 'data-example="financial-table"' in html
@@ -1011,7 +1011,7 @@ def test_public_raster_examples_process_end_to_end() -> None:
     app = create_app(PublicExampleReader())
 
     with TestClient(app) as client:
-        for example_name in ("formula-scan", "academic-paper"):
+        for example_name in ("contract-amendment", "academic-paper"):
             example = client.get(f"/api/examples/{example_name}")
             assert example.status_code == 200
             processed = client.post(

@@ -23,6 +23,8 @@ MARK_MODEL = {
     "license": "Apache-2.0",
 }
 MATH_TYPES = frozenset({"equation", "formula", "math"})
+# A hand-drawn ring encircles words, so it is wider than it is tall.
+MINIMUM_RING_ASPECT = 1.6
 
 
 @dataclass(frozen=True)
@@ -359,6 +361,10 @@ def _ring_marks(
             255,
             0,
         ).astype("uint8")
+        if box_width < box_height * MINIMUM_RING_ASPECT:
+            # An annotation is drawn around words, which are wider than they are tall.
+            # A capital O or D at scan resolution otherwise satisfies every ring test.
+            continue
         hole = _largest_hole_area(component, cv2)
         if hole <= area or not 0.45 <= hole / (box_width * box_height) <= 0.85:
             # An ellipse fills about 0.785 of its box. A ruled rectangle fills nearly
@@ -425,7 +431,11 @@ def _enclosed_regions(
         vertical = min(ring.bottom, region.bounding_box.bottom) - max(
             ring.top, region.bounding_box.top
         )
-        if overlap >= (ring.right - ring.left) * 0.6 and vertical > 0:
+        region_width = region.bounding_box.right - region.bounding_box.left
+        if (
+            vertical > 0
+            and overlap >= min((ring.right - ring.left), region_width) * 0.6
+        ):
             enclosed.append(region)
     return enclosed
 
