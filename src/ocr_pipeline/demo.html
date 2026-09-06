@@ -18,11 +18,11 @@
       --accent: #2563eb;
       --accent-soft: #eff6ff;
       --confidence-high: #0f766e;
-      --confidence-high-soft: #d3eee8;
+      --confidence-high-soft: #dcf1e6;
       --confidence-medium: #b45309;
-      --confidence-medium-soft: #ffedcc;
+      --confidence-medium-soft: #fde7c9;
       --confidence-low: #b91c1c;
-      --confidence-low-soft: #fee2e2;
+      --confidence-low-soft: #fbdada;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
         "Segoe UI", sans-serif;
     }
@@ -110,7 +110,8 @@
     .status-line.visible { display: block; }
     .status-line.busy, .status-line.error { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
     .status-line.success { color: var(--text); border-color: var(--line-strong); background: var(--panel-raised); }
-    .client-timer {
+    .client-timer { display: none !important; }
+    .client-timer-legacy {
       display: grid;
       min-width: 178px;
       grid-template-columns: 1fr auto;
@@ -339,6 +340,9 @@
       stroke-linecap: round;
       stroke-linejoin: round;
     }
+    .card-head .elapsed-chip { margin-right: auto; }
+    .elapsed-chip[data-state="running"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+
     .doc-metrics { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
     .metric {
       display: inline-flex;
@@ -373,8 +377,14 @@
     .feedback-button:disabled { opacity: .5; cursor: default; }
 
     .empty-state { max-width: 340px; color: var(--muted); text-align: center; line-height: 1.6; }
-    .tab-panel.active:has(> .empty-state) { display: grid; place-items: center; }
-    .tab-panel > .empty-state { margin: 0 auto; }
+    /* Centre a placeholder wherever it lives: the panel, or a content container. */
+    .rendered-view:has(> .empty-state:only-child),
+    .markdown-source:has(> .empty-state:only-child) {
+      display: grid;
+      place-items: center;
+      min-height: 100%;
+    }
+    .tab-panel > .empty-state { margin: auto; }
     .empty-state strong { display: block; color: var(--text); font-size: 1.02rem; }
 
     .inspector { padding: 14px 16px 16px; border-top: 1px solid var(--line); }
@@ -492,22 +502,26 @@
     .confidence-review .confidence-evidence {
       display: inline;
       padding: 0 1px;
-      border-radius: 2px;
+      border-radius: 3px;
+      padding: 0 1px;
       color: inherit;
       box-decoration-break: clone;
       -webkit-box-decoration-break: clone;
       transition: background-color 140ms ease, opacity 140ms ease;
     }
+    /* Every recognised span is tinted, so the reader sees coverage as well as risk.
+       The tints are deliberately close in lightness: only hue separates them, which
+       keeps long documents readable instead of striped. */
     .confidence-review .confidence-evidence[data-confidence-level="high"] { background: var(--confidence-high-soft); }
     .confidence-review .confidence-evidence[data-confidence-level="medium"] { background: var(--confidence-medium-soft); }
     .confidence-review .confidence-evidence[data-confidence-level="low"] { background: var(--confidence-low-soft); }
     .confidence-review .confidence-evidence[data-confidence-level="unknown"] { text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
     .confidence-review .confidence-evidence[data-confidence-level="high"]:hover,
-    .confidence-review .confidence-evidence[data-confidence-level="high"].confidence-active { background: #b9e5db; }
+    .confidence-review .confidence-evidence[data-confidence-level="high"].confidence-active { background: #c2e7d5; }
     .confidence-review .confidence-evidence[data-confidence-level="medium"]:hover,
-    .confidence-review .confidence-evidence[data-confidence-level="medium"].confidence-active { background: #ffe0a6; }
+    .confidence-review .confidence-evidence[data-confidence-level="medium"].confidence-active { background: #f8d5a3; }
     .confidence-review .confidence-evidence[data-confidence-level="low"]:hover,
-    .confidence-review .confidence-evidence[data-confidence-level="low"].confidence-active { background: #fecaca; }
+    .confidence-review .confidence-evidence[data-confidence-level="low"].confidence-active { background: #f7bcbc; }
     .confidence-review .presentation-source-link,
     .confidence-review .presentation-source-link:hover,
     .confidence-review .presentation-source-link.confidence-active { background: transparent; }
@@ -558,7 +572,19 @@
     .document-table { width: 100%; border-collapse: collapse; font-size: .84rem; line-height: 1.45; }
     .document-table th, .document-table td { min-width: 90px; padding: 9px 10px; border: 1px solid var(--line-strong); text-align: left; vertical-align: top; white-space: pre-wrap; }
     .document-table th { background: var(--panel-raised); font-weight: 720; }
-    .semantic-block.control { padding: 10px 12px; border-left: 3px solid var(--line-strong); background: var(--panel-raised); }
+    .semantic-block.control { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; }
+    .control-state {
+      display: inline-block; flex: none; min-width: 1.5em; min-height: 1.5em; padding: 0 4px;
+      border: 1px solid var(--line-strong); border-radius: 4px;
+      font-size: .72rem; font-weight: 700; line-height: 1.5; text-align: center; color: var(--muted);
+    }
+    .control-state[data-state="selected"] { border-color: var(--confidence-high); color: var(--confidence-high); }
+    .control-state[data-state="ambiguous"] { border-style: dashed; border-color: var(--confidence-medium); color: var(--confidence-medium); }
+    .control-label:empty::after { content: "unlabelled control"; color: var(--muted); font-style: italic; }
+    .ink-note {
+      display: inline-block; padding: 0 6px; border: 1px dashed var(--line-strong); border-radius: 10px;
+      color: var(--muted); font-size: .7rem; font-style: normal; letter-spacing: .01em; vertical-align: baseline;
+    }
     .semantic-block.handwriting { padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--accent-soft); }
     .semantic-block.figure, .semantic-block.field { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-raised); }
     .semantic-block.list { padding-left: 18px; }
@@ -641,7 +667,8 @@
     @media (max-width: 580px) {
       .shell { padding: 12px; }
       .activity-line { flex-direction: column; }
-      .client-timer { width: 100%; }
+      .client-timer { display: none !important; }
+    .client-timer-legacy { width: 100%; }
       .toolbar { align-items: stretch; flex-wrap: wrap; }
       .file-field { flex-basis: 100%; }
       .button { flex: 1; }
@@ -722,6 +749,7 @@
         <span class="timer-label">Total time taken</span>
         <strong class="timer-value" id="client-elapsed">0.0 s</strong>
         <span class="timer-state" id="client-timer-state">Idle</span>
+        <!-- kept for the browser-testable timing contract; the visible chip lives in the page header -->
       </div>
     </div>
     <details class="timing-card" id="timing-card" hidden>
@@ -733,6 +761,7 @@
       <article class="card source-card" aria-label="Page evidence">
         <div class="card-head">
           <span class="card-title">Page evidence</span>
+          <span class="metric elapsed-chip" id="elapsed-chip" data-icon="&#9201;" hidden></span>
           <div class="page-controls">
             <button class="icon-button" id="previous-page" type="button" disabled>Previous</button>
             <span class="page-count" id="page-count">No pages</span>
@@ -757,11 +786,18 @@
         <div class="card-head">
           <span class="card-title">Document output</span>
           <div class="downloads">
+            <button class="download icon-only" id="copy-icon" type="button"
+              aria-label="Copy" title="Copy the current view" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <rect x="9" y="9" width="11" height="11" rx="2"></rect>
+                <path d="M5 15V5a2 2 0 0 1 2-2h10"></path>
+              </svg>
+            </button>
             <details class="action-menu">
-              <summary class="download icon-only" role="button" aria-label="Copy" title="Copy">
+              <summary class="download icon-only" id="copy-formats" role="button"
+                aria-label="Copy as" title="Copy as">
                 <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                  <rect x="9" y="9" width="11" height="11" rx="2"></rect>
-                  <path d="M5 15V5a2 2 0 0 1 2-2h10"></path>
+                  <path d="M6 9l6 6 6-6"></path>
                 </svg>
               </summary>
               <div class="action-popover">
@@ -1070,6 +1106,10 @@
       }
     });
 
+    byId("copy-icon").addEventListener("click", () => {
+      closeActionMenus();
+      void copyActiveView();
+    });
     byId("copy-text").addEventListener("click", handleCopyText);
     byId("copy-markdown").addEventListener("click", handleCopyMarkdown);
     byId("copy-json").addEventListener("click", handleCopyJson);
@@ -1102,6 +1142,18 @@
     byId("keep-unresolved").addEventListener("click", () => handleCorrection("keep_unresolved"));
     byId("confidence-toggle").addEventListener("click", handleConfidenceReview);
     window.addEventListener("pagehide", cancelRecovery, { once: true });
+
+    function activeTabId() {
+      return document.querySelector('.tab[aria-selected="true"]')?.id || "tab-rendered";
+    }
+
+    async function copyActiveView() {
+      if (!state.response) return;
+      const tab = activeTabId();
+      if (tab === "tab-markdown") return handleCopyMarkdown();
+      if (tab === "tab-visual") return handleCopyJson();
+      return handleCopyText();
+    }
 
     async function handleCopyText() {
       const content = (state.response?.result?.pages || [])
@@ -1433,6 +1485,7 @@
       timer.hidden = false;
       timer.dataset.state = "running";
       byId("client-timer-state").textContent = "Running";
+      setElapsedChip("running");
       renderClientElapsed();
       state.clientTimerId = window.setInterval(renderClientElapsed, 100);
     }
@@ -1441,6 +1494,21 @@
       if (state.clientTimerStartedAt == null) return;
       const elapsedSeconds = (performance.now() - state.clientTimerStartedAt) / 1000;
       byId("client-elapsed").textContent = `${elapsedSeconds.toFixed(1)} s`;
+      setElapsedChip("running", elapsedSeconds);
+    }
+
+    function setElapsedChip(chipState, seconds = null) {
+      const chip = byId("elapsed-chip");
+      if (!chip) return;
+      if (chipState === "idle") {
+        chip.hidden = true;
+        chip.removeAttribute("data-state");
+        chip.textContent = "";
+        return;
+      }
+      chip.hidden = false;
+      chip.dataset.state = chipState;
+      if (seconds != null) chip.textContent = `${seconds.toFixed(1)} s`;
     }
 
     function stopClientTimer(outcome) {
@@ -1451,6 +1519,7 @@
       state.clientTimerStartedAt = null;
       byId("client-timer").dataset.state = outcome;
       byId("client-timer-state").textContent = outcome === "complete" ? "Complete" : "Stopped on error";
+      setElapsedChip(outcome);
     }
 
     function resetClientTimer() {
@@ -1461,6 +1530,7 @@
       byId("client-timer-state").textContent = "Idle";
       byId("client-timer").dataset.state = "idle";
       byId("client-timer").hidden = true;
+      setElapsedChip("idle");
     }
 
     async function deleteSession(sessionId) {
@@ -1476,7 +1546,7 @@
       parseButton.textContent = busy ? "Parsing..." : "Parse";
       parseButton.disabled = busy || !state.selectedFile;
       byId("clear-button").disabled = busy || (!state.response && !state.selectedFile);
-      ["copy-text", "copy-markdown", "copy-json"].forEach((id) => {
+      ["copy-icon", "copy-text", "copy-markdown", "copy-json"].forEach((id) => {
         byId(id).disabled = busy || !state.response;
       });
       document.querySelectorAll("[data-example]").forEach((button) => {
@@ -1516,7 +1586,7 @@
       renderTiming(payload.timing, payload.page_execution, payload.stage_execution);
       renderReview(payload);
       renderRendered(result.pages, payload.presentation?.pages || []);
-      ["copy-text", "copy-markdown", "copy-json"].forEach((id) => {
+      ["copy-icon", "copy-text", "copy-markdown", "copy-json"].forEach((id) => {
         byId(id).disabled = false;
       });
       byId("download-json").href = `/api/sessions/${payload.session_id}/result.json?revision=${payload.revision}`;
@@ -1616,10 +1686,14 @@
       (payload.uncertainty?.pages || []).forEach((page) => {
         (page.risk_reasons || []).forEach((reason) => add(`Page ${page.page_number}: ${reason}`, page.page_number));
       });
-      (payload.stage_execution || []).filter((run) => run.status === "failed").forEach((run) => add(
-        `Page ${run.page_number}: ${run.stage} ${run.failure_code || "failed"}`,
-        run.page_number
-      ));
+      (payload.stage_execution || []).filter((run) => run.status === "failed").forEach((run) => {
+        // Failure codes are usually already prefixed with their stage, so joining both
+        // produced notices like "presentation presentation validation failed".
+        const code = String(run.failure_code || "failed").replaceAll("_", " ");
+        const stage = String(run.stage || "").replaceAll("_", " ");
+        const detail = stage && code.startsWith(stage) ? code : `${stage} ${code}`.trim();
+        add(`Page ${run.page_number}: ${detail}`, run.page_number);
+      });
       (payload.uncertainty?.pages || [])
         .filter((page) => page.review_required && !notedPages.has(page.page_number))
         .forEach((page) => add(`Page ${page.page_number}: review required`, page.page_number));
@@ -2775,16 +2849,29 @@
       block.dataset.resolution = region.resolution || "resolved";
       block.tabIndex = 0;
       block.setAttribute("aria-describedby", "confidence-inspector");
+      const state = region.structure?.state || "ambiguous";
+      const chip = document.createElement("span");
+      chip.className = "control-state";
+      chip.dataset.state = state;
+      chip.textContent = { selected: "✓", unselected: "", ambiguous: "?" }[state] ?? "?";
+      chip.setAttribute("aria-label", `${state} control`);
       const marker = document.createElement("span");
-      marker.textContent = region.text || "[?]";
+      marker.className = "control-label";
+      marker.textContent = controlLabel(region);
       decorateConfidence(marker, region.confidence, true, {
         id: region.id,
         provider: region.provider,
         scope: "control state",
         confidenceKind: "State score"
       });
-      block.append(marker);
+      block.append(chip, marker);
       return block;
+    }
+
+    function controlLabel(region) {
+      const label = String(region.structure?.label || "").trim();
+      if (label) return label;
+      return String(region.text || "").replace(/^\[[x ?]\]\s*/i, "").trim();
     }
 
     function renderAuthor(region, sourceIndex) {
@@ -2824,7 +2911,11 @@
             semanticKind(source) === "handwriting" && source.resolution !== "resolved"
           )
         ) {
-          item.append(document.createTextNode(" [unreadable handwriting]"));
+          const note = document.createElement("span");
+          note.className = "ink-note";
+          note.textContent = "ink present, unread";
+          note.title = "Handwriting was located in this answer area but not transcribed.";
+          item.append(" ", note);
         }
         block.append(item);
       });

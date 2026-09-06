@@ -6,6 +6,7 @@ import copy
 import io
 import json
 import logging
+import secrets
 import re
 import shutil
 import subprocess
@@ -528,6 +529,7 @@ def create_app(
     max_decoded_pixels: int = MAX_DECODED_PIXELS,
     max_presentation_pages: int = 4,
     katex_asset_root: Path | None = None,
+    feedback_root: Path | None = None,
     warmup_completed: bool = False,
 ) -> Any:
     """Create the local demo app with an injectable OCR reader."""
@@ -564,6 +566,10 @@ def create_app(
         None,
     )
     temporary_root = tempfile.TemporaryDirectory(prefix="ocr-demo-")
+    # created on first write so a session that is never reviewed leaves no directory
+    feedback_dir = (
+        Path(feedback_root) if feedback_root else Path(temporary_root.name) / "feedback"
+    )
     session_root = Path(temporary_root.name)
     sessions = SessionStore(session_root)
     backend_version = _backend_version(active_reader)
@@ -1031,20 +1037,61 @@ def create_app(
 
     @app.post("/api/sessions/{session_id}/feedback")
     def handle_feedback(session_id: str, payload: dict[str, Any]) -> Any:
-        """Record a reviewer verdict so the review team can find the exact page."""
+        """Keep the verdict with the exact page image and the output it judged.
+
+        A verdict alone is not reviewable: the reviewer needs the pixels that were read
+        and the text produced from them, so both are copied out of the session before it
+        expires.
+        """
         verdict = payload.get("verdict")
         if verdict not in {"good", "problem"}:
             raise HTTPException(400, "verdict must be good or problem")
         session = _get_session(sessions, session_id)
+        page_number = payload.get("page_number")
         record = {
+            "id": secrets.token_urlsafe(8),
             "session_id": session_id,
             "verdict": verdict,
             "revision": session["revision"],
-            "page_number": payload.get("page_number"),
+            "page_number": page_number,
             "filename": payload.get("filename"),
+            "note": str(payload.get("note") or "")[:500] or None,
         }
+        with process_lock:
+            record["stored"] = _store_feedback(feedback_dir, record, session)
         LOGGER.warning("ocr_reviewer_feedback %s", json.dumps(record, sort_keys=True))
         return {"status": "recorded", **record}
+
+    @app.get("/api/feedback")
+    def list_feedback(limit: int = 50) -> Any:
+        """List stored reviewer feedback, newest first."""
+        if not feedback_dir.is_dir():
+            return {"feedback": []}
+        entries = []
+        for record_path in sorted(feedback_dir.glob("*/record.json"), reverse=True):
+            try:
+                entries.append(json.loads(record_path.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if len(entries) >= max(1, min(limit, 500)):
+                break
+        return {"feedback": entries}
+
+    @app.get("/api/feedback/{feedback_id}/page")
+    def feedback_page(feedback_id: str) -> Any:
+        """Return the exact page image the reviewer judged."""
+        page_path = feedback_dir / feedback_id / "page.png"
+        if not _safe_child(feedback_dir, page_path) or not page_path.is_file():
+            raise HTTPException(404, "Feedback page image was not found")
+        return FileResponse(page_path, media_type="image/png")
+
+    @app.get("/api/feedback/{feedback_id}/result")
+    def feedback_result(feedback_id: str) -> Any:
+        """Return the model output that the reviewer judged."""
+        result_path = feedback_dir / feedback_id / "result.json"
+        if not _safe_child(feedback_dir, result_path) or not result_path.is_file():
+            raise HTTPException(404, "Feedback result was not found")
+        return FileResponse(result_path, media_type="application/json")
 
     @app.post("/api/sessions/{session_id}/corrections")
     def handle_correction(session_id: str, payload: dict[str, Any]) -> Any:
@@ -1229,6 +1276,46 @@ def create_app(
         return Response(status_code=204)
 
     return app
+
+
+def _safe_child(root: Path, candidate: Path) -> bool:
+    """Reject ids that try to escape the feedback directory."""
+    try:
+        candidate.resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def _store_feedback(
+    feedback_dir: Path,
+    record: dict[str, Any],
+    session: dict[str, Any],
+) -> dict[str, Any]:
+    """Copy the judged page image and its output next to the verdict."""
+    stored: dict[str, Any] = {"page_image": False, "result": False}
+    target = feedback_dir / str(record["id"])
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        response = session.get("response")
+        if response is not None:
+            (target / "result.json").write_text(
+                json.dumps(response, indent=2, sort_keys=True, default=str),
+                encoding="utf-8",
+            )
+            stored["result"] = True
+        pages = session.get("pages") or []
+        index = record.get("page_number")
+        if isinstance(index, int) and 1 <= index <= len(pages):
+            shutil.copyfile(pages[index - 1], target / "page.png")
+            stored["page_image"] = True
+        (target / "record.json").write_text(
+            json.dumps({**record, "stored": stored}, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError:
+        LOGGER.exception("Storing reviewer feedback failed")
+    return stored
 
 
 def _get_session(sessions: SessionStore, session_id: str) -> dict[str, Any]:

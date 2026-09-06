@@ -372,6 +372,9 @@ def create_verified_app(
     katex_asset_root = getattr(args, "katex_asset_root", None)
     if katex_asset_root is not None:
         app_options["katex_asset_root"] = katex_asset_root
+    feedback_root = getattr(args, "feedback_root", None)
+    if feedback_root is not None:
+        app_options["feedback_root"] = feedback_root
     if presentation_reader is not None:
         app_options["presentation_reader"] = presentation_reader
         default_pages = getattr(args, "falcon_max_pages", 4)
@@ -493,6 +496,11 @@ def _parser() -> argparse.ArgumentParser:
         "--falcon-timeout-seconds",
         type=_positive_int,
         default=180,
+    )
+    parser.add_argument(
+        "--feedback-root",
+        type=Path,
+        help="Directory that keeps reviewer feedback across restarts",
     )
     parser.add_argument(
         "--katex-asset-root",

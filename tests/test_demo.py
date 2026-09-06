@@ -1095,7 +1095,8 @@ def test_form_rows_disclose_only_unresolved_handwriting_values() -> None:
 
     assert "segment.label_evidence_ids || []" in renderer
     assert 'semanticKind(source) === "handwriting"' in renderer
-    assert 'document.createTextNode(" [unreadable handwriting]")' in renderer
+    assert 'note.className = "ink-note"' in renderer
+    assert 'note.textContent = "ink present, unread"' in renderer
 
 
 def test_demo_markup_links_controls_tabs_and_output_panels() -> None:
@@ -4747,8 +4748,10 @@ def _page_png() -> bytes:
     return output.getvalue()
 
 
-def test_demo_records_reviewer_feedback_against_the_live_session() -> None:
-    app = create_app(ControlledReader())
+def test_demo_stores_feedback_with_the_judged_page_and_output(tmp_path: Path) -> None:
+    """A verdict alone is not reviewable: keep the pixels and the output beside it."""
+    feedback_root = tmp_path / "feedback"
+    app = create_app(ControlledReader(), feedback_root=feedback_root)
     with TestClient(app) as client:
         payload = client.post(
             "/api/process",
@@ -4756,23 +4759,40 @@ def test_demo_records_reviewer_feedback_against_the_live_session() -> None:
         ).json()
         session_id = payload["session_id"]
 
-        good = client.post(
+        recorded = client.post(
             f"/api/sessions/{session_id}/feedback",
-            json={"verdict": "good", "page_number": 1, "filename": "visit.png"},
+            json={"verdict": "problem", "page_number": 1, "filename": "visit.png"},
         )
-        assert good.status_code == 200
-        assert good.json()["verdict"] == "good"
-        assert good.json()["revision"] == payload["revision"]
+        assert recorded.status_code == 200
+        body = recorded.json()
+        assert body["verdict"] == "problem"
+        assert body["revision"] == payload["revision"]
+        assert body["stored"] == {"page_image": True, "result": True}
 
-        rejected = client.post(
-            f"/api/sessions/{session_id}/feedback", json={"verdict": "maybe"}
-        )
-        assert rejected.status_code == 400
+        listed = client.get("/api/feedback").json()["feedback"]
+        assert [item["id"] for item in listed] == [body["id"]]
+        assert listed[0]["filename"] == "visit.png"
 
-        missing = client.post(
-            "/api/sessions/does-not-exist/feedback", json={"verdict": "problem"}
+        page = client.get(f"/api/feedback/{body['id']}/page")
+        assert page.status_code == 200
+        assert page.headers["content-type"] == "image/png"
+
+        result = client.get(f"/api/feedback/{body['id']}/result").json()
+        assert result["session_id"] == session_id
+
+        assert client.get("/api/feedback/../../etc/page").status_code in {404, 400}
+        assert (
+            client.post(
+                f"/api/sessions/{session_id}/feedback", json={"verdict": "maybe"}
+            ).status_code
+            == 400
         )
-        assert missing.status_code == 404
+        assert (
+            client.post(
+                "/api/sessions/missing/feedback", json={"verdict": "good"}
+            ).status_code
+            == 404
+        )
 
 
 def test_demo_dismisses_action_menus_on_outside_click_and_escape() -> None:
