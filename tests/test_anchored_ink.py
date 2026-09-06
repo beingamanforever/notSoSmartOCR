@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -9,6 +10,7 @@ from ocr_pipeline.contracts import BoundingBox, TextRegion
 from ocr_pipeline.evidence_layout import EvidenceLayoutStage
 from ocr_pipeline.handwriting import HandwritingStage
 from ocr_pipeline.pipeline import process_document
+from ocr_pipeline.rendering import render_page_markdown
 
 
 class FixedReader:
@@ -54,7 +56,7 @@ def test_visible_ink_beside_label_becomes_unresolved_evidence(tmp_path: Path) ->
     page = result.pages[0]
     proposal = next(region for region in page.regions if region.kind == "handwriting")
     assert page.route == "review"
-    assert page.text.value == "RE:"
+    assert page.text.value == "RE: [unreadable handwriting]"
     assert proposal.text == ""
     assert proposal.confidence is None
     assert proposal.resolution == "unreadable"
@@ -113,10 +115,20 @@ def test_structured_field_proposal_is_reread_but_not_auto_adopted(
         region for region in result.pages[0].regions if region.kind == "handwriting"
     )
     ownership = proposal.structure["field_ownership"]
+    owner = next(
+        region
+        for region in result.pages[0].regions
+        if region.id == ownership["owner_block_id"]
+    )
+    [field] = owner.structure["fields"]
     assert specialist.calls == 1
     assert ownership["field_id"] == "p1-layout-1-field-1"
     assert ownership["owner_block_id"] == "p1-layout-1"
     assert ownership["label_evidence_ids"] == ["dose-label"]
+    assert ownership["value_evidence_ids"] == [proposal.id]
+    assert proposal.structure["layout_owner_id"] == owner.id
+    assert field["state"] == "illegible"
+    assert field["value_evidence_ids"] == [proposal.id]
     assert proposal.text == ""
     assert proposal.resolution == "unreadable"
     assert [(item.text, item.provider) for item in proposal.alternatives] == [
@@ -126,6 +138,15 @@ def test_structured_field_proposal_is_reread_but_not_auto_adopted(
     assert proposal.structure["handwriting_attempt"]["outcome"] == ("candidate_pending")
     assert proposal.structure["handwriting_attempt"]["reason"] == (
         "awaiting_independent_validation"
+    )
+    page = result.pages[0]
+    assert page.text.value == "Dose: [unreadable handwriting]"
+    assert (
+        render_page_markdown(
+            [asdict(region) for region in page.regions],
+            page.text.evidence_ids,
+        )
+        == "Dose: [unreadable handwriting]"
     )
 
 
@@ -167,6 +188,47 @@ def test_previous_row_line_is_not_owned_by_later_label(tmp_path: Path) -> None:
     assert result.pages[0].regions == [anchor]
 
 
+def test_overlapping_row_proposal_is_owned_by_stronger_field(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "stacked-filled-fields.png"
+    image = Image.new("L", (360, 140), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line((90, 56, 330, 56), fill="black", width=1)
+    draw.line((105, 71, 330, 71), fill="black", width=1)
+    draw.line((110, 65, 120, 51, 130, 69, 140, 53), fill="black", width=3)
+    draw.line((150, 68, 162, 52, 174, 69, 185, 54), fill="black", width=3)
+    draw.line((230, 74, 245, 77), fill="black", width=3)
+    image.save(source)
+    previous = _region("previous-label", "Patient Phone:", BoundingBox(20, 45, 80, 58))
+    current = _region(
+        "current-label", "Emergency Contact:", BoundingBox(20, 60, 100, 73)
+    )
+    current.reading_order = 2
+    regions = [
+        previous,
+        current,
+        _layout_field("p1-layout-4", "p1-layout-4-field-1", previous),
+        _layout_field("p1-layout-5", "p1-layout-5-field-1", current),
+    ]
+
+    result = AnchoredInkProposalStage(label_provider="base").apply(source, 1, regions)
+
+    proposals = [region for region in result if region.kind == "handwriting"]
+    assert len(proposals) == 1
+    proposal = proposals[0]
+    assert proposal.structure["field_ownership"]["field_id"] == ("p1-layout-5-field-1")
+    assert proposal.bounding_box.left <= 110
+    assert proposal.bounding_box.right >= 185
+    assert proposal.bounding_box.right < 230
+    assert proposal.bounding_box.bottom < 74
+    owner = next(region for region in result if region.id == "p1-layout-5")
+    [field] = owner.structure["fields"]
+    assert proposal.structure["layout_owner_id"] == owner.id
+    assert field["state"] == "illegible"
+    assert field["value_evidence_ids"] == [proposal.id]
+
+
 def _region(region_id: str, text: str, box: BoundingBox) -> TextRegion:
     return TextRegion(
         id=region_id,
@@ -176,4 +238,34 @@ def _region(region_id: str, text: str, box: BoundingBox) -> TextRegion:
         bounding_box=box,
         reading_order=1,
         provider="base",
+    )
+
+
+def _layout_field(
+    block_id: str,
+    field_id: str,
+    anchor: TextRegion,
+) -> TextRegion:
+    return TextRegion(
+        id=block_id,
+        kind="layout_block",
+        text=anchor.text,
+        confidence=anchor.confidence,
+        bounding_box=anchor.bounding_box,
+        reading_order=anchor.reading_order,
+        provider="evidence-spatial-layout",
+        structure={
+            "role": "layout_block",
+            "block_type": "form_row",
+            "child_evidence_ids": [anchor.id],
+            "lines": [{"evidence_ids": [anchor.id]}],
+            "fields": [
+                {
+                    "id": field_id,
+                    "label": anchor.text,
+                    "label_evidence_ids": [anchor.id],
+                    "value_evidence_ids": [],
+                }
+            ],
+        },
     )

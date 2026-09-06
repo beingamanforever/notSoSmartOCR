@@ -704,9 +704,9 @@
           <summary id="review-summary">Review required</summary>
           <ul class="review-list" id="review-list"></ul>
         </details>
-        <div class="tab-panel active empty-panel confidence-review" role="tabpanel" id="panel-rendered" aria-labelledby="tab-rendered">
+        <div class="tab-panel active empty-panel" role="tabpanel" id="panel-rendered" aria-labelledby="tab-rendered">
           <div class="rendered-toolbar" id="rendered-toolbar" hidden>
-            <button class="confidence-toggle" id="confidence-toggle" type="button" aria-pressed="true" aria-label="Turn provider confidence highlights off">Confidence</button>
+            <button class="confidence-toggle" id="confidence-toggle" type="button" aria-pressed="false" aria-label="Turn provider confidence highlights on">Confidence</button>
           </div>
           <div class="rendered-view" id="rendered-view">
             <div class="empty-state"><strong>Ready to extract</strong>Choose a document or public example to begin.</div>
@@ -785,7 +785,7 @@
       recoveryRequestId: null,
       recoveryController: null,
       recoverySequence: 0,
-      confidenceReview: true,
+      confidenceReview: false,
       activeEvidenceId: null,
       pinnedConfidence: null,
       renderedMarkdown: null,
@@ -2542,10 +2542,24 @@
       block.dataset.regionKind = "form_row";
       (region.structure?.fields || region.structure?.segments || []).forEach((segment) => {
         const item = document.createElement("span");
-        appendEvidenceRun(
-          item,
-          (segment.evidence_ids || []).map((evidenceId) => sourceIndex.get(evidenceId))
+        const sources = (segment.evidence_ids || []).map(
+          (evidenceId) => sourceIndex.get(evidenceId)
         );
+        appendEvidenceRun(item, sources);
+        const labelIds = new Set(segment.label_evidence_ids || []);
+        const hasResolvedLabel = sources.some((source) =>
+          source?.resolution === "resolved"
+          && source.text
+          && (labelIds.has(source.id) || (!labelIds.size && source.text.trim().endsWith(":")))
+        );
+        if (
+          hasResolvedLabel
+          && sources.some((source) =>
+            semanticKind(source) === "handwriting" && source.resolution !== "resolved"
+          )
+        ) {
+          item.append(document.createTextNode(" [unreadable handwriting]"));
+        }
         block.append(item);
       });
       return block;
@@ -2930,8 +2944,6 @@
         const selected = index === selectedIndex;
         const color = selected ? actionColor : regionColor(region);
         context.strokeStyle = color;
-        context.fillStyle = `${color}${selected ? "24" : "0d"}`;
-        context.fillRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
         context.strokeRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
         const kind = overlayCategoryLabel(categoryKey(region));
         const label = selected ? `${index + 1} ${kind}` : kind;
@@ -2952,8 +2964,6 @@
       context.save();
       context.lineWidth = Math.max(3, canvas.width / 500);
       context.strokeStyle = actionColor;
-      context.fillStyle = `${actionColor}1f`;
-      context.fillRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
       context.strokeRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
       context.restore();
     }
@@ -3184,7 +3194,7 @@
       state.image = null;
       state.imageRequest += 1;
       state.hiddenKinds.clear();
-      state.confidenceReview = true;
+      state.confidenceReview = false;
       state.activeEvidenceId = null;
       state.pinnedConfidence = null;
       byId("confidence-inspector").hidden = true;
@@ -3222,9 +3232,9 @@
       byId("copy-status").classList.remove("error");
       byId("rendered-toolbar").hidden = true;
       byId("confidence-toggle").disabled = false;
-      byId("confidence-toggle").setAttribute("aria-pressed", "true");
-      byId("confidence-toggle").setAttribute("aria-label", "Turn provider confidence highlights off");
-      byId("panel-rendered").classList.add("confidence-review");
+      byId("confidence-toggle").setAttribute("aria-pressed", "false");
+      byId("confidence-toggle").setAttribute("aria-label", "Turn provider confidence highlights on");
+      byId("panel-rendered").classList.remove("confidence-review");
       byId("panel-rendered").classList.add("empty-panel");
       setEmptyContent("rendered-view", "Ready to extract", "Choose a document or public example to begin.");
       setEmptyContent("markdown-source", "Ready to extract", "Exact downloaded Markdown will appear here.");

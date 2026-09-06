@@ -1119,6 +1119,17 @@ def _has_mark_shape(component: Any, cv2: Any, np: Any) -> bool:
     height, width = component.shape
     if float(np.mean(component > 0)) >= 0.85:
         return False
+    contours, hierarchy = cv2.findContours(
+        component.copy(),
+        cv2.RETR_CCOMP,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    if hierarchy is not None and any(
+        parent >= 0
+        and cv2.contourArea(contours[index]) >= max(3, component.size * 0.01)
+        for index, (*_, parent) in enumerate(hierarchy[0])
+    ):
+        return False
 
     corners = ()
     if 0.5 <= width / height <= 2:
@@ -1234,6 +1245,7 @@ def _square_boxes(mask: Any, cv2: Any) -> list[BoundingBox]:
         return []
 
     boxes = []
+    deformed_boxes = []
     for index, contour in enumerate(contours):
         left, top, box_width, box_height = cv2.boundingRect(contour)
         side = min(box_width, box_height)
@@ -1244,21 +1256,36 @@ def _square_boxes(mask: Any, cv2: Any) -> list[BoundingBox]:
         perimeter = cv2.arcLength(contour, True)
         polygon = cv2.approxPolyDP(contour, 0.04 * perimeter, True)
         rectangularity = cv2.contourArea(contour) / (box_width * box_height)
-        if len(polygon) != 4 or rectangularity < 0.6:
-            continue
         if hierarchy[0][index][2] < 0:
             continue
-        if _joins_text(mask, left, top, box_width, box_height):
-            continue
-        boxes.append(
-            BoundingBox(
-                left=left,
-                top=top,
-                right=left + box_width,
-                bottom=top + box_height,
-            )
+        box = BoundingBox(
+            left=left,
+            top=top,
+            right=left + box_width,
+            bottom=top + box_height,
         )
-    return boxes
+        if (
+            len(polygon) == 4
+            and rectangularity >= 0.6
+            and not _joins_text(mask, left, top, box_width, box_height)
+        ):
+            boxes.append(box)
+        elif 5 <= len(polygon) <= 6 and rectangularity >= 0.5:
+            deformed_boxes.append(box)
+    return boxes + [box for box in deformed_boxes if _has_square_row_peer(box, boxes)]
+
+
+def _has_square_row_peer(candidate: BoundingBox, boxes: list[BoundingBox]) -> bool:
+    candidate_side = _side(candidate)
+    _, candidate_y = _center(candidate)
+    for box in boxes:
+        box_side = _side(box)
+        if not 0.75 <= box_side / candidate_side <= 1.33:
+            continue
+        _, box_y = _center(box)
+        if abs(box_y - candidate_y) <= max(box_side, candidate_side) * 0.35:
+            return True
+    return False
 
 
 def _joins_text(

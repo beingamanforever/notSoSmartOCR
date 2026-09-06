@@ -1225,10 +1225,16 @@ def _block_text(block_type: str, lines: list[list[TextRegion]]) -> str:
 
 def _resolved_text(regions: list[TextRegion]) -> str:
     return " ".join(
-        region.text.strip()
-        for region in regions
-        if region.resolution == "resolved" and region.text.strip()
+        text for region in regions if (text := _canonical_region_text(region))
     )
+
+
+def _canonical_region_text(region: TextRegion) -> str:
+    if region.resolution == "resolved":
+        return region.text.strip()
+    if region.kind == "handwriting":
+        return "[unreadable handwriting]"
+    return ""
 
 
 def _form_fields(segments: list[list[TextRegion]]) -> list[list[TextRegion]]:

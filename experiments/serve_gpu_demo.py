@@ -343,7 +343,7 @@ def create_verified_app(
         ),
         stages=tuple(configured_stages),
         handwriting=handwriting,
-        build_label="2026-09-06-formula-source-trace-v3",
+        build_label="2026-09-06-form-evidence-v4",
         note=(
             "Configuration only. Table Transformer is augmented by conservative "
             "ruled-form proposals and count-gated grid repair. Models are loaded "

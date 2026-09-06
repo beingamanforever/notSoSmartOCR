@@ -31,6 +31,45 @@ def test_detect_controls_classifies_selected_and_unselected(tmp_path: Path) -> N
     ]
 
 
+def test_detect_controls_recovers_peer_supported_deformed_square(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "deformed-checkbox.png"
+    image = np.full((400, 420), 255, dtype=np.uint8)
+    cv2.rectangle(image, (30, 50), (46, 66), 0, 2)
+    cv2.rectangle(image, (100, 50), (116, 66), 0, 2)
+    cv2.polylines(
+        image,
+        [np.array([(102, 58), (107, 63), (120, 45)], dtype=np.int32)],
+        False,
+        0,
+        2,
+    )
+    cv2.putText(
+        image,
+        "Subsequent exam",
+        (118, 64),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.35,
+        0,
+        1,
+        cv2.LINE_8,
+    )
+    cv2.ellipse(image, (260, 100), (9, 6), 0, 0, 360, 0, 2)
+    cv2.line(image, (254, 106), (266, 94), 0, 2)
+    cv2.imwrite(str(source), image)
+
+    detections = detect_controls(source)
+
+    assert sorted(
+        ((item.bounding_box, item.state) for item in detections),
+        key=lambda item: item[0].left,
+    ) == [
+        (BoundingBox(29, 49, 48, 68), "unselected"),
+        (BoundingBox(99, 44, 122, 68), "selected"),
+    ]
+
+
 def test_thick_checkbox_border_does_not_imply_selected(tmp_path: Path) -> None:
     source = tmp_path / "thick-border.png"
     image = Image.new("L", (400, 400), "white")
@@ -721,6 +760,31 @@ def test_control_stage_recovers_label_anchored_x_and_tick(tmp_path: Path) -> Non
         control.structure["model"]["id"] == "opencv-label-anchored-residual-v1"
         for control in controls
     )
+
+
+def test_control_stage_rejects_label_anchored_slashed_circle(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "null-mark.png"
+    image = Image.new("L", (420, 100), "white")
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((330, 38, 348, 54), outline="black", width=2)
+    draw.line((332, 53, 346, 39), fill="black", width=2)
+    image.save(source)
+    label = _region(
+        "taps",
+        "TAPS SCORE (Substance Abuse Disorder):",
+        (60, 36, 325, 56),
+        1,
+    )
+
+    result = process_document(
+        source,
+        FixedReader([label]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    assert all(region.kind != "checkbox" for region in result.pages[0].regions)
 
 
 def test_control_stage_recovers_anchored_marks_without_label_punctuation(

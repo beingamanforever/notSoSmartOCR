@@ -20,6 +20,7 @@ from PIL import Image, ImageStat, UnidentifiedImageError
 
 from .contracts import BoundingBox, TextAlternative, TextRegion
 from .providers import LocalReader, ReaderError, TesseractReader
+from .verification import has_character_repetition
 
 MAX_LOCATOR_SIZE = 512
 DARK_PIXEL = 40
@@ -1996,8 +1997,15 @@ def _assess_band_replacement(
         and fallback_count <= baseline_count * 3
         and 1.1 <= coverage_ratio <= 3.0
     )
-    missing_text_recovery = (
-        missing_text_candidate and baseline_token_recall >= MATCH_OVERLAP
+    baseline_character_repetition = any(
+        has_character_repetition(region.text) for region in baseline
+    )
+    aligned_character_repetition = _aligned_character_repetition(
+        baseline,
+        fallback,
+    )
+    missing_text_recovery = missing_text_candidate and (
+        baseline_token_recall >= MATCH_OVERLAP or aligned_character_repetition
     )
     confirmation_candidate = (
         missing_text_candidate
@@ -2031,8 +2039,45 @@ def _assess_band_replacement(
         "baseline_mean_confidence": round(baseline_confidence, 6),
         "fallback_mean_confidence": round(fallback_confidence, 6),
         "repeated_text_risk": repeated_text_risk,
+        "baseline_character_repetition": baseline_character_repetition,
+        "aligned_character_repetition": aligned_character_repetition,
         "confirmation_candidate": confirmation_candidate,
     }
+
+
+def _aligned_character_repetition(
+    baseline: list[TextRegion],
+    fallback: list[TextRegion],
+) -> bool:
+    if not baseline or not all(
+        has_character_repetition(region.text) for region in baseline
+    ):
+        return False
+    matches = {
+        region.id: [
+            candidate for candidate in fallback if _same_text_line([region], candidate)
+        ]
+        for region in baseline
+    }
+    if any(not candidates for candidates in matches.values()):
+        return False
+    if any(
+        not any(candidate in candidates for candidates in matches.values())
+        for candidate in fallback
+    ):
+        return False
+    for region in baseline:
+        covered = _box_union(
+            [candidate.bounding_box for candidate in matches[region.id]]
+        )
+        overlap = max(
+            0,
+            min(covered.right, region.bounding_box.right)
+            - max(covered.left, region.bounding_box.left),
+        )
+        if overlap / (region.bounding_box.right - region.bounding_box.left) < 0.6:
+            return False
+    return True
 
 
 def _assess_band_confirmation(

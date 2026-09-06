@@ -8,6 +8,7 @@ from typing import Any
 from PIL import Image, UnidentifiedImageError
 
 from .contracts import BoundingBox, TextRegion
+from .evidence_layout import refresh_layout_owners
 from .providers import ReaderError
 
 PROVIDER = "opencv-anchored-ink"
@@ -62,15 +63,22 @@ class AnchoredInkProposalStage:
             (region for region in regions if self._is_anchor(region)),
             key=lambda region: (region.reading_order, region.id),
         )
-        for anchor in anchors:
-            proposal = _proposal(
-                mask, anchor, regions, page_number, len(proposals), cv2
-            )
-            if proposal is None or _duplicates(proposal.bounding_box, proposals):
+        for anchor_index, anchor in enumerate(anchors):
+            proposal = _proposal(mask, anchor, regions, page_number, anchor_index, cv2)
+            if proposal is None:
                 continue
-            proposals.append(proposal)
-            if len(proposals) >= self.max_proposals:
-                break
+            duplicate_index = _duplicate_index(proposal.bounding_box, proposals)
+            if duplicate_index is not None:
+                if _residual_area(proposal) > _residual_area(
+                    proposals[duplicate_index]
+                ):
+                    proposals[duplicate_index] = proposal
+                continue
+            if len(proposals) < self.max_proposals:
+                proposals.append(proposal)
+        for index, proposal in enumerate(proposals, start=1):
+            proposal.id = f"p{page_number}-anchored-ink-{index}"
+        _attach_to_form_fields(regions, proposals)
         return [*regions, *proposals]
 
     def _is_anchor(self, region: TextRegion) -> bool:
@@ -186,6 +194,71 @@ def _field_ownership(
         "label_evidence_ids": [anchor.id],
         "value_evidence_ids": [],
     }
+
+
+def _attach_to_form_fields(
+    regions: list[TextRegion],
+    proposals: list[TextRegion],
+) -> None:
+    region_index = {region.id: region for region in regions}
+    owner_ids: set[str] = set()
+    for proposal in proposals:
+        structure = proposal.structure or {}
+        ownership = structure.get("field_ownership")
+        if not isinstance(ownership, dict):
+            continue
+        owner_id = ownership.get("owner_block_id")
+        field_id = ownership.get("field_id")
+        owner = region_index.get(owner_id) if isinstance(owner_id, str) else None
+        if owner is None or not isinstance(field_id, str):
+            continue
+        owner_structure = owner.structure or {}
+        lines = owner_structure.get("lines")
+        if not isinstance(lines, list):
+            continue
+        anchor_ids = set(ownership.get("label_evidence_ids", []))
+        line = next(
+            (
+                candidate
+                for candidate in lines
+                if isinstance(candidate, dict)
+                and anchor_ids.intersection(candidate.get("evidence_ids", []))
+            ),
+            None,
+        )
+        if line is None:
+            continue
+        structure["layout_owner_id"] = owner.id
+        structure["layout_owner_type"] = "form_row"
+        proposal.structure = structure
+        owner_structure["child_evidence_ids"] = list(
+            dict.fromkeys([*owner_structure.get("child_evidence_ids", []), proposal.id])
+        )
+        line["evidence_ids"] = list(
+            dict.fromkeys([*line.get("evidence_ids", []), proposal.id])
+        )
+        owner.structure = owner_structure
+        owner_ids.add(owner.id)
+    refresh_layout_owners([*regions, *proposals], owner_ids)
+    for proposal in proposals:
+        ownership = (proposal.structure or {}).get("field_ownership")
+        if not isinstance(ownership, dict):
+            continue
+        owner = region_index.get(ownership.get("owner_block_id"))
+        fields = (owner.structure or {}).get("fields") if owner else None
+        if not isinstance(fields, list):
+            continue
+        field = next(
+            (
+                candidate
+                for candidate in fields
+                if isinstance(candidate, dict)
+                and candidate.get("id") == ownership.get("field_id")
+            ),
+            None,
+        )
+        if field is not None:
+            ownership["value_evidence_ids"] = list(field.get("value_evidence_ids", []))
 
 
 def _nearest_writing_line(
@@ -323,6 +396,19 @@ def _residual_ink_box(
         components.append((left, top, width, height, area))
     if not components:
         return None, 0, 0
+    same_line = [
+        component for component in components if field.top + component[1] <= line.bottom
+    ]
+    next_line_top = min(
+        (
+            field.top + component[1]
+            for component in components
+            if field.top + component[1] > line.bottom
+        ),
+        default=None,
+    )
+    if same_line:
+        components = same_line
 
     left = min(component[0] for component in components)
     top = min(component[1] for component in components)
@@ -337,12 +423,15 @@ def _residual_ink_box(
         return None, len(components), residual_area
 
     padding = max(2, line_height // 4)
+    crop_bottom = min(page_height, field.top + bottom + padding)
+    if next_line_top is not None:
+        crop_bottom = min(crop_bottom, next_line_top)
     return (
         BoundingBox(
             max(field.left, field.left + left - padding),
             max(field.top, field.top + top - padding),
             min(page_width, field.left + right + padding),
-            min(page_height, field.top + bottom + padding),
+            crop_bottom,
         ),
         len(components),
         residual_area,
@@ -359,8 +448,11 @@ def _intersection(first: BoundingBox, second: BoundingBox) -> BoundingBox | None
     return BoundingBox(left, top, right, bottom)
 
 
-def _duplicates(box: BoundingBox, proposals: list[TextRegion]) -> bool:
-    for proposal in proposals:
+def _duplicate_index(
+    box: BoundingBox,
+    proposals: list[TextRegion],
+) -> int | None:
+    for index, proposal in enumerate(proposals):
         overlap = _intersection(box, proposal.bounding_box)
         if overlap is None:
             continue
@@ -371,8 +463,12 @@ def _duplicates(box: BoundingBox, proposals: list[TextRegion]) -> bool:
             proposal_box.bottom - proposal_box.top
         )
         if overlap_area / min(box_area, proposal_area) >= 0.5:
-            return True
-    return False
+            return index
+    return None
+
+
+def _residual_area(proposal: TextRegion) -> int:
+    return int((proposal.text_provenance or {}).get("residual_area", 0))
 
 
 def _valid_box(box: BoundingBox | None) -> bool:

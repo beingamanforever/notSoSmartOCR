@@ -45,6 +45,7 @@ from .table_topology import TableTopologyError, validate_table_topology
 try:
     from fastapi import FastAPI, File, HTTPException, Request, UploadFile
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+    from starlette.middleware.gzip import GZipMiddleware
 except ImportError:  # pragma: no cover - exercised only without demo dependencies
     FastAPI = None
     File = None
@@ -55,6 +56,7 @@ except ImportError:  # pragma: no cover - exercised only without demo dependenci
     HTMLResponse = None
     JSONResponse = None
     Response = None
+    GZipMiddleware = None
 
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -588,6 +590,7 @@ def create_app(
         RequestLimitMiddleware,
         max_body_bytes=max_upload_bytes + MULTIPART_OVERHEAD_BYTES,
     )
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     @app.middleware("http")
     async def handle_no_store(request: Any, call_next: Any) -> Any:
@@ -2691,7 +2694,9 @@ def _page_uncertainty(page: dict[str, Any]) -> dict[str, Any]:
     evidence_ids = set(page["text"]["evidence_ids"])
     primary = [region for region in regions if region["id"] in evidence_ids]
     confidences = [
-        region["confidence"] for region in primary if region["confidence"] is not None
+        region["confidence"]
+        for region in primary
+        if region["resolution"] == "resolved" and region["confidence"] is not None
     ]
     unresolved = 0
     conflicting = 0

@@ -11,7 +11,11 @@ from typing import Any
 
 from .contracts import BoundingBox, DocumentResult, PageResult, TextRegion
 from .rendering import render_evidence
-from .verification import TEXT_RISK_ORDER, literal_text_risks
+from .verification import (
+    TEXT_RISK_ORDER,
+    has_character_repetition,
+    literal_text_risks,
+)
 
 NON_TEXT_VISUAL_KINDS = {
     "coverage_risk",
@@ -33,6 +37,7 @@ RUNTIME_RISK_REASONS = {
     "repeated_text",
     "tail_repetition",
     "repeated_suffix",
+    "character_repetition",
 } | set(TEXT_RISK_ORDER)
 RUNTIME_RISK_PROVIDER = "deterministic-output-validation"
 
@@ -159,6 +164,8 @@ def _identify_page_risks(page: PageResult) -> dict[str, list[str]]:
             reasons.append("tail_repetition")
         if _has_repeated_suffix(region.text):
             reasons.append("repeated_suffix")
+        if has_character_repetition(region.text):
+            reasons.append("character_repetition")
         reasons.extend(literal_text_risks(region.text))
         if reasons:
             risks[region.id] = reasons

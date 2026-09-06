@@ -273,6 +273,11 @@ class FalconOCRReader:
         except (ImportError, OSError) as error:
             raise ReaderError("falcon_import_failed", str(error)) from error
 
+        # Variable crop shapes recompile flex_attention; past the default limit of 8
+        # torch falls back permanently to the unfused kernel and generation gets ~15x slower.
+        torch._dynamo.config.cache_size_limit = 256
+        torch._dynamo.config.accumulated_recompile_limit = 2048
+
         options: dict[str, object] = {
             "trust_remote_code": True,
             "torch_dtype": torch.bfloat16,

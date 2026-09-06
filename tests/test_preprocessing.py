@@ -1054,6 +1054,93 @@ def test_wide_band_reader_recovers_missing_text_end_to_end(tmp_path: Path) -> No
     assert band["repeated_text_risk"] is False
 
 
+def test_wide_band_reader_recovers_character_repetition_without_same_reader_proof(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (300, 120), "white").save(source)
+    primary = ScriptedBandView(
+        {
+            "page.png": [
+                (
+                    "te eeessssmennt pppatttt",
+                    BoundingBox(10, 20, 290, 28),
+                    0.4,
+                )
+            ]
+        }
+    )
+    fallback_text = "this assessment form contains patient information"
+    fallback = ScriptedBandView(
+        {
+            "band-1.png": [
+                (fallback_text, BoundingBox(24, 24, 840, 48), 0.92),
+            ]
+        }
+    )
+    confirmation = ScriptedBandView(
+        {
+            "band-1.png": [
+                (fallback_text, BoundingBox(24, 24, 840, 48), 0.91),
+            ]
+        }
+    )
+    reader = WideBandFallbackReader(
+        primary,
+        fallback,
+        confirmation_reader=confirmation,
+    )
+
+    regions = reader.read(source, 1)
+
+    assert [region.text for region in regions] == [fallback_text]
+    assert confirmation.calls == []
+    band = reader.coverage_assessment(1)["pages"][0]["bands"][0]
+    assert band["baseline_character_repetition"] is True
+    assert band["aligned_character_repetition"] is True
+    assert band["selection_reason"] == "missing_text_recovery"
+
+
+def test_character_repetition_does_not_replace_an_uncorrupted_neighbor(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (300, 120), "white").save(source)
+    baseline = [
+        (
+            "te eeessssmennt pppatttt",
+            BoundingBox(10, 20, 290, 28),
+            0.4,
+        ),
+        ("stable clinical line", BoundingBox(10, 32, 290, 40), 0.4),
+    ]
+    fallback = ScriptedBandView(
+        {
+            "band-1.png": [
+                (
+                    "this assessment form contains patient information",
+                    BoundingBox(24, 24, 840, 48),
+                    0.92,
+                ),
+                (
+                    "another unrelated clinical phrase",
+                    BoundingBox(24, 60, 840, 84),
+                    0.93,
+                ),
+            ]
+        }
+    )
+    reader = WideBandFallbackReader(ScriptedBandView({"page.png": baseline}), fallback)
+
+    regions = reader.read(source, 1)
+
+    assert [region.text for region in regions] == [text for text, _, _ in baseline]
+    band = reader.coverage_assessment(1)["pages"][0]["bands"][0]
+    assert band["baseline_character_repetition"] is True
+    assert band["aligned_character_repetition"] is False
+    assert band["selected_view"] == "baseline"
+
+
 def test_wide_band_reader_rejects_weak_missing_text_fallback(tmp_path: Path) -> None:
     source = tmp_path / "page.png"
     Image.new("RGB", (200, 120), "white").save(source)

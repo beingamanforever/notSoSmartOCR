@@ -758,8 +758,14 @@ def test_anchored_residual_proposal_is_reread_as_unresolved_evidence(
     assert crop_reader.crop_sizes == [(40, 16), (64, 40)]
     assert crop_reader.crop_modes == ["RGB", "RGB"]
     assert page.route == "review"
-    assert page.text.value == "Dose:"
-    assert page.text.evidence_ids == ["label"]
+    assert page.text.value == (
+        "Dose: [unreadable handwriting] [unreadable handwriting]"
+    )
+    assert page.text.evidence_ids == [
+        "label",
+        "anchored-proposal",
+        "unrelated-unreadable",
+    ]
     processed = next(region for region in page.regions if region.id == proposal.id)
     assert processed.text == ""
     assert processed.resolution == "unreadable"
@@ -981,7 +987,7 @@ def test_anchored_residual_rejects_nonliteral_specialist_outputs(
     assert processed.alternatives == []
     assert processed.structure["handwriting_review"]["reason"] == reason
     assert page.route == "review"
-    assert page.text.value == ""
+    assert page.text.value == "[unreadable handwriting]"
 
 
 def test_anchored_residual_crop_disagreement_keeps_only_valid_alternatives(
@@ -1009,7 +1015,7 @@ def test_anchored_residual_crop_disagreement_keeps_only_valid_alternatives(
     assert proposal.alternatives[0].text_provenance["view"] == "tight"
     assert proposal.structure["handwriting_review"]["reason"] == ("crop_disagreement")
     assert page.route == "review"
-    assert page.text.value == ""
+    assert page.text.value == "[unreadable handwriting]"
 
 
 def test_manual_review_routes_high_confidence_text_inside_a_form_grid(

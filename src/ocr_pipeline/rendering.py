@@ -10,6 +10,7 @@ from .contracts import EvidenceText, TextRegion
 from .table_topology import TableTopology, TableTopologyError, validate_table_topology
 
 INLINE_MAX_GAP_HEIGHTS = 3
+UNREADABLE_HANDWRITING = "[unreadable handwriting]"
 
 
 def render_evidence(regions: list[TextRegion]) -> EvidenceText:
@@ -21,17 +22,25 @@ def render_evidence(regions: list[TextRegion]) -> EvidenceText:
         )
     ]
     rendered = [
-        region
+        (region, _plain_text(region))
         for region in ordered
-        if region.resolution == "resolved"
+        if (region.resolution == "resolved" or region.kind == "handwriting")
         and region.kind != "checkbox"
         and (region.structure or {}).get("role") != "table_source"
         and not (region.structure or {}).get("layout_owner_id")
     ]
     return EvidenceText(
-        value=" ".join(region.text for region in rendered),
-        evidence_ids=[region.id for region in rendered],
+        value=" ".join(text for _, text in rendered),
+        evidence_ids=[region.id for region, _ in rendered],
     )
+
+
+def _plain_text(region: TextRegion) -> str:
+    if region.resolution == "resolved":
+        return region.text
+    if region.kind == "handwriting":
+        return UNREADABLE_HANDWRITING
+    return ""
 
 
 def render_page_markdown(
@@ -191,7 +200,7 @@ def _markdown_block(
         value = text if resolution == "resolved" else ""
         block = f"**{label}:** {value}" if label else value
     else:
-        block = text if resolution == "resolved" else ""
+        block = _display_text(region)
     return block
 
 
@@ -324,7 +333,7 @@ def _canonical_layout_text(
 ) -> str:
     structure = _structure(region)
     if structure.get("role") != "layout_block":
-        return _text(region)
+        return _display_text(region)
     if structure.get("block_type") == "formula" and _resolution(region) == "resolved":
         return _text(region)
     groups = (
@@ -339,12 +348,11 @@ def _canonical_layout_text(
         if not isinstance(group, dict):
             continue
         values = [
-            _text(source).strip()
+            value
             for evidence_id in group.get("evidence_ids", [])
             if isinstance(evidence_id, str)
             and (source := source_index.get(evidence_id)) is not None
-            and _resolution(source) == "resolved"
-            and _text(source).strip()
+            and (value := _display_text(source))
         ]
         rendered_lines.append(" ".join(values))
     separator = " | " if structure.get("block_type") == "form_row" else " "
@@ -374,6 +382,14 @@ def _kind(region: dict[str, Any]) -> str:
 
 def _text(region: dict[str, Any]) -> str:
     return str(region.get("text", ""))
+
+
+def _display_text(region: dict[str, Any]) -> str:
+    if _resolution(region) == "resolved":
+        return _text(region).strip()
+    if _semantic_kind(region) == "handwriting":
+        return UNREADABLE_HANDWRITING
+    return ""
 
 
 def _resolution(region: dict[str, Any]) -> str:

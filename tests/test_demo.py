@@ -692,6 +692,7 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
         response = client.get("/")
 
     assert response.status_code == 200
+    assert response.headers["content-encoding"] == "gzip"
     html = response.text
     assert html.count('class="tab" role="tab"') == 3
     assert ">Readable draft</button>" not in html
@@ -724,7 +725,7 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     assert 'const extension = blob.type === "image/png" ? ".png" : ".pdf";' in html
     assert "renderUncertainty();" not in html
     assert 'class="inspector empty"' in html
-    assert 'class="tab-panel active empty-panel confidence-review"' in html
+    assert 'class="tab-panel active empty-panel"' in html
     assert "Ready to extract" in html
     assert ">Text output</button>" in html
     assert ">Visual</button>" in html
@@ -1081,6 +1082,19 @@ def test_demo_uses_neutral_navy_and_blue_visual_roles() -> None:
     assert (
         "return regionColors[categoryKey(regionOrKind)] || regionColors.text;" in html
     )
+    assert "context.fillRect(box.left, box.top" not in html
+    assert "context.strokeRect(box.left, box.top" in html
+
+
+def test_form_rows_disclose_only_unresolved_handwriting_values() -> None:
+    html = TestClient(create_app(ControlledReader())).get("/").text
+    start = html.index("function renderFormRow")
+    end = html.index("function canonicalLayoutText", start)
+    renderer = html[start:end]
+
+    assert "segment.label_evidence_ids || []" in renderer
+    assert 'semanticKind(source) === "handwriting"' in renderer
+    assert 'document.createTextNode(" [unreadable handwriting]")' in renderer
 
 
 def test_demo_markup_links_controls_tabs_and_output_panels() -> None:
@@ -1117,11 +1131,13 @@ def test_demo_markup_links_controls_tabs_and_output_panels() -> None:
     assert reread_attrs["disabled"] is None
     assert by_element_id["reread-status"][1]["role"] == "status"
     assert by_element_id["rendered-toolbar"][1]["hidden"] is None
-    assert by_element_id["confidence-toggle"][1]["aria-pressed"] == "true"
+    assert by_element_id["confidence-toggle"][1]["aria-pressed"] == "false"
     assert (
         by_element_id["confidence-toggle"][1]["aria-label"]
-        == "Turn provider confidence highlights off"
+        == "Turn provider confidence highlights on"
     )
+    assert "confidenceReview: false" in response.text
+    assert "state.confidenceReview = false;" in response.text
     assert (
         'element.dataset.confidenceScope = evidence.scope || "region";' in response.text
     )
@@ -1490,7 +1506,7 @@ def test_demo_reports_evidence_uncertainty_without_changing_result_schema() -> N
                     "page_number": 1,
                     "review_required": True,
                     "mean_primary_confidence": 0.925,
-                    "primary_regions": 3,
+                    "primary_regions": 4,
                     "confidence_regions": 2,
                     "unresolved_evidence": 1,
                     "conflicting_evidence": 2,
@@ -1533,7 +1549,9 @@ def test_demo_adds_review_only_local_page_presentation_without_replacing_evidenc
         html = client.get("/").text
 
     page = payload["result"]["pages"][0]
-    assert page["text"]["value"] == "Primary text Value | Value |\n| --- |\n| 42 |"
+    assert page["text"]["value"] == (
+        "Primary text Value [unreadable handwriting] | Value |\n| --- |\n| 42 |"
+    )
     assert "presentation" not in page
     assert payload["presentation"] == {
         "schema_version": 2,

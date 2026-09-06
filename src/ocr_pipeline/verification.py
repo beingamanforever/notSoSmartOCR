@@ -18,6 +18,7 @@ TEXT_RISK_ORDER = (
     "invalid_calendar_date",
     "truncated_labeled_date",
 )
+CHARACTER_REPETITION = re.compile(r"([A-Za-z])\1{3,}", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -205,6 +206,13 @@ def literal_text_risks(text: str) -> tuple[str, ...]:
         if token is None and _is_truncated_date(value):
             found.add("truncated_labeled_date")
     return tuple(risk for risk in TEXT_RISK_ORDER if risk in found)
+
+
+def has_character_repetition(text: str) -> bool:
+    """Return whether text contains an implausible alphabetic character run."""
+    if not isinstance(text, str):
+        raise TypeError("OCR text must be a string")
+    return CHARACTER_REPETITION.search(text) is not None
 
 
 def _date_risk(match: re.Match[str]) -> str | None:

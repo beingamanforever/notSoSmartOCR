@@ -407,7 +407,7 @@ def test_verified_gpu_app_uses_falcon_category_crops_without_dispute_stage() -> 
     assert formula_stage.reader is options["presentation_reader"]
     assert "source-ink formula crops" in options["composition"].note
     assert "human acceptance" in options["composition"].note
-    assert options["composition"].build_label == "2026-09-06-formula-source-trace-v3"
+    assert options["composition"].build_label == "2026-09-06-form-evidence-v4"
     assert "review evidence" in options["composition"].note
 
 

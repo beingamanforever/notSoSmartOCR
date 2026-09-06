@@ -95,6 +95,13 @@ def test_normal_prose_single_word_and_table_repetition_are_not_risky() -> None:
     assert identify_risky_regions(document) == {}
 
 
+def test_repeated_character_corruption_is_risky() -> None:
+    document = _document()
+    document.pages[0].regions[0].text = "te eeessssmennt pppatttt"
+
+    assert "character_repetition" in identify_risky_regions(document)["stable"]
+
+
 def test_tail_repetition_is_flagged_without_changing_literal_text() -> None:
     document = _document()
     text = "stable prefix " + "AB12|" * 8
