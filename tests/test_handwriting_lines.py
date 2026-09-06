@@ -88,7 +88,6 @@ def test_stage_proposes_lines_when_most_of_the_page_reads_poorly(
         assert region.resolution == "unreadable"
         assert region.structure["handwriting_candidate"] is True
         assert region.structure["handwriting_candidate_source"] == CANDIDATE_SOURCE
-    assert proposals[0].text_provenance["page_low_confidence_ratio"] == 1.0
     # proposals must not disturb the reading order of existing evidence
     assert proposals[0].reading_order > max(r.reading_order for r in _page(10, 0.5))
 
@@ -103,13 +102,31 @@ def test_stage_leaves_a_confidently_read_page_untouched(tmp_path: Path) -> None:
     assert detector.calls == []
 
 
-def test_stage_ignores_a_page_with_too_little_measured_text(tmp_path: Path) -> None:
+def test_stage_fires_on_a_single_poorly_read_field(tmp_path: Path) -> None:
+    """A mixed printed form must still reach the specialist for its few written fields."""
     source = tmp_path / "page.png"
     Image.new("RGB", (240, 240), "white").save(source)
     detector = ScriptedDetector([BoundingBox(8, 18, 210, 40)])
 
-    regions = _page(3, 0.2)
-    assert HandwritingLineStage(detector).apply(source, 1, regions) == regions
+    regions = _page(9, 0.98)
+    regions.append(_region("r-50", "welking", (10, 20, 200, 38), 0.63))
+
+    result = HandwritingLineStage(detector).apply(source, 1, regions)
+
+    assert sum(region.kind == "handwriting" for region in result) == 1
+
+
+def test_stage_skips_evidence_owned_by_the_table_or_formula_specialists(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "page.png"
+    Image.new("RGB", (240, 240), "white").save(source)
+    detector = ScriptedDetector([BoundingBox(8, 18, 210, 40)])
+
+    for owner in ("table_source", "formula"):
+        region = _region("r-50", "cell", (10, 20, 200, 38), 0.4)
+        region.structure = {"role": owner}
+        assert HandwritingLineStage(detector).apply(source, 1, [region]) == [region]
     assert detector.calls == []
 
 
@@ -167,7 +184,7 @@ def test_detector_reports_an_unreadable_page_as_a_reader_error(tmp_path: Path) -
 
 def test_stage_rejects_invalid_configuration() -> None:
     detector = ScriptedDetector([])
-    with pytest.raises(ValueError, match="minimum_low_confidence_ratio"):
-        HandwritingLineStage(detector, minimum_low_confidence_ratio=0)
+    with pytest.raises(ValueError, match="confidence_threshold"):
+        HandwritingLineStage(detector, confidence_threshold=1.5)
     with pytest.raises(ValueError, match="max_lines"):
         HandwritingLineStage(detector, max_lines=0)

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ocr_pipeline.anchored_ink import AnchoredInkProposalStage
+from ocr_pipeline.digit_verification import DigitVerificationStage
 from ocr_pipeline.handwriting_lines import DocTRLineDetector, HandwritingLineStage
 from ocr_pipeline.controls import GeometricControlStage
 from ocr_pipeline.demo import CompositionDescriptor, _read_presentations, create_app
@@ -317,6 +318,7 @@ def create_verified_app(
     stages.extend((risk, EvidenceLayoutStage()))
     if formula_stage is not None:
         stages.append(formula_stage)
+    stages.append(DigitVerificationStage(cell, text_provider=base_reader.name))
     stages.append(AnchoredInkProposalStage(label_provider=base_reader.name))
     if handwriting_stage is not None:
         stages.append(

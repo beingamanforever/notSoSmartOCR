@@ -788,6 +788,7 @@
       confidenceReview: false,
       activeEvidenceId: null,
       pinnedConfidence: null,
+      inspectorAnchor: null,
       renderedMarkdown: null,
       renderedMarkdownSessionId: null,
       renderedMarkdownRevision: null
@@ -1746,23 +1747,46 @@
       renderedView.querySelector(".confidence-active")?.classList.remove("confidence-active");
       target.classList.add("confidence-active");
       inspector.hidden = false;
+      state.inspectorAnchor = target;
+      positionConfidenceInspector();
+      state.activeEvidenceId = target.dataset.evidenceId || null;
+      drawPage();
+    }
+
+    function positionConfidenceInspector() {
+      const inspector = byId("confidence-inspector");
+      const target = state.inspectorAnchor;
+      if (inspector.hidden || !target || !target.isConnected) return;
       const box = target.getBoundingClientRect();
+      // The inspector is position:fixed, so a scrolled-away anchor would strand it.
+      if (box.bottom < 0 || box.top > window.innerHeight ||
+          box.right < 0 || box.left > window.innerWidth) {
+        hideConfidenceInspector();
+        return;
+      }
       const inspectorBox = inspector.getBoundingClientRect();
       inspector.style.left = `${Math.max(8, Math.min(
         box.left,
         window.innerWidth - inspectorBox.width - 8
       ))}px`;
-      inspector.style.top = `${Math.max(8, box.top - inspectorBox.height - 8)}px`;
-      state.activeEvidenceId = target.dataset.evidenceId || null;
-      drawPage();
+      const above = box.top - inspectorBox.height - 8;
+      inspector.style.top = `${above >= 8 ? above : Math.min(
+        box.bottom + 8,
+        window.innerHeight - inspectorBox.height - 8
+      )}px`;
     }
 
     function hideConfidenceInspector() {
       byId("confidence-inspector").hidden = true;
+      state.inspectorAnchor = null;
       renderedView.querySelector(".confidence-active")?.classList.remove("confidence-active");
       state.activeEvidenceId = null;
       drawPage();
     }
+
+    // Capture phase so inner scrollers reposition the tooltip too, not just the window.
+    window.addEventListener("scroll", positionConfidenceInspector, true);
+    window.addEventListener("resize", positionConfidenceInspector);
 
     function dismissConfidenceTooltip() {
       state.pinnedConfidence = null;

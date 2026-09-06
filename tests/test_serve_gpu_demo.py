@@ -79,6 +79,7 @@ def test_verified_gpu_app_wires_word_reader_and_table_specialists() -> None:
         "faint-tiny-text",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
     ]
     stage = stages[0]
@@ -126,6 +127,7 @@ def test_verified_gpu_app_wires_word_reader_and_table_specialists() -> None:
         "faint-tiny-text",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
     )
     assert composition.handwriting == "not configured"
@@ -172,6 +174,7 @@ def test_verified_gpu_app_warms_the_complete_pipeline_before_serving() -> None:
         "faint-tiny-text",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
     ]
     assert app_calls[0]["warmup_completed"] is True
@@ -278,6 +281,7 @@ def test_verified_gpu_app_wires_local_ministral_as_review_only_presentation() ->
         "dispute_resolution",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
         "page-presentation",
     )
@@ -328,6 +332,7 @@ def test_verified_gpu_app_uses_warm_ministral_presentation_service() -> None:
         "dispute_resolution",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
         "page-presentation",
     )
@@ -397,6 +402,7 @@ def test_verified_gpu_app_uses_falcon_category_crops_without_dispute_stage() -> 
         "evidence-risk",
         "evidence-layout",
         "falcon-formula",
+        "digit-verification",
         "anchored-ink",
         "page-presentation",
     )
@@ -480,6 +486,7 @@ def test_verified_gpu_app_configures_phi4_field_candidate_rereading() -> None:
         "faint-tiny-text",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
         "handwriting-lines",
         "handwriting",
@@ -493,6 +500,7 @@ def test_verified_gpu_app_configures_phi4_field_candidate_rereading() -> None:
         "faint-tiny-text",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
         "handwriting-lines",
         "handwriting",
@@ -551,6 +559,7 @@ def test_verified_gpu_app_uses_warm_phi4_service_for_candidate_rereading() -> No
         "faint-tiny-text",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
         "handwriting-lines",
         "handwriting",
@@ -621,7 +630,8 @@ def test_verified_gpu_app_wires_cached_trocr_for_field_candidate_rereading() -> 
     options = app_calls[0]
     assert isinstance(options["handwriting_stage"], HandwritingStage)
     assert options["handwriting_stage"] is options["stages"][-1]
-    assert [stage.name for stage in options["stages"][-3:]] == [
+    assert [stage.name for stage in options["stages"][-4:]] == [
+        "digit-verification",
         "anchored-ink",
         "handwriting-lines",
         "handwriting",

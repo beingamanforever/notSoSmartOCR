@@ -7,6 +7,7 @@ offered to the specialist at all. This stage proposes those lines from page geom
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -24,6 +25,18 @@ MODEL = {
     "license": "Apache-2.0",
 }
 MEASURED_KINDS = frozenset({"text", "word"})
+# Evidence the table reread path and the formula specialist already own.
+EXCLUDED_OWNERS = frozenset(
+    {
+        "equation",
+        "formula",
+        "math",
+        "table",
+        "table_candidate",
+        "table_cell",
+        "table_source",
+    }
+)
 
 
 class LineDetector(Protocol):
@@ -46,6 +59,7 @@ class DocTRLineDetector:
         self.device = device
         self.architecture = architecture
         self._predictor: Any | None = None
+        self._lock = threading.Lock()
 
     @property
     def provenance(self) -> dict[str, Any]:
@@ -82,8 +96,12 @@ class DocTRLineDetector:
         return _group_lines(boxes)
 
     def _load(self) -> Any:
-        if self._predictor is not None:
-            return self._predictor
+        with self._lock:
+            if self._predictor is not None:
+                return self._predictor
+            return self._build()
+
+    def _build(self) -> Any:
         try:
             from doctr.models import detection_predictor
 
@@ -104,7 +122,12 @@ class DocTRLineDetector:
 
 
 class HandwritingLineStage:
-    """Propose line crops when the primary reader read most of the page poorly."""
+    """Propose line crops wherever the primary reader read poorly.
+
+    The decision is per region, not per page. A page-wide ratio would classify mixed
+    clinical forms as printed and never offer their handwritten field values to the
+    specialist, which is the case that matters most.
+    """
 
     name = "handwriting-lines"
 
@@ -114,23 +137,15 @@ class HandwritingLineStage:
         *,
         text_provider: str | None = None,
         confidence_threshold: float = 0.75,
-        minimum_low_confidence_ratio: float = 0.5,
-        minimum_measured_regions: int = 8,
         max_lines: int = 24,
     ) -> None:
         if not 0 <= confidence_threshold <= 1:
             raise ValueError("confidence_threshold must be from 0 to 1")
-        if not 0 < minimum_low_confidence_ratio <= 1:
-            raise ValueError(
-                "minimum_low_confidence_ratio must be above 0 and at most 1"
-            )
-        if minimum_measured_regions <= 0 or max_lines <= 0:
-            raise ValueError("minimum_measured_regions and max_lines must be positive")
+        if max_lines <= 0:
+            raise ValueError("max_lines must be positive")
         self.detector = detector
         self.text_provider = text_provider
         self.confidence_threshold = confidence_threshold
-        self.minimum_low_confidence_ratio = minimum_low_confidence_ratio
-        self.minimum_measured_regions = minimum_measured_regions
         self.max_lines = max_lines
 
     def apply(
@@ -139,17 +154,8 @@ class HandwritingLineStage:
         page_number: int,
         regions: list[TextRegion],
     ) -> list[TextRegion]:
-        measured = self._measured_regions(regions)
-        if len(measured) < self.minimum_measured_regions:
-            return regions
-        low = [
-            region
-            for region in measured
-            if region.confidence is not None
-            and region.confidence < self.confidence_threshold
-        ]
-        ratio = len(low) / len(measured)
-        if ratio < self.minimum_low_confidence_ratio:
+        low = self._poorly_read_regions(regions)
+        if not low:
             return regions
 
         lines = [
@@ -162,7 +168,7 @@ class HandwritingLineStage:
 
         order = max((region.reading_order for region in regions), default=0) + 1
         proposals = [
-            _proposal(line, page_number, index, order + index, ratio)
+            _proposal(line, page_number, index, order + index)
             for index, line in enumerate(
                 sorted(lines, key=lambda box: (box.top, box.left))[: self.max_lines],
                 start=1,
@@ -170,15 +176,27 @@ class HandwritingLineStage:
         ]
         return [*regions, *proposals]
 
-    def _measured_regions(self, regions: list[TextRegion]) -> list[TextRegion]:
+    def _poorly_read_regions(self, regions: list[TextRegion]) -> list[TextRegion]:
+        """Low-confidence text the table and formula specialists do not already own."""
         return [
             region
             for region in regions
             if region.kind in MEASURED_KINDS
             and region.confidence is not None
+            and region.confidence < self.confidence_threshold
             and bool(region.text.strip())
+            and not _owned_by_another_specialist(region)
             and (self.text_provider is None or region.provider == self.text_provider)
         ]
+
+
+def _owned_by_another_specialist(region: TextRegion) -> bool:
+    structure = region.structure if isinstance(region.structure, dict) else {}
+    labels = {
+        str(structure.get(name, "")).strip().casefold()
+        for name in ("role", "layout_owner_type", "block_type", "semantic_class")
+    }
+    return bool(labels & EXCLUDED_OWNERS)
 
 
 def _proposal(
@@ -186,7 +204,6 @@ def _proposal(
     page_number: int,
     index: int,
     reading_order: int,
-    ratio: float,
 ) -> TextRegion:
     return TextRegion(
         id=f"p{page_number}-handwriting-line-{index}",
@@ -199,7 +216,6 @@ def _proposal(
         text_provenance={
             "method": "detected_text_line",
             "model": MODEL,
-            "page_low_confidence_ratio": round(ratio, 4),
         },
         resolution="unreadable",
         structure={
