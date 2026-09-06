@@ -1,0 +1,88 @@
+{
+  "status": "complete",
+  "dataset": {
+    "repository": "Teklia/RIMES-2011-line",
+    "revision": "ba3e6b5573094208b30a134e32d9b65dab18e74e",
+    "split": "test",
+    "expected_lines": 778,
+    "language": "French",
+    "name": "rimes",
+    "full_test_split": true
+  },
+  "reader": {
+    "name": "trocr",
+    "provenance": {
+      "id": "microsoft/trocr-base-handwritten",
+      "source": "microsoft/trocr-base-handwritten",
+      "revision": "eaacaf452b06415df8f10bb6fad3a4c11e609406",
+      "origin": "Microsoft",
+      "license": "MIT",
+      "identity_verified": true,
+      "local_files_only": true,
+      "scope": "single_text_line"
+    },
+    "generation": null,
+    "model_path": null,
+    "adapter_path": null
+  },
+  "configuration": {
+    "batch_size": 8,
+    "task_mode": "direct_complete_text_line",
+    "reader_contract": {
+      "scope": "single_text_line",
+      "processor": "TrOCRProcessor",
+      "device": "cuda:0",
+      "max_new_tokens": 128,
+      "do_sample": false,
+      "num_beams": 1
+    },
+    "preprocessing": "dataset_decoded_pixels_converted_to_rgb_png",
+    "model_input_dimensions": "recorded_per_row_or_explicitly_unexposed",
+    "output_boundary": "ocr_pipeline_reader_public_output",
+    "text_correction": false
+  },
+  "progress": {
+    "completed": 778,
+    "expected": 778
+  },
+  "latency": {
+    "model_load_ms": 4757.031,
+    "warmup": {
+      "sample_id": "rimes-test-000000",
+      "status": "success",
+      "failure": null,
+      "latency_ms": 690.792,
+      "sample_is_scored_in_benchmark": true
+    },
+    "benchmark_wall_ms": 54715.945,
+    "basis": "amortized_batch_wall_time_per_line",
+    "p50_ms": 67.624,
+    "p95_ms": 97.915,
+    "lines_per_second": 14.293
+  },
+  "metrics": {
+    "literal": {
+      "cer": 0.27348412,
+      "wer": 0.85493882,
+      "exact": 4,
+      "exact_rate": 0.00514139,
+      "reference_characters": 35194,
+      "reference_words": 5639,
+      "character_edits": {
+        "insertions": 2298,
+        "deletions": 958,
+        "substitutions": 6369
+      },
+      "word_edits": {
+        "insertions": 1088,
+        "deletions": 76,
+        "substitutions": 3657
+      }
+    },
+    "failed_lines": 0,
+    "empty_predictions": 0,
+    "failures_remain_in_denominators": true
+  },
+  "peak_cuda_memory_mib": 1471.802,
+  "rows": "rimes-trocr-base-full.rows.jsonl"
+}

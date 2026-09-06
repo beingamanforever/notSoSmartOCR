@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 import sys
-from types import ModuleType
 
 from PIL import Image
 import pytest
@@ -210,6 +210,9 @@ def test_official_loader_is_local_pinned_bf16_and_uses_remote_model_code(
     torch_module = ModuleType("torch")
     bfloat16 = object()
     torch_module.bfloat16 = bfloat16  # type: ignore[attr-defined]
+    torch_module._dynamo = SimpleNamespace(  # type: ignore[attr-defined]
+        config=SimpleNamespace(cache_size_limit=8, accumulated_recompile_limit=256)
+    )
     transformers_module = ModuleType("transformers")
 
     class Loader:
@@ -236,6 +239,8 @@ def test_official_loader_is_local_pinned_bf16_and_uses_remote_model_code(
             },
         )
     ]
+    assert torch_module._dynamo.config.cache_size_limit == 256
+    assert torch_module._dynamo.config.accumulated_recompile_limit == 2048
 
 
 def test_local_directory_has_unverified_identity_and_no_revision_claim(
@@ -287,6 +292,9 @@ def test_official_model_can_load_from_local_storage(
     bfloat16 = object()
     torch_module = ModuleType("torch")
     torch_module.bfloat16 = bfloat16  # type: ignore[attr-defined]
+    torch_module._dynamo = SimpleNamespace(  # type: ignore[attr-defined]
+        config=SimpleNamespace(cache_size_limit=8, accumulated_recompile_limit=256)
+    )
     transformers_module = ModuleType("transformers")
 
     class Loader:

@@ -10,6 +10,7 @@ from ocr_pipeline.verification import (
     consensus_scores,
     edit_counts,
     edit_distance,
+    has_character_repetition,
     literal_text_risks,
     normalized_edit_distance,
 )
@@ -117,6 +118,21 @@ def test_literal_text_risks_are_review_only_signals() -> None:
         "invalid_calendar_date",
         "truncated_labeled_date",
     )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("te eeessssmennt pppatttt", True),
+        ("Allergies: NKA", False),
+        ("Room 0000", False),
+    ],
+)
+def test_character_repetition_detects_only_alphabetic_runs(
+    text: str,
+    expected: bool,
+) -> None:
+    assert has_character_repetition(text) is expected
 
 
 def _reference_edit_counts(

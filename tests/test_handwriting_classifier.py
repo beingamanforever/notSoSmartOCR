@@ -305,13 +305,18 @@ def test_strict_prefilter_rejects_invalid_candidates_without_model_call(
             "empty_content",
             "tail_repetition",
             "repeated_suffix",
+            "character_repetition",
             "invalid_bbox",
         ],
         "region_risks": [
             {"region_id": "empty", "reasons": ["empty_content"]},
             {
                 "region_id": "long",
-                "reasons": ["tail_repetition", "repeated_suffix"],
+                "reasons": [
+                    "tail_repetition",
+                    "repeated_suffix",
+                    "character_repetition",
+                ],
             },
             {"region_id": "box", "reasons": ["invalid_bbox"]},
         ],

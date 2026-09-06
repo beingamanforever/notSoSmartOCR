@@ -171,6 +171,8 @@ def test_tesseract_explicit_thresholding_is_provenanced(
     result = process_document(source, reader)
 
     assert calls[0][0][-5:] == ["--psm", "3", "-c", "thresholding_method=1", "tsv"]
+    # Tesseract's OpenMP path is slower per crop and oversubscribes concurrent crops.
+    assert calls[0][1]["env"]["OMP_THREAD_LIMIT"] == "1"
     assert result.pages[0].regions[0].text_provenance == {
         "method": "tesseract_tsv",
         "block_num": 1,

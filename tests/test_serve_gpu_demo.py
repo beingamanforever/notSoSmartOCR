@@ -79,6 +79,7 @@ def test_verified_gpu_app_wires_word_reader_and_table_specialists() -> None:
         "faint-tiny-text",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
     ]
     stage = stages[0]
@@ -126,6 +127,7 @@ def test_verified_gpu_app_wires_word_reader_and_table_specialists() -> None:
         "faint-tiny-text",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
     )
     assert composition.handwriting == "not configured"
@@ -172,6 +174,7 @@ def test_verified_gpu_app_warms_the_complete_pipeline_before_serving() -> None:
         "faint-tiny-text",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
     ]
     assert app_calls[0]["warmup_completed"] is True
@@ -278,6 +281,7 @@ def test_verified_gpu_app_wires_local_ministral_as_review_only_presentation() ->
         "dispute_resolution",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
         "page-presentation",
     )
@@ -328,6 +332,7 @@ def test_verified_gpu_app_uses_warm_ministral_presentation_service() -> None:
         "dispute_resolution",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
         "page-presentation",
     )
@@ -397,6 +402,7 @@ def test_verified_gpu_app_uses_falcon_category_crops_without_dispute_stage() -> 
         "evidence-risk",
         "evidence-layout",
         "falcon-formula",
+        "digit-verification",
         "anchored-ink",
         "page-presentation",
     )
@@ -407,7 +413,7 @@ def test_verified_gpu_app_uses_falcon_category_crops_without_dispute_stage() -> 
     assert formula_stage.reader is options["presentation_reader"]
     assert "source-ink formula crops" in options["composition"].note
     assert "human acceptance" in options["composition"].note
-    assert options["composition"].build_label == "2026-09-06-formula-source-trace-v3"
+    assert options["composition"].build_label == "2026-09-06-form-evidence-v4"
     assert "review evidence" in options["composition"].note
 
 
@@ -480,7 +486,9 @@ def test_verified_gpu_app_configures_phi4_field_candidate_rereading() -> None:
         "faint-tiny-text",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
+        "handwriting-lines",
         "handwriting",
     ]
     assert isinstance(handwriting, HandwritingStage)
@@ -492,7 +500,9 @@ def test_verified_gpu_app_configures_phi4_field_candidate_rereading() -> None:
         "faint-tiny-text",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
+        "handwriting-lines",
         "handwriting",
     )
     assert composition.handwriting == "configured"
@@ -549,7 +559,9 @@ def test_verified_gpu_app_uses_warm_phi4_service_for_candidate_rereading() -> No
         "faint-tiny-text",
         "evidence-risk",
         "evidence-layout",
+        "digit-verification",
         "anchored-ink",
+        "handwriting-lines",
         "handwriting",
     ]
     handwriting = app_calls[0][2]
@@ -591,7 +603,7 @@ def test_verified_gpu_app_wires_cached_trocr_for_field_candidate_rereading() -> 
             tatr_detection_model=Path("/models/detection.pth"),
             tatr_structure_model=Path("/models/structure.pth"),
             tesseract_executable=Path("/tools/tesseract"),
-            trocr_handwriting_model="microsoft/trocr-base-handwritten",
+            trocr_handwriting_model=TROCR_MODEL_ID,
             trocr_model_revision=TROCR_MODEL_REVISION,
             trocr_max_regions=3,
             trocr_max_new_tokens=64,
@@ -606,7 +618,7 @@ def test_verified_gpu_app_wires_cached_trocr_for_field_candidate_rereading() -> 
 
     assert reader_calls == [
         {
-            "model_name_or_path": "microsoft/trocr-base-handwritten",
+            "model_name_or_path": TROCR_MODEL_ID,
             "model_revision": TROCR_MODEL_REVISION,
             "device": "cuda",
             "max_new_tokens": 64,
@@ -618,8 +630,10 @@ def test_verified_gpu_app_wires_cached_trocr_for_field_candidate_rereading() -> 
     options = app_calls[0]
     assert isinstance(options["handwriting_stage"], HandwritingStage)
     assert options["handwriting_stage"] is options["stages"][-1]
-    assert [stage.name for stage in options["stages"][-2:]] == [
+    assert [stage.name for stage in options["stages"][-4:]] == [
+        "digit-verification",
         "anchored-ink",
+        "handwriting-lines",
         "handwriting",
     ]
     assert options["handwriting_stage"].context_padding == 18

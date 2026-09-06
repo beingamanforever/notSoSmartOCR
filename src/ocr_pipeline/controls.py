@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,28 @@ MARK_MODEL = {
     "license": "Apache-2.0",
 }
 MATH_TYPES = frozenset({"equation", "formula", "math"})
+# What a mark looks like, kept separate from what it means. A tick or cross beside a label
+# selects an option; a slashed loop or a ring is an annotation whose meaning the form's
+# conventions decide. U+2205 is what frontier readers emit for the null glyph.
+MARK_GLYPHS = {
+    "tick": "✓",
+    "cross": "✗",
+    "slashed_loop": "∅",
+    "ring": "◯",
+}
+# A mark inside a printed box is a selection; the glyph still matters, because a reviewer
+# checking a disputed field wants to see whether it was ticked or crossed.
+BOXED_GLYPHS = {
+    "tick": "☑",
+    "cross": "☒",
+    "empty": "☐",
+    "unknown": "☑",
+}
+NULL_MARK_GLYPH = MARK_GLYPHS["slashed_loop"]
+# Shapes that annotate an answer area rather than select a listed option.
+ANNOTATION_SHAPES = frozenset({"slashed_loop", "ring"})
+# A hand-drawn ring encircles words, so it is wider than it is tall.
+MINIMUM_RING_ASPECT = 1.6
 
 
 @dataclass(frozen=True)
@@ -32,6 +54,7 @@ class ControlDetection:
     confidence: float
     ink_ratio: float
     source: str = "square"
+    shape: str = "unknown"
     label: str | None = None
     label_ids: tuple[str, ...] = ()
     source_ids: tuple[str, ...] = ()
@@ -90,6 +113,10 @@ class GeometricControlStage:
             detection_group_size,
         )
         detections = _merge_detections(detections, anchored_marks)
+        detections = _merge_detections(
+            detections,
+            _ring_marks(gray, regions, self.label_provider, detections, cv2, np),
+        )
         table_marks = _table_marks(gray, regions, detections, cv2, np)
         detections = [
             detection
@@ -100,7 +127,7 @@ class GeometricControlStage:
         detections = [
             detection
             for detection in detections
-            if detection.source == "table_mark"
+            if detection.source in {"table_mark", "ring_mark"}
             or not _inside_text_region(
                 detection.bounding_box,
                 regions,
@@ -108,7 +135,8 @@ class GeometricControlStage:
             )
         ]
         labels = [
-            detection.label
+            _anchor_label(detection, regions)
+            or detection.label
             or _nearest_label(detection.bounding_box, regions, self.label_provider)
             for detection in detections
         ]
@@ -193,11 +221,15 @@ def detect_controls(image_path: Path) -> list[ControlDetection]:
 
 
 def _form_like_regions(regions: list[TextRegion], label_provider: str | None) -> bool:
+    # A field label ends with its colon. Counting any word that merely contains one made
+    # times, ratios and section references look like form fields, so a dense printed
+    # contract was declared form-like and lone spurious marks lost their corroboration
+    # requirement. This matches _field_anchor in anchored_ink.py.
     labels = {
         region.id
         for region in regions
         if region.resolution == "resolved"
-        and ":" in region.text
+        and region.text.rstrip().endswith((":", "："))
         and (label_provider is None or region.provider == label_provider)
     }
     return len(labels) >= 6
@@ -235,7 +267,7 @@ def _square_detections(gray: Any, cv2: Any, np: Any) -> list[ControlDetection]:
     boxes = _remove_input_grids(_deduplicate(boxes))
 
     detections = [
-        _classify(gray, box, np)
+        _classify(gray, box, cv2, np)
         for box in sorted(boxes, key=lambda item: (item.top, item.left))
     ]
     minimum_reliable_side = round(min(gray.shape) * 0.01)
@@ -246,6 +278,7 @@ def _square_detections(gray: Any, cv2: Any, np: Any) -> list[ControlDetection]:
             min(0.5, detection.confidence),
             detection.ink_ratio,
             detection.source,
+            detection.shape,
         )
         if _side(detection.bounding_box) < minimum_reliable_side
         else detection
@@ -285,18 +318,25 @@ def _anchored_marks(
         top = max(0, box.top - vertical_pad)
         bottom = min(height, box.bottom + vertical_pad)
         slot_width = round(line_height * 1.75)
-        slots = [BoundingBox(max(0, box.left - slot_width), top, box.left, bottom)]
-        slots.append(
-            BoundingBox(
-                box.right,
-                top,
-                min(width, box.right + slot_width),
-                bottom,
-            )
-        )
+        # A handwritten null glyph sits further from its label than a checkbox tick,
+        # so the value window extends further but accepts that glyph only.
+        slots = [
+            (BoundingBox(max(0, box.left - slot_width), top, box.left, bottom), None),
+            (
+                BoundingBox(
+                    box.right,
+                    top,
+                    min(width, box.right + round(line_height * 4)),
+                    bottom,
+                ),
+                box.right + slot_width,
+            ),
+        ]
         region_detections = []
-        for slot in slots:
-            for detection in _marks_in_slot(gray, slot, line_height, cv2, np):
+        for slot, tick_limit in slots:
+            for detection in _marks_in_slot(
+                gray, slot, line_height, cv2, np, tick_limit=tick_limit
+            ):
                 if _overlaps_detection(detection.bounding_box, existing + detections):
                     continue
                 if _center_inside_reader_text(
@@ -313,16 +353,117 @@ def _anchored_marks(
                     continue
                 region_detections.append(detection)
         if region_detections:
-            detections.append(
-                min(
-                    region_detections,
-                    key=lambda detection: (
-                        _horizontal_gap(detection.bounding_box, box),
-                        abs(_center(detection.bounding_box)[1] - _center(box)[1]),
-                    ),
-                )
+            nearest = min(
+                region_detections,
+                key=lambda detection: (
+                    _horizontal_gap(detection.bounding_box, box),
+                    abs(_center(detection.bounding_box)[1] - _center(box)[1]),
+                ),
             )
+            detections.append(replace(nearest, label_ids=(region.id,)))
     return detections
+
+
+def _ring_marks(
+    gray: Any,
+    regions: list[TextRegion],
+    label_provider: str | None,
+    existing: list[ControlDetection],
+    cv2: Any,
+    np: Any,
+) -> list[ControlDetection]:
+    """Detect a hand-drawn ring annotation enclosing printed text."""
+    mask = np.where(gray < 180, 255, 0).astype("uint8")
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+    detections = []
+    for index in range(1, count):
+        left, top, box_width, box_height, area = map(int, stats[index])
+        if box_width < 24 or box_height < 8 or area < 60:
+            continue
+        if area / max(1, box_width * box_height) > 0.45:
+            continue
+        component = np.where(
+            labels[top : top + box_height, left : left + box_width] == index,
+            255,
+            0,
+        ).astype("uint8")
+        if box_width < box_height * MINIMUM_RING_ASPECT:
+            # An annotation is drawn around words, which are wider than they are tall.
+            # A capital O or D at scan resolution otherwise satisfies every ring test.
+            continue
+        hole = _largest_hole_area(component, cv2)
+        if hole <= area or not 0.45 <= hole / (box_width * box_height) <= 0.85:
+            # An ellipse fills about 0.785 of its box. A ruled rectangle fills nearly
+            # all of it, and a multi-cell grid frame far less.
+            continue
+        box = BoundingBox(left, top, left + box_width, top + box_height)
+        if _overlaps_detection(box, existing + detections):
+            continue
+        enclosed = _enclosed_regions(box, regions, label_provider)
+        if not enclosed:
+            continue
+        detections.append(
+            ControlDetection(
+                box,
+                "selected",
+                0.6,
+                area / max(1, box_width * box_height),
+                "ring_mark",
+                label_ids=tuple(region.id for region in enclosed),
+            )
+        )
+    return detections
+
+
+def _largest_hole_area(component: Any, cv2: Any) -> float:
+    contours, hierarchy = cv2.findContours(
+        component.copy(),
+        cv2.RETR_CCOMP,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    if hierarchy is None:
+        return 0.0
+    return max(
+        (
+            cv2.contourArea(contours[index])
+            for index, (*_, parent) in enumerate(hierarchy[0])
+            if parent >= 0
+        ),
+        default=0.0,
+    )
+
+
+def _enclosed_regions(
+    ring: BoundingBox,
+    regions: list[TextRegion],
+    label_provider: str | None,
+) -> list[TextRegion]:
+    enclosed = []
+    for region in regions:
+        if region.kind in {"checkbox", "table", "coverage_risk", "page_text"}:
+            continue
+        if label_provider is not None and region.provider != label_provider:
+            continue
+        if region.resolution != "resolved" or not region.text.strip():
+            continue
+        center_x, center_y = _center(region.bounding_box)
+        if ring.left <= center_x <= ring.right and ring.top <= center_y <= ring.bottom:
+            enclosed.append(region)
+            continue
+        # A ring drawn over one option of a long printed row overlaps only part of it.
+        overlap = min(ring.right, region.bounding_box.right) - max(
+            ring.left, region.bounding_box.left
+        )
+        vertical = min(ring.bottom, region.bounding_box.bottom) - max(
+            ring.top, region.bounding_box.top
+        )
+        region_width = region.bounding_box.right - region.bounding_box.left
+        if (
+            vertical > 0
+            and overlap >= min((ring.right - ring.left), region_width) * 0.6
+        ):
+            enclosed.append(region)
+    return enclosed
 
 
 def _supported_anchored_groups(
@@ -385,6 +526,8 @@ def _marks_in_slot(
     line_height: int,
     cv2: Any,
     np: Any,
+    *,
+    tick_limit: int | None = None,
 ) -> list[ControlDetection]:
     if slot.right - slot.left < 4 or slot.bottom - slot.top < 4:
         return []
@@ -419,14 +562,17 @@ def _marks_in_slot(
             continue
         if min(box_width, box_height) < line_height * 0.38:
             continue
-        if max(box_width, box_height) > line_height * 1.1:
+        if max(box_width, box_height) > line_height * 2:
             continue
         component = np.where(
             labels[top : top + box_height, left : left + box_width] == index,
             255,
             0,
         ).astype("uint8")
-        if not _has_mark_shape(component, cv2, np):
+        beyond_tick_reach = tick_limit is not None and slot.left + left >= tick_limit
+        shape = _mark_shape(component, cv2, np)
+        null_mark = shape == "slashed_loop"
+        if not null_mark and (beyond_tick_reach or shape == "unknown"):
             continue
         box = BoundingBox(
             slot.left + left,
@@ -441,7 +587,10 @@ def _marks_in_slot(
                 "selected",
                 min(0.9, 0.6 + ink_ratio * 0.5),
                 ink_ratio,
-                "anchored_mark",
+                # A slashed loop is an annotation written in the answer area, not a tick in
+                # a box, so it is carried through as its own kind rather than a selection.
+                "null_mark" if null_mark else "anchored_mark",
+                shape,
             )
         )
     return detections
@@ -681,7 +830,7 @@ def _candidate_scope_marks(
                 top + box_top + box_height,
             )
         )
-    return [_classify(gray, box, np) for box in _deduplicate(boxes)]
+    return [_classify(gray, box, cv2, np) for box in _deduplicate(boxes)]
 
 
 def _has_candidate_control_shape(component: Any, cv2: Any, np: Any) -> bool:
@@ -870,7 +1019,7 @@ def _same_cell_mark(
         left + box_left + box_width,
         top + box_top + box_height,
     )
-    return _classify(gray, box, np)
+    return _classify(gray, box, cv2, np)
 
 
 def _has_square_border(component: Any, np: Any) -> bool:
@@ -1115,9 +1264,44 @@ def _has_table_mark_shape(component: Any, cv2: Any, np: Any) -> bool:
     )
 
 
+def _mark_shape(component: Any, cv2: Any, np: Any) -> str:
+    """Name the glyph. A cross fills all four corners; a tick does not.
+
+    Returns "unknown" rather than guessing, so an unnamed mark stays visible evidence
+    instead of being rendered as a shape nobody observed.
+    """
+    if _has_null_mark_shape(component, cv2, np):
+        return "slashed_loop"
+    if not _has_mark_shape(component, cv2, np):
+        return "unknown"
+    height, width = component.shape
+    if not 0.5 <= width / height <= 2:
+        return "tick"
+    edge_height = max(1, height // 3)
+    edge_width = max(1, width // 3)
+    corners = (
+        component[:edge_height, :edge_width],
+        component[:edge_height, -edge_width:],
+        component[-edge_height:, :edge_width],
+        component[-edge_height:, -edge_width:],
+    )
+    return "cross" if all(np.any(corner) for corner in corners) else "tick"
+
+
 def _has_mark_shape(component: Any, cv2: Any, np: Any) -> bool:
     height, width = component.shape
     if float(np.mean(component > 0)) >= 0.85:
+        return False
+    contours, hierarchy = cv2.findContours(
+        component.copy(),
+        cv2.RETR_CCOMP,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    if hierarchy is not None and any(
+        parent >= 0
+        and cv2.contourArea(contours[index]) >= max(3, component.size * 0.01)
+        for index, (*_, parent) in enumerate(hierarchy[0])
+    ):
         return False
 
     corners = ()
@@ -1163,6 +1347,49 @@ def _has_mark_shape(component: Any, cv2: Any, np: Any) -> bool:
         return True
     corner_count = sum(np.any(corner) for corner in corners)
     return corner_count >= 3 and longest_diagonal >= max(width, height) * 0.7
+
+
+def _has_null_mark_shape(component: Any, cv2: Any, np: Any) -> bool:
+    """Accept the handwritten null glyph: a closed loop with a stroke through it."""
+    height, width = component.shape
+    fill = float(np.mean(component > 0))
+    if not 0.2 <= fill <= 0.7:
+        return False
+    contours, hierarchy = cv2.findContours(
+        component.copy(),
+        cv2.RETR_CCOMP,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    if hierarchy is None:
+        return False
+    minimum_hole = max(2.0, component.size * 0.02)
+    if not any(
+        parent >= 0 and cv2.contourArea(contours[index]) >= minimum_hole
+        for index, (*_, parent) in enumerate(hierarchy[0])
+    ):
+        return False
+    # The null stroke crosses its own loop; an empty checkbox outline has a blank centre.
+    core = component[
+        height // 3 : -(height // 3) or None, width // 3 : -(width // 3) or None
+    ]
+    if core.size == 0 or float(np.mean(core > 0)) < 0.15:
+        return False
+    lines = cv2.HoughLinesP(
+        component,
+        1,
+        np.pi / 180,
+        threshold=2,
+        minLineLength=max(3, round(min(width, height) * 0.25)),
+        maxLineGap=2,
+    )
+    if lines is None:
+        return False
+    span = max(width, height)
+    return any(
+        20 <= abs(float(np.degrees(np.arctan2(bottom - top, right - left)))) <= 75
+        and float(np.hypot(right - left, bottom - top)) >= span * 0.3
+        for left, top, right, bottom in lines.reshape(-1, 4)
+    )
 
 
 def _merge_detections(
@@ -1234,6 +1461,7 @@ def _square_boxes(mask: Any, cv2: Any) -> list[BoundingBox]:
         return []
 
     boxes = []
+    deformed_boxes = []
     for index, contour in enumerate(contours):
         left, top, box_width, box_height = cv2.boundingRect(contour)
         side = min(box_width, box_height)
@@ -1244,21 +1472,39 @@ def _square_boxes(mask: Any, cv2: Any) -> list[BoundingBox]:
         perimeter = cv2.arcLength(contour, True)
         polygon = cv2.approxPolyDP(contour, 0.04 * perimeter, True)
         rectangularity = cv2.contourArea(contour) / (box_width * box_height)
-        if len(polygon) != 4 or rectangularity < 0.6:
-            continue
         if hierarchy[0][index][2] < 0:
             continue
-        if _joins_text(mask, left, top, box_width, box_height):
-            continue
-        boxes.append(
-            BoundingBox(
-                left=left,
-                top=top,
-                right=left + box_width,
-                bottom=top + box_height,
-            )
+        box = BoundingBox(
+            left=left,
+            top=top,
+            right=left + box_width,
+            bottom=top + box_height,
         )
-    return boxes
+        if (
+            len(polygon) == 4
+            and rectangularity >= 0.6
+            and not _joins_text(mask, left, top, box_width, box_height)
+        ):
+            boxes.append(box)
+        elif 5 <= len(polygon) <= 6 and rectangularity >= 0.45:
+            # A mark drawn past the border notches the outer contour, so a ticked box
+            # scores far below an empty one (0.49 against 0.78 on the wellness form).
+            # Precision here comes from the same-row peer below, not from this floor.
+            deformed_boxes.append(box)
+    return boxes + [box for box in deformed_boxes if _has_square_row_peer(box, boxes)]
+
+
+def _has_square_row_peer(candidate: BoundingBox, boxes: list[BoundingBox]) -> bool:
+    candidate_side = _side(candidate)
+    _, candidate_y = _center(candidate)
+    for box in boxes:
+        box_side = _side(box)
+        if not 0.75 <= box_side / candidate_side <= 1.33:
+            continue
+        _, box_y = _center(box)
+        if abs(box_y - candidate_y) <= max(box_side, candidate_side) * 0.35:
+            return True
+    return False
 
 
 def _joins_text(
@@ -1406,7 +1652,7 @@ def _remove_input_grids(boxes: list[BoundingBox]) -> list[BoundingBox]:
     return [box for index, box in enumerate(boxes) if index not in grid_ids]
 
 
-def _classify(gray: Any, box: BoundingBox, np: Any) -> ControlDetection:
+def _classify(gray: Any, box: BoundingBox, cv2: Any, np: Any) -> ControlDetection:
     side = min(box.right - box.left, box.bottom - box.top)
     margin = max(2, round(side * 0.4))
     inner = gray[
@@ -1427,10 +1673,29 @@ def _classify(gray: Any, box: BoundingBox, np: Any) -> ControlDetection:
     faint_ratio = float(np.mean(inner < background - 20))
     ink_ratio = max(dark_ratio, faint_ratio * 0.75)
     if dark_ratio >= 0.2 or faint_ratio >= 0.45:
-        return ControlDetection(box, "selected", min(0.99, 0.75 + ink_ratio), ink_ratio)
+        shape = _boxed_mark_shape(inner, background, cv2, np)
+        return ControlDetection(
+            box, "selected", min(0.99, 0.75 + ink_ratio), ink_ratio, shape=shape
+        )
     if dark_ratio <= 0.05 and faint_ratio <= 0.15:
-        return ControlDetection(box, "unselected", 0.98, ink_ratio)
+        return ControlDetection(box, "unselected", 0.98, ink_ratio, shape="empty")
     return ControlDetection(box, "ambiguous", 0.5, ink_ratio)
+
+
+def _boxed_mark_shape(inner: Any, background: float, cv2: Any, np: Any) -> str:
+    """Name the glyph drawn inside a checkbox, so ☑ and ☒ are told apart."""
+    mask = np.where(inner < background - 20, 255, 0).astype("uint8")
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+    if count < 2:
+        return "unknown"
+    largest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    left, top, width, height = (int(stats[largest][index]) for index in range(4))
+    if min(width, height) < 3:
+        return "unknown"
+    component = np.where(
+        labels[top : top + height, left : left + width] == largest, 255, 0
+    ).astype("uint8")
+    return _mark_shape(component, cv2, np)
 
 
 def _control_region(
@@ -1445,7 +1710,8 @@ def _control_region(
     label = (
         None
         if detection.label is not None
-        else _nearest_label(detection.bounding_box, regions, label_provider)
+        else _anchor_label(detection, regions)
+        or _nearest_label(detection.bounding_box, regions, label_provider)
     )
     label_regions = _label_regions(detection.bounding_box, label, regions)
     selection_supported = _selection_supported(
@@ -1464,12 +1730,28 @@ def _control_region(
     if state == "ambiguous" or (label is None and detection.label is None):
         resolution = "unreadable"
     state_confidence = detection.confidence if resolution == "resolved" else None
-    symbol = {"selected": "[x]", "unselected": "[ ]", "ambiguous": "[?]"}[state]
+    shape = detection.shape
+    if detection.source == "ring_mark":
+        shape = "ring"
+    boxed = detection.source == "square"
+    annotation = shape in ANNOTATION_SHAPES
+    # The glyph records what was drawn. It does not claim the field means "none": the
+    # form's conventions or a reviewer establish that, so interpretation stays unresolved.
+    # Checkbox text stays "[x]"/"[ ]" because that is GitHub task-list syntax and the
+    # Markdown export depends on it. The tick-versus-cross distinction rides in
+    # structure.mark_glyph instead, where the UI and the inspector can use it.
+    symbol = (
+        MARK_GLYPHS[shape]
+        if annotation
+        else {"selected": "[x]", "unselected": "[ ]", "ambiguous": "[?]"}[state]
+    )
     label_text = detection.label or _semantic_label(label_regions)
     label_ids = list(detection.label_ids) or [region.id for region in label_regions]
     source_ids = list(detection.source_ids)
     methods = {
         "anchored_mark": "label_anchored_residual_ink",
+        "null_mark": "label_anchored_null_glyph",
+        "ring_mark": "enclosing_ring_annotation",
         "table_mark": "table_cell_residual_ink",
     }
     method = methods.get(detection.source, "square_contour_with_line_cleanup")
@@ -1482,7 +1764,31 @@ def _control_region(
         text_provenance["source_evidence_ids"] = source_ids
     structure = {
         "role": "control",
-        "control_type": "checkbox",
+        "control_type": "annotation" if annotation else "checkbox",
+        # What the mark looks like, recorded for every control so a reviewer can see the
+        # tick or cross that produced a selection, not just the selection.
+        "mark_shape": shape,
+        "mark_glyph": (BOXED_GLYPHS if boxed else MARK_GLYPHS).get(shape),
+        **(
+            {
+                "annotation_shape": shape,
+                "interpretation_status": "unresolved",
+                # A ring means the enclosed option was chosen, so its target is recorded
+                # as a relationship rather than being conflated with the mark's label.
+                **(
+                    {
+                        "annotation_target": {
+                            "relation": "encloses",
+                            "evidence_ids": list(detection.label_ids),
+                        }
+                    }
+                    if shape == "ring" and detection.label_ids
+                    else {}
+                ),
+            }
+            if annotation
+            else {}
+        ),
         "state": state,
         "observed_state": observed_state,
         "state_confidence": state_confidence,
@@ -1684,6 +1990,20 @@ def _semantic_label(regions: list[TextRegion]) -> str:
         if text:
             parts.append(text)
     return " ".join(parts)
+
+
+def _anchor_label(
+    detection: ControlDetection,
+    regions: list[TextRegion],
+) -> TextRegion | None:
+    """A label-anchored mark keeps its anchor; geometric nearness would pick the next field."""
+    if (
+        detection.source not in {"anchored_mark", "ring_mark"}
+        or not detection.label_ids
+    ):
+        return None
+    anchor_id = detection.label_ids[0]
+    return next((region for region in regions if region.id == anchor_id), None)
 
 
 def _nearest_label(

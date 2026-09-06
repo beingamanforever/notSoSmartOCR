@@ -182,6 +182,27 @@ def test_markdown_omits_unlabeled_unreadable_control() -> None:
     assert render_page_markdown([control], []) == ""
 
 
+def test_unreadable_handwriting_is_preserved_in_plain_text_and_markdown() -> None:
+    handwriting = TextRegion(
+        id="ink",
+        kind="handwriting",
+        text="",
+        confidence=None,
+        bounding_box=BoundingBox(10, 10, 80, 30),
+        reading_order=1,
+        provider="specialist",
+        resolution="unreadable",
+    )
+
+    evidence = render_evidence([handwriting])
+
+    assert evidence.value == "[unreadable handwriting]"
+    assert evidence.evidence_ids == ["ink"]
+    assert render_page_markdown([asdict(handwriting)], evidence.evidence_ids) == (
+        "[unreadable handwriting]"
+    )
+
+
 def test_markdown_never_suppresses_structural_table_linked_by_a_control() -> None:
     table = {
         "id": "table",

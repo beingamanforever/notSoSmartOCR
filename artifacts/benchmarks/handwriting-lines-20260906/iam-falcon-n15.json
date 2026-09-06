@@ -1,0 +1,98 @@
+{
+  "status": "complete",
+  "dataset": {
+    "repository": "Teklia/IAM-line",
+    "revision": "fbdad97500ce54635c0d1ba306bf535cb40656cf",
+    "split": "test",
+    "expected_lines": 2915,
+    "language": "English",
+    "name": "iam",
+    "full_test_split": false
+  },
+  "reader": {
+    "name": "falcon",
+    "provenance": {
+      "id": "tiiuae/Falcon-OCR",
+      "loaded_from": "/opt/dlami/nvme/aman/models/falcon-ocr",
+      "revision": "unverified",
+      "origin": "TII, UAE",
+      "license": "Apache-2.0",
+      "identity_verified": false,
+      "local_files_only": true,
+      "inference_repository_audit_reference": {
+        "url": "https://github.com/tiiuae/Falcon-Perception",
+        "revision": "59a845adfac23c684bc4beafd26b380cde5ddfc1",
+        "loaded_code_match": "unverified"
+      },
+      "identity_reason": "Explicit local model paths are not revision proof."
+    },
+    "generation": {
+      "category": "text",
+      "max_new_tokens": 256,
+      "temperature": 0.0,
+      "max_dimension": 1536,
+      "compile": false
+    },
+    "model_path": "/opt/dlami/nvme/aman/models/falcon-ocr",
+    "adapter_path": null
+  },
+  "configuration": {
+    "batch_size": 1,
+    "task_mode": "direct_complete_text_line",
+    "reader_contract": {
+      "category": "text",
+      "max_dimension": 1536,
+      "device_map": "cuda:0",
+      "max_new_tokens": 256,
+      "temperature": 0.0
+    },
+    "preprocessing": "dataset_decoded_pixels_converted_to_rgb_png",
+    "model_input_dimensions": "recorded_per_row_or_explicitly_unexposed",
+    "output_boundary": "ocr_pipeline_reader_public_output",
+    "text_correction": false
+  },
+  "progress": {
+    "completed": 15,
+    "expected": 15
+  },
+  "latency": {
+    "model_load_ms": 5520.771,
+    "warmup": {
+      "sample_id": "iam-test-000000",
+      "status": "success",
+      "failure": null,
+      "latency_ms": 5777.654,
+      "sample_is_scored_in_benchmark": true
+    },
+    "benchmark_wall_ms": 8918.051,
+    "basis": "amortized_batch_wall_time_per_line",
+    "p50_ms": 636.847,
+    "p95_ms": 940.384,
+    "lines_per_second": 1.684
+  },
+  "metrics": {
+    "literal": {
+      "cer": 0.09381238,
+      "wer": 0.47136564,
+      "exact": 1,
+      "exact_rate": 0.06666667,
+      "reference_characters": 1002,
+      "reference_words": 227,
+      "character_edits": {
+        "insertions": 1,
+        "deletions": 73,
+        "substitutions": 20
+      },
+      "word_edits": {
+        "insertions": 0,
+        "deletions": 60,
+        "substitutions": 47
+      }
+    },
+    "failed_lines": 0,
+    "empty_predictions": 0,
+    "failures_remain_in_denominators": true
+  },
+  "peak_cuda_memory_mib": 803.313,
+  "rows": "iam-falcon-n15.rows.jsonl"
+}

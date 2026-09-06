@@ -6,6 +6,7 @@ import copy
 import io
 import json
 import logging
+import secrets
 import re
 import shutil
 import subprocess
@@ -45,6 +46,7 @@ from .table_topology import TableTopologyError, validate_table_topology
 try:
     from fastapi import FastAPI, File, HTTPException, Request, UploadFile
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+    from starlette.middleware.gzip import GZipMiddleware
 except ImportError:  # pragma: no cover - exercised only without demo dependencies
     FastAPI = None
     File = None
@@ -55,9 +57,14 @@ except ImportError:  # pragma: no cover - exercised only without demo dependenci
     HTMLResponse = None
     JSONResponse = None
     Response = None
+    GZipMiddleware = None
 
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+FEEDBACK_RETENTION = 500
+FEEDBACK_REASONS = frozenset(
+    {"missing_text", "wrong_text", "reading_order", "table", "handwriting", "other"}
+)
 MAX_DOCUMENT_PAGES = 32
 MAX_PAGE_PIXELS = 32_000_000
 MAX_DECODED_PIXELS = 200_000_000
@@ -68,7 +75,8 @@ EXAMPLE_FILES = {
     "architecture": "artifacts/ocr-pipeline-architecture.pdf",
     "hard-case-routing": "artifacts/hard-case-routing.pdf",
     "handwriting": "artifacts/demo/handwriting_notes.png",
-    "formula-scan": "artifacts/demo/formula_scan.png",
+    "contract-agreement": "artifacts/demo/contract_agreement.png",
+    "contract-amendment": "artifacts/demo/contract_amendment.png",
     "academic-paper": "artifacts/demo/academic_paper.png",
     "code": "artifacts/demo/code_document.png",
     "financial-table": "artifacts/demo/financial_table.png",
@@ -525,6 +533,7 @@ def create_app(
     max_decoded_pixels: int = MAX_DECODED_PIXELS,
     max_presentation_pages: int = 4,
     katex_asset_root: Path | None = None,
+    feedback_root: Path | None = None,
     warmup_completed: bool = False,
 ) -> Any:
     """Create the local demo app with an injectable OCR reader."""
@@ -561,6 +570,10 @@ def create_app(
         None,
     )
     temporary_root = tempfile.TemporaryDirectory(prefix="ocr-demo-")
+    # created on first write so a session that is never reviewed leaves no directory
+    feedback_dir = (
+        Path(feedback_root) if feedback_root else Path(temporary_root.name) / "feedback"
+    )
     session_root = Path(temporary_root.name)
     sessions = SessionStore(session_root)
     backend_version = _backend_version(active_reader)
@@ -588,6 +601,7 @@ def create_app(
         RequestLimitMiddleware,
         max_body_bytes=max_upload_bytes + MULTIPART_OVERHEAD_BYTES,
     )
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     @app.middleware("http")
     async def handle_no_store(request: Any, call_next: Any) -> Any:
@@ -642,11 +656,8 @@ def create_app(
                     )
                 },
             )
-        relative_path = EXAMPLE_FILES.get(example_name)
-        if relative_path is None:
-            raise HTTPException(404, "Example not found")
-        example = Path(__file__).parents[2] / relative_path
-        if not example.is_file():
+        example = _example_path(example_name)
+        if example is None:
             raise HTTPException(404, "Example not found")
         return FileResponse(
             example,
@@ -655,8 +666,20 @@ def create_app(
         )
 
     @app.post("/api/process")
-    def handle_process(request: Request, file: UploadFile = File(...)) -> Any:
-        original_name = _safe_filename(file.filename)
+    def handle_process(
+        request: Request,
+        file: UploadFile | None = File(None),
+        defer_presentation: bool = False,
+        example: str | None = None,
+    ) -> Any:
+        # A named example already lives on this host, so sending its bytes down to the
+        # browser and straight back costs two transfers of a file nobody changed.
+        example_source = _example_path(example) if example else None
+        if example_source is None and file is None:
+            raise HTTPException(422, "A file upload or an example name is required")
+        original_name = (
+            example_source.name if example_source else _safe_filename(file.filename)
+        )
         suffix = Path(original_name).suffix.lower()
         if suffix not in ACCEPTED_SUFFIXES:
             accepted = ", ".join(sorted(ACCEPTED_SUFFIXES))
@@ -672,7 +695,10 @@ def create_app(
             )
             receive_seconds = time.perf_counter() - total_started
             save_started = time.perf_counter()
-            _save_upload(file, source, max_upload_bytes)
+            if example_source is not None:
+                shutil.copyfile(example_source, source)
+            else:
+                _save_upload(file, source, max_upload_bytes)
             save_seconds = time.perf_counter() - save_started
             preview_queued = time.perf_counter()
             with prepare_lock:
@@ -707,18 +733,20 @@ def create_app(
                     max_page_pixels=max_page_pixels,
                     max_pixels=max_decoded_pixels,
                 )
-                presentation_started = time.perf_counter()
-                presentations = _read_presentations(
-                    document.pages,
-                    preview_paths,
-                    presentation_reader,
-                    max_pages=max_presentation_pages,
-                    stage_execution=stage_execution,
-                )
-                if presentation_reader is not None:
-                    pipeline_timings["stage.presentation"] = (
-                        time.perf_counter() - presentation_started
+                presentations = {}
+                if not defer_presentation:
+                    presentation_started = time.perf_counter()
+                    presentations = _read_presentations(
+                        document.pages,
+                        preview_paths,
+                        presentation_reader,
+                        max_pages=max_presentation_pages,
+                        stage_execution=stage_execution,
                     )
+                    if presentation_reader is not None:
+                        pipeline_timings["stage.presentation"] = (
+                            time.perf_counter() - presentation_started
+                        )
                 elapsed_seconds = time.perf_counter() - started
                 coverage = _coverage_assessment(active_reader, len(document.pages))
             result = _sanitize_result(document.to_dict(), session_root)
@@ -726,20 +754,31 @@ def create_app(
             result["source"]["name"] = original_name
             result["revision"] = 1
             total_seconds = time.perf_counter() - total_started
-            presentation_payload = _sanitize_result(
-                {
-                    "schema_version": 2,
-                    "pages": [
-                        {"page_number": page_number, **presentation}
-                        for page_number, presentation in sorted(presentations.items())
-                    ],
-                },
-                session_root,
+            # The review draft never changes canonical evidence, and its generation is
+            # the longest step on text-heavy pages. A deferring client gets the result
+            # first and asks for the draft once it has something to show.
+            deferred = defer_presentation and presentation_reader is not None
+            presentation_payload = (
+                {"schema_version": 2, "status": "pending", "pages": []}
+                if deferred
+                else _sanitize_result(
+                    {
+                        "schema_version": 2,
+                        "pages": [
+                            {"page_number": page_number, **presentation}
+                            for page_number, presentation in sorted(
+                                presentations.items()
+                            )
+                        ],
+                    },
+                    session_root,
+                )
             )
             response = {
                 "session_id": session_id,
                 "revision": 1,
                 "filename": original_name,
+                "source_bytes": source.stat().st_size,
                 "backend": active_reader.name,
                 "backend_version": backend_version,
                 "composition": composition_payload,
@@ -821,7 +860,8 @@ def create_app(
                 f"OCR processing failed: {type(error).__name__}",
             ) from error
         finally:
-            file.file.close()
+            if file is not None:
+                file.file.close()
 
     @app.get("/api/sessions/{session_id}/pages/{page_number}")
     def handle_page(session_id: str, page_number: int) -> Any:
@@ -830,6 +870,39 @@ def create_app(
         if page_number < 1 or page_number > len(pages):
             raise HTTPException(404, "Page not found")
         return FileResponse(pages[page_number - 1], media_type="image/png")
+
+    @app.get("/api/sessions/{session_id}/presentation")
+    def handle_presentation(session_id: str) -> Any:
+        session = _get_session(sessions, session_id)
+        with process_lock:
+            payload = session["response"]["presentation"]
+            if payload.get("status") != "pending":
+                return JSONResponse(payload)
+            started = time.perf_counter()
+            stage_execution: list[dict[str, object]] = []
+            presentations = _read_presentations(
+                session["document"].pages,
+                session["pages"],
+                presentation_reader,
+                max_pages=max_presentation_pages,
+                stage_execution=stage_execution,
+            )
+            payload = _sanitize_result(
+                {
+                    "schema_version": 2,
+                    "status": "ready",
+                    "elapsed_seconds": round(time.perf_counter() - started, 3),
+                    "stage_execution": stage_execution,
+                    "pages": [
+                        {"page_number": page_number, **presentation}
+                        for page_number, presentation in sorted(presentations.items())
+                    ],
+                },
+                session_root,
+            )
+            session["response"]["presentation"] = payload
+            session["response"]["stage_execution"].extend(payload["stage_execution"])
+        return JSONResponse(payload)
 
     @app.get("/api/sessions/{session_id}/result.json")
     def handle_json_download(session_id: str, revision: int | None = None) -> Any:
@@ -1025,6 +1098,70 @@ def create_app(
             response_payload = copy.deepcopy(response)
         return JSONResponse(response_payload)
 
+    @app.post("/api/sessions/{session_id}/feedback")
+    def handle_feedback(session_id: str, payload: dict[str, Any]) -> Any:
+        """Keep the verdict with the exact page image and the output it judged.
+
+        A verdict alone is not reviewable: the reviewer needs the pixels that were read
+        and the text produced from them, so both are copied out of the session before it
+        expires.
+        """
+        verdict = payload.get("verdict")
+        if verdict not in {"good", "problem"}:
+            raise HTTPException(400, "verdict must be good or problem")
+        reason = payload.get("reason") if verdict == "problem" else None
+        if verdict == "problem" and reason not in FEEDBACK_REASONS:
+            raise HTTPException(
+                400, f"reason must be one of: {', '.join(sorted(FEEDBACK_REASONS))}"
+            )
+        session = _get_session(sessions, session_id)
+        page_number = payload.get("page_number")
+        record = {
+            "id": secrets.token_urlsafe(8),
+            "session_id": session_id,
+            "verdict": verdict,
+            "reason": reason,
+            "revision": session["revision"],
+            "page_number": page_number,
+            "filename": payload.get("filename"),
+            "note": str(payload.get("note") or "")[:500] or None,
+        }
+        with process_lock:
+            record["stored"] = _store_feedback(feedback_dir, record, session)
+        LOGGER.warning("ocr_reviewer_feedback %s", json.dumps(record, sort_keys=True))
+        return {"status": "recorded", **record}
+
+    @app.get("/api/feedback")
+    def list_feedback(limit: int = 50) -> Any:
+        """List stored reviewer feedback, newest first."""
+        if not feedback_dir.is_dir():
+            return {"feedback": []}
+        entries = []
+        for record_path in sorted(feedback_dir.glob("*/record.json"), reverse=True):
+            try:
+                entries.append(json.loads(record_path.read_text(encoding="utf-8")))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if len(entries) >= max(1, min(limit, 500)):
+                break
+        return {"feedback": entries}
+
+    @app.get("/api/feedback/{feedback_id}/page")
+    def feedback_page(feedback_id: str) -> Any:
+        """Return the exact page image the reviewer judged."""
+        page_path = feedback_dir / feedback_id / "page.png"
+        if not _safe_child(feedback_dir, page_path) or not page_path.is_file():
+            raise HTTPException(404, "Feedback page image was not found")
+        return FileResponse(page_path, media_type="image/png")
+
+    @app.get("/api/feedback/{feedback_id}/result")
+    def feedback_result(feedback_id: str) -> Any:
+        """Return the model output that the reviewer judged."""
+        result_path = feedback_dir / feedback_id / "result.json"
+        if not _safe_child(feedback_dir, result_path) or not result_path.is_file():
+            raise HTTPException(404, "Feedback result was not found")
+        return FileResponse(result_path, media_type="application/json")
+
     @app.post("/api/sessions/{session_id}/corrections")
     def handle_correction(session_id: str, payload: dict[str, Any]) -> Any:
         page_number, region_id, base_revision, request_id = _revision_request(payload)
@@ -1210,6 +1347,59 @@ def create_app(
     return app
 
 
+def _safe_child(root: Path, candidate: Path) -> bool:
+    """Reject ids that try to escape the feedback directory."""
+    try:
+        candidate.resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
+def _prune_feedback(feedback_dir: Path, keep: int) -> None:
+    """Bound retention so reviewer feedback cannot fill the disk it lives on."""
+    records = sorted(
+        (path for path in feedback_dir.glob("*/record.json")),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in records[keep:]:
+        shutil.rmtree(stale.parent, ignore_errors=True)
+
+
+def _store_feedback(
+    feedback_dir: Path,
+    record: dict[str, Any],
+    session: dict[str, Any],
+    keep: int = FEEDBACK_RETENTION,
+) -> dict[str, Any]:
+    """Copy the judged page image and its output next to the verdict."""
+    stored: dict[str, Any] = {"page_image": False, "result": False}
+    target = feedback_dir / str(record["id"])
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        response = session.get("response")
+        if response is not None:
+            (target / "result.json").write_text(
+                json.dumps(response, indent=2, sort_keys=True, default=str),
+                encoding="utf-8",
+            )
+            stored["result"] = True
+        pages = session.get("pages") or []
+        index = record.get("page_number")
+        if isinstance(index, int) and 1 <= index <= len(pages):
+            shutil.copyfile(pages[index - 1], target / "page.png")
+            stored["page_image"] = True
+        (target / "record.json").write_text(
+            json.dumps({**record, "stored": stored}, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        _prune_feedback(feedback_dir, keep)
+    except OSError:
+        LOGGER.exception("Storing reviewer feedback failed")
+    return stored
+
+
 def _get_session(sessions: SessionStore, session_id: str) -> dict[str, Any]:
     try:
         return sessions.get(session_id)
@@ -1346,6 +1536,14 @@ def _refresh_session_response(
 def _safe_filename(filename: str | None) -> str:
     name = (filename or "upload").replace("\\", "/").rsplit("/", 1)[-1]
     return name or "upload"
+
+
+def _example_path(example_name: str) -> Path | None:
+    relative_path = EXAMPLE_FILES.get(example_name)
+    if relative_path is None:
+        return None
+    example = Path(__file__).parents[2] / relative_path
+    return example if example.is_file() else None
 
 
 def _table_example_png() -> bytes:
@@ -2691,7 +2889,9 @@ def _page_uncertainty(page: dict[str, Any]) -> dict[str, Any]:
     evidence_ids = set(page["text"]["evidence_ids"])
     primary = [region for region in regions if region["id"] in evidence_ids]
     confidences = [
-        region["confidence"] for region in primary if region["confidence"] is not None
+        region["confidence"]
+        for region in primary
+        if region["resolution"] == "resolved" and region["confidence"] is not None
     ]
     unresolved = 0
     conflicting = 0
@@ -2803,16 +3003,40 @@ def _backend_version(reader: LocalReader) -> str:
 
 
 def _coverage_assessment(reader: LocalReader, page_count: int) -> dict[str, Any]:
-    assessment = getattr(reader, "coverage_assessment", None)
-    if callable(assessment):
-        value = assessment(page_count)
-        if isinstance(value, dict):
-            return value
-    return {
-        "status": "not_assessed",
-        "message": "Extraction completeness was not independently assessed.",
-        "pages": [],
-    }
+    # Every decorating reader that assessed coverage is reported. Asking only the outermost
+    # one silently dropped the tile, wide-band and restoration assessments, because the
+    # readers that produce them sit inside PageFrameReader.
+    assessed = [
+        {"reader": getattr(item, "name", type(item).__name__), **value}
+        for item, value in _chain_assessments(reader, page_count)
+        if value.get("status") != "not_assessed"
+    ]
+    if not assessed:
+        return {
+            "status": "not_assessed",
+            "message": "Extraction completeness was not independently assessed.",
+            "pages": [],
+        }
+    return {**assessed[0], "readers": assessed}
+
+
+def _chain_assessments(
+    reader: LocalReader,
+    page_count: int,
+) -> list[tuple[object, dict[str, Any]]]:
+    """Walk the reader decorators, collecting each coverage assessment."""
+    collected: list[tuple[object, dict[str, Any]]] = []
+    seen: list[object] = []
+    current: object | None = reader
+    while current is not None and all(current is not item for item in seen):
+        seen.append(current)
+        assessment = getattr(current, "coverage_assessment", None)
+        if callable(assessment):
+            value = assessment(page_count)
+            if isinstance(value, dict):
+                collected.append((current, value))
+        current = getattr(current, "reader", None)
+    return collected
 
 
 def _pages_with_table_continuations(

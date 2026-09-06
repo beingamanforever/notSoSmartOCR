@@ -6,25 +6,17 @@ Evidence-linked OCR for structured and clinical documents. Research software, no
 
 ## Pipeline
 
-`input -> orientation -> positioned OCR -> structure -> bounded specialists -> canonical evidence -> review -> UI and exports`
+Every stage reads and writes the same positioned evidence record. Specialists are asked only about eligible crops and return alternatives, never replacements, and no stage deletes a reading it did not create.
 
-- Nemotron reads positioned literal text; geometry establishes tables, forms, controls, and reading order.
+- Nemotron OCR v2 reads positioned literal text; geometry establishes tables, forms, controls, and reading order.
 - TrOCR handwriting and Falcon formula readers receive only eligible source-resolution crops.
-- Specialist output stays an alternative until independent evidence or human review accepts it.
-- Accepted revisions replace consumed fragments once. Source boxes, raw responses, alternatives, and review state remain attached.
-- Text, Markdown, Copy, and Download render the same canonical revision.
+- A specialist reading stays an alternative until independent evidence or a human accepts it.
+- An accepted revision supersedes what it consumes, once. Source boxes, raw responses, alternatives, and review state stay attached.
+- Text, Markdown, Copy, and Download all render the same canonical revision.
 
 ## Demo
 
-| | |
-| --- | --- |
-| ![Landing](artifacts/screenshots/final/01-landing.jpg) | ![Clinical table text](artifacts/screenshots/final/02-clinical-table-text.jpg) |
-| ![Clinical evidence](artifacts/screenshots/final/03-clinical-table-evidence.jpg) | ![Academic text](artifacts/screenshots/final/04-academic-text.jpg) |
-| ![Academic evidence](artifacts/screenshots/final/05-academic-source-link.jpg) | ![Financial table](artifacts/screenshots/final/06-financial-table.jpg) |
-| ![Financial evidence](artifacts/screenshots/final/07-financial-glossary.jpg) | ![Formula review](artifacts/screenshots/final/08-formula-text.jpg) |
-| ![Formula evidence](artifacts/screenshots/final/09-formula-evidence.jpg) | ![Scanned form](artifacts/screenshots/final/10-scanned-form-text.jpg) |
-| ![Form evidence](artifacts/screenshots/final/11-scanned-form-source-link.jpg) | ![Code text](artifacts/screenshots/final/12-code-text.jpg) |
-| ![Code Markdown](artifacts/screenshots/final/13-code-markdown-export.jpg) | |
+![Example pages carried end to end](artifacts/architecture/ocr-evidence-demo.jpg)
 
 ## Measured limits
 

@@ -2507,3 +2507,61 @@ def _image(tmp_path: Path, size: tuple[int, int] = (120, 100)) -> Path:
     path = tmp_path / "page.png"
     Image.new("RGB", size, "white").save(path)
     return path
+
+
+def test_a_few_colliding_cells_in_a_large_grid_still_produce_a_table(
+    tmp_path: Path,
+) -> None:
+    """Rejecting on any single collision does not scale: a 6x6 grid with one bad cell
+    is still overwhelmingly recovered, unlike a 2x2 grid with one bad cell."""
+
+    def grid_cells() -> tuple[TableCell, ...]:
+        cells = [
+            TableCell(
+                BoundingBox(
+                    100 + column * 100,
+                    100 + row * 60,
+                    190 + column * 100,
+                    155 + row * 60,
+                ),
+                (row,),
+                (column,),
+            )
+            for row in range(6)
+            for column in range(6)
+        ]
+        # one spurious fragment crossing an existing cell
+        cells.append(TableCell(BoundingBox(120, 110, 180, 150), (0,), (3,)))
+        return tuple(cells)
+
+    class NearCleanGridExtractor:
+        name = "fake-tables"
+
+        def extract(
+            self,
+            image_path: Path,
+            tokens: list[dict[str, object]],
+        ) -> list[TablePrediction]:
+            return [
+                TablePrediction(
+                    BoundingBox(100, 100, 700, 460),
+                    grid_cells(),
+                    0.99,
+                    {"id": "near-clean-grid", "origin": "test"},
+                )
+            ]
+
+    image_path = _image(tmp_path, (1000, 1000))
+    source = [
+        _region("a", "Alpha", 1, (110, 110, 180, 150), 0.95),
+        _region("b", "Beta", 2, (210, 110, 280, 150), 0.95),
+    ]
+
+    output = TatrTableStage(NearCleanGridExtractor()).apply(image_path, 1, source)
+
+    table = next(region for region in output if region.kind == "table")
+    dropped = table.structure["dropped_cells"]
+    assert len(dropped) == 1
+    assert dropped[0]["reason"] == "cell_position_collision"
+    assert table.structure["row_count"] == 6
+    assert table.structure["column_count"] == 6

@@ -18,7 +18,7 @@ import pytest
 
 import ocr_pipeline.demo as demo_module
 from ocr_pipeline.contracts import BoundingBox, PageResult, TextAlternative, TextRegion
-from ocr_pipeline.demo import create_app
+from ocr_pipeline.demo import FEEDBACK_REASONS, create_app
 from ocr_pipeline.evidence_layout import EvidenceLayoutStage
 from ocr_pipeline.orientation import OrientationReader
 from ocr_pipeline.preprocessing import PageFrameReader
@@ -587,7 +587,7 @@ def test_demo_processes_multi_page_tiff_and_clears_session() -> None:
         assert example.content.startswith(b"%PDF")
         assert example.headers["content-disposition"].startswith("inline;")
         for example_name in (
-            "formula-scan",
+            "contract-amendment",
             "academic-paper",
             "code",
             "financial-table",
@@ -692,14 +692,15 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
         response = client.get("/")
 
     assert response.status_code == 200
+    assert response.headers["content-encoding"] == "gzip"
     html = response.text
     assert html.count('class="tab" role="tab"') == 3
     assert ">Readable draft</button>" not in html
     assert html.count("Not So Smart OCR") == 2
     assert "!SoSmartOCR" not in html
     assert html.count('class="example-button" type="button" data-example=') == 6
-    assert 'data-example="clinical-table"' in html
-    assert 'data-example="formula-scan"' in html
+    assert 'data-example="contract-agreement"' in html
+    assert 'data-example="contract-amendment"' in html
     assert 'data-example="academic-paper"' in html
     assert 'data-example="code"' in html
     assert 'data-example="financial-table"' in html
@@ -711,20 +712,17 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     assert "Total time taken" in html
     assert html.count('class="example-preview"') == 6
     assert "Table-cell comparison" not in html
-    handle_example_start = html.index("async function handleExample(button)")
-    example_fetch = html.index("await fetch", handle_example_start)
-    assert (
-        html.index("state.selectedFile = null;", handle_example_start) < example_fetch
-    )
-    assert (
-        html.index('byId("parse-button").disabled = true;', handle_example_start)
-        < example_fetch
-    )
-    assert 'button.setAttribute("aria-busy", "true")' in html
-    assert 'const extension = blob.type === "image/png" ? ".png" : ".pdf";' in html
+    # Picking an example names it for the server instead of downloading its bytes and
+    # posting them straight back, which doubled the transfer of an unchanged file.
+    handle_example_start = html.index("function handleExample(button)")
+    handle_example = html[handle_example_start : html.index("\n    }", handle_example_start)]
+    assert "fetch(" not in handle_example
+    assert "state.selectedExample = name;" in handle_example
+    assert "state.selectedFile = null;" in handle_example
+    assert "example=${encodeURIComponent(example)}" in html
     assert "renderUncertainty();" not in html
     assert 'class="inspector empty"' in html
-    assert 'class="tab-panel active empty-panel confidence-review"' in html
+    assert 'class="tab-panel active empty-panel"' in html
     assert "Ready to extract" in html
     assert ">Text output</button>" in html
     assert ">Visual</button>" in html
@@ -762,7 +760,7 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     assert html.count("if (resultRequest === state.resultRequest) {") == 2
     assert html.index("startClientTimer();") < html.index("resetResult();")
     assert html.index("startClientTimer();") < html.index(
-        'fetch("/api/process", { method: "POST", body })'
+        'fetch(`/api/process${query}`, { method: "POST", body })'
     )
     assert "stopClientTimer(timerOutcome);" in html
     assert "Pipeline execution" in html
@@ -781,7 +779,8 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     assert 'id="copy-text" type="button" data-copy-state="idle"' in html
     assert 'id="copy-markdown" type="button" data-copy-state="idle"' in html
     assert 'id="copy-json" type="button" data-copy-state="idle"' in html
-    assert ">Copy</summary>" in html
+    # Copy is icon-only now, so assert its accessible name rather than a text label
+    assert 'aria-label="Copy"' in html
     assert ">Download</summary>" in html
     assert 'id="download-markdown" aria-disabled="true"' in html
     assert 'id="download-json" aria-disabled="true"' in html
@@ -1010,7 +1009,7 @@ def test_public_raster_examples_process_end_to_end() -> None:
     app = create_app(PublicExampleReader())
 
     with TestClient(app) as client:
-        for example_name in ("formula-scan", "academic-paper"):
+        for example_name in ("contract-amendment", "academic-paper"):
             example = client.get(f"/api/examples/{example_name}")
             assert example.status_code == 200
             processed = client.post(
@@ -1081,6 +1080,20 @@ def test_demo_uses_neutral_navy_and_blue_visual_roles() -> None:
     assert (
         "return regionColors[categoryKey(regionOrKind)] || regionColors.text;" in html
     )
+    assert "context.fillRect(box.left, box.top" not in html
+    assert "context.strokeRect(box.left, box.top" in html
+
+
+def test_form_rows_disclose_only_unresolved_handwriting_values() -> None:
+    html = TestClient(create_app(ControlledReader())).get("/").text
+    start = html.index("function renderFormRow")
+    end = html.index("function canonicalLayoutText", start)
+    renderer = html[start:end]
+
+    assert "segment.label_evidence_ids || []" in renderer
+    assert 'semanticKind(source) === "handwriting"' in renderer
+    assert 'note.className = "ink-note"' in renderer
+    assert 'note.textContent = "ink present, unread"' in renderer
 
 
 def test_demo_markup_links_controls_tabs_and_output_panels() -> None:
@@ -1117,11 +1130,13 @@ def test_demo_markup_links_controls_tabs_and_output_panels() -> None:
     assert reread_attrs["disabled"] is None
     assert by_element_id["reread-status"][1]["role"] == "status"
     assert by_element_id["rendered-toolbar"][1]["hidden"] is None
-    assert by_element_id["confidence-toggle"][1]["aria-pressed"] == "true"
+    assert by_element_id["confidence-toggle"][1]["aria-pressed"] == "false"
     assert (
         by_element_id["confidence-toggle"][1]["aria-label"]
-        == "Turn provider confidence highlights off"
+        == "Turn provider confidence highlights on"
     )
+    assert "confidenceReview: false" in response.text
+    assert "state.confidenceReview = false;" in response.text
     assert (
         'element.dataset.confidenceScope = evidence.scope || "region";' in response.text
     )
@@ -1150,10 +1165,7 @@ def test_demo_markup_links_controls_tabs_and_output_panels() -> None:
         assert "disabled" in attrs
 
     assert "@media (max-width: 900px)" in response.text
-    assert (
-        "grid-template-columns: minmax(0, .95fr) minmax(420px, 1.05fr);"
-        in response.text
-    )
+    assert "grid-template-columns: minmax(0, 1fr) minmax(460px, 1fr);" in response.text
     assert ".workspace { grid-template-columns: 1fr; }" in response.text
 
 
@@ -1490,7 +1502,7 @@ def test_demo_reports_evidence_uncertainty_without_changing_result_schema() -> N
                     "page_number": 1,
                     "review_required": True,
                     "mean_primary_confidence": 0.925,
-                    "primary_regions": 3,
+                    "primary_regions": 5,
                     "confidence_regions": 2,
                     "unresolved_evidence": 1,
                     "conflicting_evidence": 2,
@@ -1514,6 +1526,78 @@ def test_demo_reports_evidence_uncertainty_without_changing_result_schema() -> N
         }
 
 
+def test_demo_reads_a_named_example_from_disk_instead_of_an_upload() -> None:
+    class AnySizeReader(ControlledReader):
+        def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+            return [
+                TextRegion(
+                    id=f"p{page_number}-1",
+                    kind="text",
+                    text="Example",
+                    confidence=0.99,
+                    bounding_box=BoundingBox(0, 0, 10, 10),
+                    reading_order=1,
+                    provider=self.name,
+                    text_provenance={},
+                    resolution="resolved",
+                    structure={},
+                )
+            ]
+
+    app = create_app(AnySizeReader())
+
+    with TestClient(app) as client:
+        served = client.get("/api/examples/scanned-form")
+        response = client.post("/api/process?example=scanned-form")
+        missing = client.post("/api/process?example=not-a-real-example")
+        empty = client.post("/api/process")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["filename"] == "scanned_form.png"
+    assert payload["source_bytes"] == len(served.content)
+    assert payload["result"]["pages"]
+    assert missing.status_code == 422
+    assert empty.status_code == 422
+
+
+def test_demo_defers_the_review_draft_so_the_result_lands_without_waiting_for_it() -> (
+    None
+):
+    app = create_app(
+        ReviewEvidenceReader(),
+        presentation_reader=PresentationReader(),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process?defer_presentation=1",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        session_id = payload["session_id"]
+        drafted = client.get(f"/api/sessions/{session_id}/presentation").json()
+        again = client.get(f"/api/sessions/{session_id}/presentation").json()
+        inline = client.post(
+            "/api/process",
+            files={"file": ("review.png", _page_png(), "image/png")},
+        ).json()
+
+    assert payload["presentation"] == {
+        "schema_version": 2,
+        "status": "pending",
+        "pages": [],
+    }
+    assert not any(
+        run["stage"] == "presentation" for run in payload["stage_execution"]
+    )
+    assert drafted["status"] == "ready"
+    assert drafted["pages"] == inline["presentation"]["pages"]
+    assert [run["stage"] for run in drafted["stage_execution"]] == ["presentation"]
+    assert again == drafted
+
+
 def test_demo_adds_review_only_local_page_presentation_without_replacing_evidence() -> (
     None
 ):
@@ -1533,7 +1617,9 @@ def test_demo_adds_review_only_local_page_presentation_without_replacing_evidenc
         html = client.get("/").text
 
     page = payload["result"]["pages"][0]
-    assert page["text"]["value"] == "Primary text Value | Value |\n| --- |\n| 42 |"
+    assert page["text"]["value"] == (
+        "Primary text Value [unreadable handwriting] [?] | Value |\n| --- |\n| 42 |"
+    )
     assert "presentation" not in page
     assert payload["presentation"] == {
         "schema_version": 2,
@@ -1695,7 +1781,7 @@ def test_demo_preserves_and_validates_category_routed_presentation_blocks() -> N
     assert payload["presentation"]["schema_version"] == 2
     assert "presentation" not in page
     assert page["text"]["value"] == (
-        "Primary text Value a / b | Value |\n| --- |\n| 42 |"
+        "Primary text Value a / b [?] | Value |\n| --- |\n| 42 |"
     )
     assert presentation["canonical_unchanged"] is True
     assert presentation["validation"] == {
@@ -4729,3 +4815,143 @@ def _page_png() -> bytes:
     output = io.BytesIO()
     Image.new("RGB", (120, 80), "white").save(output, format="PNG")
     return output.getvalue()
+
+
+def test_demo_stores_feedback_with_the_judged_page_and_output(tmp_path: Path) -> None:
+    """A verdict alone is not reviewable: keep the pixels and the output beside it."""
+    feedback_root = tmp_path / "feedback"
+    app = create_app(ControlledReader(), feedback_root=feedback_root)
+    with TestClient(app) as client:
+        payload = client.post(
+            "/api/process",
+            files={"file": ("visit.png", _page_png(), "image/png")},
+        ).json()
+        session_id = payload["session_id"]
+
+        recorded = client.post(
+            f"/api/sessions/{session_id}/feedback",
+            json={
+                "verdict": "problem",
+                "reason": "missing_text",
+                "note": "the footer never came through",
+                "page_number": 1,
+                "filename": "visit.png",
+            },
+        )
+        assert recorded.status_code == 200
+        body = recorded.json()
+        assert body["verdict"] == "problem"
+        assert body["reason"] == "missing_text"
+        assert body["revision"] == payload["revision"]
+        assert body["stored"] == {"page_image": True, "result": True}
+
+        listed = client.get("/api/feedback").json()["feedback"]
+        assert [item["id"] for item in listed] == [body["id"]]
+        assert listed[0]["filename"] == "visit.png"
+        assert listed[0]["reason"] == "missing_text"
+        assert listed[0]["note"] == "the footer never came through"
+
+        page = client.get(f"/api/feedback/{body['id']}/page")
+        assert page.status_code == 200
+        assert page.headers["content-type"] == "image/png"
+
+        result = client.get(f"/api/feedback/{body['id']}/result").json()
+        assert result["session_id"] == session_id
+
+        assert client.get("/api/feedback/../../etc/page").status_code in {404, 400}
+        assert (
+            client.post(
+                f"/api/sessions/{session_id}/feedback", json={"verdict": "maybe"}
+            ).status_code
+            == 400
+        )
+        # A problem report without a usable reason is not reviewable, so it is rejected.
+        assert (
+            client.post(
+                f"/api/sessions/{session_id}/feedback", json={"verdict": "problem"}
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                f"/api/sessions/{session_id}/feedback",
+                json={"verdict": "problem", "reason": "vibes"},
+            ).status_code
+            == 400
+        )
+        good = client.post(
+            f"/api/sessions/{session_id}/feedback", json={"verdict": "good"}
+        )
+        assert good.status_code == 200
+        assert good.json()["reason"] is None
+        assert (
+            client.post(
+                "/api/sessions/missing/feedback", json={"verdict": "good"}
+            ).status_code
+            == 404
+        )
+
+
+def test_demo_dismisses_action_menus_on_outside_click_and_escape() -> None:
+    """A <details> menu only closes via its own summary, so the page must dismiss it."""
+    app = create_app(ControlledReader())
+    with TestClient(app) as client:
+        html = client.get("/").text
+
+    assert "function closeActionMenus(" in html
+    # outside pointerdown closes any open menu
+    assert 'document.addEventListener("pointerdown"' in html
+    assert (
+        'if (!event.target.closest("details.action-menu")) closeActionMenus();' in html
+    )
+    # Escape closes the menu before selection handling runs
+    assert 'if (document.querySelector("details.action-menu[open]")) {' in html
+    # opening one menu closes the other, and choosing an item closes it
+    assert 'menu.addEventListener("toggle"' in html
+    assert (
+        'if (event.target.closest(".action-popover:not(.feedback-form)")) closeActionMenus();'
+        in html
+    )
+
+
+def test_demo_asks_why_a_result_is_bad_before_reporting_it() -> None:
+    """A thumbs-down without a reason is noise, so the page collects one first."""
+    app = create_app(ControlledReader())
+    with TestClient(app) as client:
+        html = client.get("/").text
+
+    # Approval is one click; a problem opens the reason form instead of posting.
+    assert (
+        'byId("feedback-up").addEventListener("click", () => sendFeedback("good"));'
+        in html
+    )
+    assert 'byId("feedback-down").addEventListener' not in html
+    assert 'class="action-popover feedback-form"' in html
+    for reason in FEEDBACK_REASONS:
+        assert f'value="{reason}"' in html
+    assert 'byId("feedback-send").disabled = !selectedReason();' in html
+    assert (
+        'sendFeedback("problem", selectedReason(), byId("feedback-note").value)' in html
+    )
+    # Approval reads green, a problem reads red.
+    assert '#feedback-up[aria-pressed="true"] {' in html
+    assert "#feedback-down[data-sent] {" in html
+
+
+def test_feedback_retention_is_bounded_so_it_cannot_fill_the_disk(
+    tmp_path: Path,
+) -> None:
+    from ocr_pipeline.demo import _prune_feedback, _store_feedback
+
+    feedback_root = tmp_path / "feedback"
+    feedback_root.mkdir()
+    session = {"response": {"session_id": "s"}, "pages": []}
+    for index in range(6):
+        _store_feedback(feedback_root, {"id": f"r{index}"}, session, keep=3)
+
+    kept = sorted(path.name for path in feedback_root.iterdir())
+    assert len(kept) == 3, "older feedback must be pruned"
+    assert "r5" in kept, "the newest record must survive"
+
+    _prune_feedback(feedback_root, keep=1)
+    assert len(list(feedback_root.iterdir())) == 1

@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from ocr_pipeline.anchored_ink import AnchoredInkProposalStage
+from ocr_pipeline.digit_verification import DigitVerificationStage
+from ocr_pipeline.handwriting_lines import DocTRLineDetector, HandwritingLineStage
 from ocr_pipeline.controls import GeometricControlStage
 from ocr_pipeline.demo import CompositionDescriptor, _read_presentations, create_app
 from ocr_pipeline.dispute_resolution import DisputeResolutionStage
@@ -316,8 +318,16 @@ def create_verified_app(
     stages.extend((risk, EvidenceLayoutStage()))
     if formula_stage is not None:
         stages.append(formula_stage)
+    stages.append(DigitVerificationStage(cell, text_provider=base_reader.name))
     stages.append(AnchoredInkProposalStage(label_provider=base_reader.name))
     if handwriting_stage is not None:
+        stages.append(
+            HandwritingLineStage(
+                DocTRLineDetector(device=args.device),
+                text_provider=base_reader.name,
+                max_lines=getattr(args, "handwriting_max_lines", 24),
+            )
+        )
         stages.append(handwriting_stage)
     handwriting = "configured" if handwriting_stage is not None else "not configured"
     configured_stages = [item.name for item in stages]
@@ -343,7 +353,7 @@ def create_verified_app(
         ),
         stages=tuple(configured_stages),
         handwriting=handwriting,
-        build_label="2026-09-06-formula-source-trace-v3",
+        build_label="2026-09-06-form-evidence-v4",
         note=(
             "Configuration only. Table Transformer is augmented by conservative "
             "ruled-form proposals and count-gated grid repair. Models are loaded "
@@ -362,6 +372,9 @@ def create_verified_app(
     katex_asset_root = getattr(args, "katex_asset_root", None)
     if katex_asset_root is not None:
         app_options["katex_asset_root"] = katex_asset_root
+    feedback_root = getattr(args, "feedback_root", None)
+    if feedback_root is not None:
+        app_options["feedback_root"] = feedback_root
     if presentation_reader is not None:
         app_options["presentation_reader"] = presentation_reader
         default_pages = getattr(args, "falcon_max_pages", 4)
@@ -485,6 +498,11 @@ def _parser() -> argparse.ArgumentParser:
         default=180,
     )
     parser.add_argument(
+        "--feedback-root",
+        type=Path,
+        help="Directory that keeps reviewer feedback across restarts",
+    )
+    parser.add_argument(
         "--katex-asset-root",
         type=Path,
         help="Serve local KaTeX assets for formula presentation",
@@ -541,7 +559,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--phi4-context-padding", type=_positive_int, default=12)
     parser.add_argument("--phi4-timeout-seconds", type=float, default=120)
     parser.add_argument("--trocr-model-revision", default=TROCR_MODEL_REVISION)
-    parser.add_argument("--trocr-max-regions", type=_positive_int, default=8)
+    parser.add_argument("--trocr-max-regions", type=_positive_int, default=24)
+    parser.add_argument("--handwriting-max-lines", type=_positive_int, default=24)
     parser.add_argument("--trocr-max-new-tokens", type=_positive_int, default=128)
     parser.add_argument("--trocr-batch-size", type=_positive_int, default=4)
     parser.add_argument("--trocr-context-padding", type=_positive_int, default=12)

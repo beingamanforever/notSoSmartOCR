@@ -1,0 +1,88 @@
+{
+  "status": "complete",
+  "dataset": {
+    "repository": "Teklia/IAM-line",
+    "revision": "fbdad97500ce54635c0d1ba306bf535cb40656cf",
+    "split": "test",
+    "expected_lines": 2915,
+    "language": "English",
+    "name": "iam",
+    "full_test_split": false
+  },
+  "reader": {
+    "name": "trocr",
+    "provenance": {
+      "id": "microsoft/trocr-base-handwritten",
+      "source": "microsoft/trocr-base-handwritten",
+      "revision": "eaacaf452b06415df8f10bb6fad3a4c11e609406",
+      "origin": "Microsoft",
+      "license": "MIT",
+      "identity_verified": true,
+      "local_files_only": true,
+      "scope": "single_text_line"
+    },
+    "generation": null,
+    "model_path": null,
+    "adapter_path": null
+  },
+  "configuration": {
+    "batch_size": 1,
+    "task_mode": "direct_complete_text_line",
+    "reader_contract": {
+      "scope": "single_text_line",
+      "processor": "TrOCRProcessor",
+      "device": "cuda:0",
+      "max_new_tokens": 128,
+      "do_sample": false,
+      "num_beams": 1
+    },
+    "preprocessing": "dataset_decoded_pixels_converted_to_rgb_png",
+    "model_input_dimensions": "recorded_per_row_or_explicitly_unexposed",
+    "output_boundary": "ocr_pipeline_reader_public_output",
+    "text_correction": false
+  },
+  "progress": {
+    "completed": 5,
+    "expected": 5
+  },
+  "latency": {
+    "model_load_ms": 4726.171,
+    "warmup": {
+      "sample_id": "iam-test-000000",
+      "status": "success",
+      "failure": null,
+      "latency_ms": 666.561,
+      "sample_is_scored_in_benchmark": true
+    },
+    "benchmark_wall_ms": 1268.369,
+    "basis": "amortized_batch_wall_time_per_line",
+    "p50_ms": 246.824,
+    "p95_ms": 280.996,
+    "lines_per_second": 3.949
+  },
+  "metrics": {
+    "literal": {
+      "cer": 0.06971154,
+      "wer": 0.20652174,
+      "exact": 0,
+      "exact_rate": 0.0,
+      "reference_characters": 416,
+      "reference_words": 92,
+      "character_edits": {
+        "insertions": 6,
+        "deletions": 13,
+        "substitutions": 10
+      },
+      "word_edits": {
+        "insertions": 4,
+        "deletions": 5,
+        "substitutions": 10
+      }
+    },
+    "failed_lines": 0,
+    "empty_predictions": 0,
+    "failures_remain_in_denominators": true
+  },
+  "peak_cuda_memory_mib": 1317.138,
+  "rows": "iam-trocr-n5.rows.jsonl"
+}
