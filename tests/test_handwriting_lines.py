@@ -21,13 +21,19 @@ class ScriptedDetector:
     def __init__(self, lines: list[BoundingBox]) -> None:
         self.lines = lines
         self.calls: list[Path] = []
+        self.windows: list[BoundingBox | None] = []
 
     @property
     def provenance(self) -> dict[str, object]:
         return {"id": "scripted"}
 
-    def detect(self, image_path: Path) -> list[BoundingBox]:
+    def detect(
+        self,
+        image_path: Path,
+        region: BoundingBox | None = None,
+    ) -> list[BoundingBox]:
         self.calls.append(image_path)
+        self.windows.append(region)
         return list(self.lines)
 
 
@@ -215,3 +221,21 @@ def test_dense_printed_table_text_does_not_become_handwriting(tmp_path: Path) ->
 
     assert sum(region.kind == "handwriting" for region in result) == 0
     assert detector.calls == []
+
+
+def test_detection_is_scoped_to_the_poorly_read_area(tmp_path: Path) -> None:
+    """Detection cost scales with pixels, so a few bad regions must not cost a page."""
+    source = tmp_path / "page.png"
+    Image.new("RGB", (2000, 2000), "white").save(source)
+    detector = ScriptedDetector([BoundingBox(8, 18, 210, 40)])
+    regions = _page(9, 0.98)
+    regions.append(_region("r-50", "welking", (400, 900, 700, 940), 0.55))
+
+    HandwritingLineStage(detector).apply(source, 1, regions)
+
+    window = detector.windows[0]
+    assert window is not None, "the detector must receive a scoped window"
+    assert window.left <= 400 and window.top <= 900
+    assert window.right >= 700 and window.bottom >= 940
+    area = (window.right - window.left) * (window.bottom - window.top)
+    assert area < 2000 * 2000 * 0.25, "the window must be far smaller than the page"

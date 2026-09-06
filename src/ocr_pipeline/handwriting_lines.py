@@ -25,6 +25,8 @@ MODEL = {
     "license": "Apache-2.0",
 }
 MEASURED_KINDS = frozenset({"text", "word"})
+_PREDICTORS: dict[tuple[str, str], Any] = {}
+_PREDICTOR_LOCK = threading.Lock()
 TABLE_KINDS = frozenset({"table", "table_candidate"})
 # Evidence the table reread path and the formula specialist already own.
 EXCLUDED_OWNERS = frozenset(
@@ -66,15 +68,35 @@ class DocTRLineDetector:
     def provenance(self) -> dict[str, Any]:
         return {**MODEL, "id": self.architecture}
 
-    def detect(self, image_path: Path) -> list[BoundingBox]:
+    def detect(
+        self,
+        image_path: Path,
+        region: BoundingBox | None = None,
+    ) -> list[BoundingBox]:
+        """Detect text lines, optionally restricted to one area of the page.
+
+        Detection cost scales with the pixels handed to it, so a page with a handful of
+        poorly read regions should not pay for a full-page pass.
+        """
         predictor = self._load()
         try:
             import numpy as np
 
             with Image.open(image_path) as opened:
                 page = opened.convert("RGB")
-                width, height = page.size
-                predicted = predictor([np.asarray(page)])
+                if region is not None:
+                    window = _clamp(region, page.size)
+                    if window is None:
+                        return []
+                    view = page.crop(_box_tuple(window))
+                    offset_x, offset_y = window.left, window.top
+                else:
+                    view = page
+                    offset_x = offset_y = 0
+                width, height = view.size
+                predicted = predictor([np.asarray(view)])
+                if view is not page:
+                    view.close()
         except (OSError, UnidentifiedImageError, ValueError, RuntimeError) as error:
             raise ReaderError("line_detection_failed", str(error)) from error
 
@@ -87,14 +109,29 @@ class DocTRLineDetector:
             except (TypeError, ValueError):
                 continue
             box = BoundingBox(
-                max(0, round(left * width)),
-                max(0, round(top * height)),
-                min(width, round(right * width)),
-                min(height, round(bottom * height)),
+                offset_x + max(0, round(left * width)),
+                offset_y + max(0, round(top * height)),
+                offset_x + min(width, round(right * width)),
+                offset_y + min(height, round(bottom * height)),
             )
             if box.right > box.left and box.bottom > box.top:
                 boxes.append(box)
         return _group_lines(boxes)
+
+    def check_health(self) -> None:
+        """Load and run the detector now so the first real request does not pay for it.
+
+        Loading alone is not enough: the first forward pass builds CUDA kernels, and the
+        warmup document may contain no poorly read regions, so without this the cost
+        lands on a user instead.
+        """
+        predictor = self._load()
+        try:
+            import numpy as np
+
+            predictor([np.zeros((64, 64, 3), dtype="uint8")])
+        except Exception as error:  # a warm-up failure must not stop the service
+            raise ReaderError("line_detection_unavailable", str(error)) from error
 
     def _load(self) -> Any:
         with self._lock:
@@ -103,6 +140,14 @@ class DocTRLineDetector:
             return self._build()
 
     def _build(self) -> Any:
+        # One detector per architecture and device for the whole process: the app can be
+        # constructed more than once, and each rebuild would otherwise reload the model.
+        key = (self.architecture, self.device)
+        with _PREDICTOR_LOCK:
+            shared = _PREDICTORS.get(key)
+        if shared is not None:
+            self._predictor = shared
+            return shared
         try:
             from doctr.models import detection_predictor
 
@@ -118,6 +163,9 @@ class DocTRLineDetector:
                 "line_detection_unavailable",
                 "docTR line detection is unavailable",
             ) from error
+        with _PREDICTOR_LOCK:
+            _PREDICTORS.setdefault(key, predictor)
+            predictor = _PREDICTORS[key]
         self._predictor = predictor
         return predictor
 
@@ -159,9 +207,10 @@ class HandwritingLineStage:
         if not low:
             return regions
 
+        window = _padded_union([region.bounding_box for region in low])
         lines = [
             line
-            for line in self.detector.detect(image_path)
+            for line in self.detector.detect(image_path, window)
             if _overlaps_any(line, low)
         ]
         if not lines:
@@ -262,6 +311,35 @@ def _group_lines(boxes: list[BoundingBox]) -> list[BoundingBox]:
         BoundingBox(line["left"], line["top"], line["right"], line["bottom"])
         for line in lines
     ]
+
+
+def _padded_union(boxes: list[BoundingBox], padding: int = 24) -> BoundingBox | None:
+    """The area worth detecting in, padded so a line is not clipped at its edges."""
+    if not boxes:
+        return None
+    return BoundingBox(
+        min(box.left for box in boxes) - padding,
+        min(box.top for box in boxes) - padding,
+        max(box.right for box in boxes) + padding,
+        max(box.bottom for box in boxes) + padding,
+    )
+
+
+def _clamp(box: BoundingBox, size: tuple[int, int]) -> BoundingBox | None:
+    width, height = size
+    clamped = BoundingBox(
+        max(0, min(box.left, width)),
+        max(0, min(box.top, height)),
+        max(0, min(box.right, width)),
+        max(0, min(box.bottom, height)),
+    )
+    if clamped.right <= clamped.left or clamped.bottom <= clamped.top:
+        return None
+    return clamped
+
+
+def _box_tuple(box: BoundingBox) -> tuple[int, int, int, int]:
+    return (box.left, box.top, box.right, box.bottom)
 
 
 def _mostly_inside(

@@ -61,6 +61,7 @@ except ImportError:  # pragma: no cover - exercised only without demo dependenci
 
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+FEEDBACK_RETENTION = 500
 MAX_DOCUMENT_PAGES = 32
 MAX_PAGE_PIXELS = 32_000_000
 MAX_DECODED_PIXELS = 200_000_000
@@ -1287,10 +1288,22 @@ def _safe_child(root: Path, candidate: Path) -> bool:
     return True
 
 
+def _prune_feedback(feedback_dir: Path, keep: int) -> None:
+    """Bound retention so reviewer feedback cannot fill the disk it lives on."""
+    records = sorted(
+        (path for path in feedback_dir.glob("*/record.json")),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    for stale in records[keep:]:
+        shutil.rmtree(stale.parent, ignore_errors=True)
+
+
 def _store_feedback(
     feedback_dir: Path,
     record: dict[str, Any],
     session: dict[str, Any],
+    keep: int = FEEDBACK_RETENTION,
 ) -> dict[str, Any]:
     """Copy the judged page image and its output next to the verdict."""
     stored: dict[str, Any] = {"page_image": False, "result": False}
@@ -1313,6 +1326,7 @@ def _store_feedback(
             json.dumps({**record, "stored": stored}, indent=2, sort_keys=True),
             encoding="utf-8",
         )
+        _prune_feedback(feedback_dir, keep)
     except OSError:
         LOGGER.exception("Storing reviewer feedback failed")
     return stored

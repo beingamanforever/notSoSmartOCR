@@ -4812,3 +4812,22 @@ def test_demo_dismisses_action_menus_on_outside_click_and_escape() -> None:
     # opening one menu closes the other, and choosing an item closes it
     assert 'menu.addEventListener("toggle"' in html
     assert 'if (event.target.closest(".action-popover")) closeActionMenus();' in html
+
+
+def test_feedback_retention_is_bounded_so_it_cannot_fill_the_disk(
+    tmp_path: Path,
+) -> None:
+    from ocr_pipeline.demo import _prune_feedback, _store_feedback
+
+    feedback_root = tmp_path / "feedback"
+    feedback_root.mkdir()
+    session = {"response": {"session_id": "s"}, "pages": []}
+    for index in range(6):
+        _store_feedback(feedback_root, {"id": f"r{index}"}, session, keep=3)
+
+    kept = sorted(path.name for path in feedback_root.iterdir())
+    assert len(kept) == 3, "older feedback must be pruned"
+    assert "r5" in kept, "the newest record must survive"
+
+    _prune_feedback(feedback_root, keep=1)
+    assert len(list(feedback_root.iterdir())) == 1
