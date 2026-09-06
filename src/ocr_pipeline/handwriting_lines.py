@@ -25,6 +25,7 @@ MODEL = {
     "license": "Apache-2.0",
 }
 MEASURED_KINDS = frozenset({"text", "word"})
+TABLE_KINDS = frozenset({"table", "table_candidate"})
 # Evidence the table reread path and the formula specialist already own.
 EXCLUDED_OWNERS = frozenset(
     {
@@ -177,7 +178,15 @@ class HandwritingLineStage:
         return [*regions, *proposals]
 
     def _poorly_read_regions(self, regions: list[TextRegion]) -> list[TextRegion]:
-        """Low-confidence text the table and formula specialists do not already own."""
+        """Low-confidence text that no other specialist owns.
+
+        Dense printed table text also reads poorly, so low confidence alone is not
+        evidence of handwriting. Table geometry is known even when the structure parse
+        was rejected, so it excludes by area rather than by role.
+        """
+        table_boxes = [
+            region.bounding_box for region in regions if region.kind in TABLE_KINDS
+        ]
         return [
             region
             for region in regions
@@ -186,6 +195,7 @@ class HandwritingLineStage:
             and region.confidence < self.confidence_threshold
             and bool(region.text.strip())
             and not _owned_by_another_specialist(region)
+            and not _mostly_inside(region.bounding_box, table_boxes)
             and (self.text_provider is None or region.provider == self.text_provider)
         ]
 
@@ -252,6 +262,20 @@ def _group_lines(boxes: list[BoundingBox]) -> list[BoundingBox]:
         BoundingBox(line["left"], line["top"], line["right"], line["bottom"])
         for line in lines
     ]
+
+
+def _mostly_inside(
+    box: BoundingBox,
+    others: list[BoundingBox],
+    minimum: float = 0.5,
+) -> bool:
+    area = max(1, (box.right - box.left) * (box.bottom - box.top))
+    for other in others:
+        width = min(box.right, other.right) - max(box.left, other.left)
+        height = min(box.bottom, other.bottom) - max(box.top, other.top)
+        if width > 0 and height > 0 and width * height / area >= minimum:
+            return True
+    return False
 
 
 def _overlaps_any(line: BoundingBox, regions: list[TextRegion]) -> bool:

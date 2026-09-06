@@ -188,3 +188,30 @@ def test_stage_rejects_invalid_configuration() -> None:
         HandwritingLineStage(detector, confidence_threshold=1.5)
     with pytest.raises(ValueError, match="max_lines"):
         HandwritingLineStage(detector, max_lines=0)
+
+
+def test_dense_printed_table_text_does_not_become_handwriting(tmp_path: Path) -> None:
+    """Low confidence is not evidence of handwriting: dense table print reads poorly too.
+
+    Table geometry is known even when its structure parse was rejected, so the stage
+    must exclude by area rather than by role.
+    """
+    source = tmp_path / "page.png"
+    Image.new("RGB", (400, 400), "white").save(source)
+    table = _region("t-1", "", (20, 20, 380, 300), None, kind="table_candidate")
+    table.resolution = "unreadable"
+    cells = [
+        _region(
+            f"c-{index}",
+            "COVIDD-99 RRN,,LNP-S",
+            (30, 30 + index * 20, 370, 46 + index * 20),
+            0.55,
+        )
+        for index in range(1, 10)
+    ]
+    detector = ScriptedDetector([BoundingBox(28, 28, 372, 60)])
+
+    result = HandwritingLineStage(detector).apply(source, 1, [table, *cells])
+
+    assert sum(region.kind == "handwriting" for region in result) == 0
+    assert detector.calls == []
