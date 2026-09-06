@@ -481,6 +481,7 @@ def test_verified_gpu_app_configures_phi4_field_candidate_rereading() -> None:
         "evidence-risk",
         "evidence-layout",
         "anchored-ink",
+        "handwriting-lines",
         "handwriting",
     ]
     assert isinstance(handwriting, HandwritingStage)
@@ -493,6 +494,7 @@ def test_verified_gpu_app_configures_phi4_field_candidate_rereading() -> None:
         "evidence-risk",
         "evidence-layout",
         "anchored-ink",
+        "handwriting-lines",
         "handwriting",
     )
     assert composition.handwriting == "configured"
@@ -550,6 +552,7 @@ def test_verified_gpu_app_uses_warm_phi4_service_for_candidate_rereading() -> No
         "evidence-risk",
         "evidence-layout",
         "anchored-ink",
+        "handwriting-lines",
         "handwriting",
     ]
     handwriting = app_calls[0][2]
@@ -618,8 +621,9 @@ def test_verified_gpu_app_wires_cached_trocr_for_field_candidate_rereading() -> 
     options = app_calls[0]
     assert isinstance(options["handwriting_stage"], HandwritingStage)
     assert options["handwriting_stage"] is options["stages"][-1]
-    assert [stage.name for stage in options["stages"][-2:]] == [
+    assert [stage.name for stage in options["stages"][-3:]] == [
         "anchored-ink",
+        "handwriting-lines",
         "handwriting",
     ]
     assert options["handwriting_stage"].context_padding == 18

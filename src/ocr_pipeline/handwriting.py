@@ -511,7 +511,9 @@ class HandwritingStage:
         candidates = [
             index
             for index, region in enumerate(regions)
-            if self._is_eligible(region) or _is_anchored_residual_proposal(region)
+            if self._is_eligible(region)
+            or _is_anchored_residual_proposal(region)
+            or _is_line_proposal(region)
         ]
         candidates.sort(
             key=lambda index: (
@@ -707,6 +709,17 @@ def _literal_rejection(
     if "<|" in candidate or "|>" in candidate:
         return "candidate_control_tokens"
     return None
+
+
+def _is_line_proposal(region: TextRegion) -> bool:
+    structure = region.structure or {}
+    return (
+        structure.get("handwriting_candidate_source") == "line_segmentation"
+        and region.kind == "handwriting"
+        and region.text == ""
+        and region.confidence is None
+        and region.resolution == "unreadable"
+    )
 
 
 def _is_anchored_residual_proposal(region: TextRegion) -> bool:
