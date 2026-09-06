@@ -33,6 +33,8 @@ MODEL_LICENSE = "MIT"
 MODEL_ORIGIN = "Microsoft"
 TABLE_DUPLICATE_CONTAINMENT = 0.98
 NEAR_PAGE_TABLE_AREA = 0.65
+# Share of cells that may be set aside before a grid is treated as unreliable.
+MAX_RECOVERABLE_CELL_COLLISIONS = 0.1
 MIN_NEAR_PAGE_ROWS = 3
 MIN_NEAR_PAGE_COLUMNS = 3
 MIN_NEAR_PAGE_CELLS = 9
@@ -185,10 +187,12 @@ class TatrTableStage:
         )
         rejected = []
         accepted = []
+        dropped_cells_by_table: dict[int, tuple[TableCell, ...]] = {}
         for table_index, prediction in enumerate(predictions, start=1):
             primary = _assign_regions([prediction], regions)[0]
+            resolved, dropped = _resolve_cell_collisions(prediction)
             diagnostic = _rejected_table_candidate(
-                prediction,
+                resolved,
                 primary,
                 page_size,
                 page_number,
@@ -196,7 +200,9 @@ class TatrTableStage:
                 self.extractor.name,
             )
             if diagnostic is None:
-                accepted.append(prediction)
+                accepted.append(resolved)
+                if dropped:
+                    dropped_cells_by_table[id(resolved)] = dropped
             else:
                 rejected.append(diagnostic)
         predictions = accepted
@@ -233,6 +239,7 @@ class TatrTableStage:
                 primary,
                 challenger_groups,
                 table_index,
+                dropped_cells_by_table.get(id(prediction), ()),
             )
             _mark_sources(primary_sources, table_id)
             for items in challenger_sources.values():
@@ -544,6 +551,7 @@ class TatrTableStage:
         primary: list[TextRegion],
         challenger_groups: dict[str, list[TextRegion]],
         table_index: int,
+        dropped_cells: tuple[TableCell, ...] = (),
     ) -> tuple[TextRegion, list[TextRegion], dict[str, list[TextRegion]]]:
         primary_cells = _assign_cells(prediction.cells, primary)
         challenger_cells = {
@@ -679,6 +687,21 @@ class TatrTableStage:
                 "cells": cells,
                 "model": copy.deepcopy(prediction.model),
                 "detection_confidence": prediction.confidence,
+                **(
+                    {
+                        "dropped_cells": [
+                            {
+                                "bounding_box": asdict(cell.bounding_box),
+                                "row_nums": list(cell.row_nums),
+                                "column_nums": list(cell.column_nums),
+                                "reason": "cell_position_collision",
+                            }
+                            for cell in dropped_cells
+                        ]
+                    }
+                    if dropped_cells
+                    else {}
+                ),
             },
         )
         return table, primary_sources, challenger_sources
@@ -2032,6 +2055,40 @@ def _rejected_table_candidate(
         resolution="unreadable",
         structure=structure,
     )
+
+
+def _resolve_cell_collisions(
+    prediction: TablePrediction,
+) -> tuple[TablePrediction, tuple[TableCell, ...]]:
+    """Drop the minimum set of colliding cells instead of discarding the whole table.
+
+    A detector that misses or doubles a few cells in a large grid still recovered most of
+    it. Rejecting on any single collision does not scale with table size, so the smaller
+    of each colliding pair is set aside and reported rather than the table being lost.
+    """
+    kept: list[TableCell] = []
+    dropped: list[TableCell] = []
+    # Larger cells win: a genuine merged cell outranks a spurious fragment.
+    for cell in sorted(
+        prediction.cells, key=lambda item: -_box_area(item.bounding_box)
+    ):
+        if _collides_with_any(cell, kept):
+            dropped.append(cell)
+        else:
+            kept.append(cell)
+    if not dropped:
+        return prediction, ()
+    # Scale-invariant: a few bad cells in a large grid is recoverable, but a grid where
+    # a large share of cells collide is structurally unreliable and stays rejected.
+    if len(dropped) / len(prediction.cells) > MAX_RECOVERABLE_CELL_COLLISIONS:
+        return prediction, ()
+    ordered = tuple(cell for cell in prediction.cells if cell not in dropped)
+    resolved = replace(prediction, cells=ordered)
+    return resolved, tuple(dropped)
+
+
+def _collides_with_any(cell: TableCell, others: Sequence[TableCell]) -> bool:
+    return any(_table_topology_conflicts((cell, other)) for other in others)
 
 
 def _table_topology_conflicts(cells: Sequence[TableCell]) -> int:
