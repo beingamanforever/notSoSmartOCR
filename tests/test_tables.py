@@ -92,6 +92,207 @@ def test_table_stage_builds_markdown_and_preserves_nested_evidence(
     assert regions[2].structure is None
 
 
+def _table_blob(
+    grid_shape: tuple[int, int],
+    grid_texts: list[str],
+    word_evidence: list[dict[str, object]],
+    *,
+    text: str = "",
+) -> TextRegion:
+    """A layout reader's table: full text and grid, no per-cell geometry."""
+    rows, columns = grid_shape
+    return TextRegion(
+        id="falcon-table",
+        kind="table",
+        text=text or "\n".join(
+            "\t".join(grid_texts[row * columns : (row + 1) * columns])
+            for row in range(rows)
+        ),
+        confidence=0.93,
+        bounding_box=BoundingBox(5, 5, 95, 45),
+        reading_order=1,
+        provider="falcon-perception",
+        text_provenance={
+            "method": "falcon_perception_layout_ocr",
+            "geometry_provider": "nemotron-ocr-v2",
+        },
+        structure={
+            "role": "table",
+            "row_count": rows,
+            "column_count": columns,
+            "cells": [
+                {
+                    "id": f"falcon-cell-{index + 1}",
+                    "row_nums": [index // columns],
+                    "column_nums": [index % columns],
+                    "text": value,
+                    "resolution": "resolved",
+                    "column_header": False,
+                }
+                for index, value in enumerate(grid_texts)
+            ],
+            "word_evidence": word_evidence,
+        },
+    )
+
+
+def _word_entry(
+    text: str, box: tuple[int, int, int, int], confidence: float, present: bool = True
+) -> dict[str, object]:
+    left, top, right, bottom = box
+    return {
+        "text": text,
+        "bbox": {"left": left, "top": top, "right": right, "bottom": bottom},
+        "confidence": confidence,
+        "in_region_text": present,
+    }
+
+
+class TwoByTwoExtractor:
+    name = "fake-tables"
+
+    def extract(
+        self, image_path: Path, tokens: list[dict[str, object]]
+    ) -> list[TablePrediction]:
+        return [
+            TablePrediction(
+                BoundingBox(5, 5, 95, 45),
+                (
+                    TableCell(BoundingBox(5, 5, 50, 25), (0,), (0,), True),
+                    TableCell(BoundingBox(50, 5, 95, 25), (0,), (1,), True),
+                    TableCell(BoundingBox(5, 25, 50, 45), (1,), (0,)),
+                    TableCell(BoundingBox(50, 25, 95, 45), (1,), (1,)),
+                ),
+                0.99,
+                {"id": "fake", "origin": "test"},
+            )
+        ]
+
+
+def test_table_blob_words_fill_cells_and_matching_grid_lands_its_text(
+    tmp_path: Path,
+) -> None:
+    """clinical_table_result: TATR has the cell boxes with every cell blank, the layout
+    reader has the text with no cell geometry. The words carry both boxes and real
+    recognition confidence, so each boxed cell gains text, confidence and evidence."""
+    image_path = _image(tmp_path)
+    blob = _table_blob(
+        (2, 2),
+        ["Metric", "Value", "Deposits", "$187"],
+        [
+            _word_entry("Metric", (10, 8, 30, 20), 0.98),
+            _word_entry("Value", (55, 8, 75, 20), 0.96),
+            _word_entry("Deposits", (10, 28, 40, 42), 0.90),
+            # The word reader misread the currency glyph; the grid text should win
+            # while the recognition confidence stays the word reader's.
+            _word_entry("S187", (55, 28, 70, 42), 0.88),
+        ],
+    )
+    stage = TatrTableStage(TwoByTwoExtractor())
+
+    output = stage.apply(image_path, 1, [blob])
+
+    table = next(
+        region for region in output if region.provider == "fake-tables"
+    )
+    cells = table.structure["cells"]
+    assert [cell["text"] for cell in cells] == ["Metric", "Value", "Deposits", "$187"]
+    assert [cell["confidence"] for cell in cells] == [0.98, 0.96, 0.90, 0.88]
+    # Three cells agree between the readers; the fourth is the grid's better text.
+    assert [cell["decision"] for cell in cells][:3] == ["primary"] * 3
+    assert cells[3]["decision"] == "text_grid_cell"
+    assert cells[3]["source"] == "falcon-perception"
+    assert [
+        alternative["text"] for alternative in cells[3]["alternatives"]
+    ] == ["S187"]
+    assert table.structure["text_grid"] == {
+        "region_id": "falcon-table",
+        "row_count": 2,
+        "column_count": 2,
+        "agreement": True,
+    }
+    # The blob's text now lives in the table's cells: one table, not two.
+    assert blob.structure["role"] == "table_source"
+    assert blob.structure["parent_id"] == table.id
+    assert "falcon-table" in table.text_provenance["source_region_ids"]
+
+
+def test_grid_shape_disagreement_keeps_both_tables_and_flags_them(
+    tmp_path: Path,
+) -> None:
+    image_path = _image(tmp_path)
+    blob = _table_blob(
+        (3, 2),
+        ["a", "b", "c", "d", "e", "f"],
+        [
+            _word_entry("Metric", (10, 8, 30, 20), 0.98),
+            _word_entry("Deposits", (10, 28, 40, 42), 0.90),
+        ],
+        text="a\tb\nc\td\ne\tf",
+    )
+    stage = TatrTableStage(TwoByTwoExtractor())
+
+    output = stage.apply(image_path, 1, [blob])
+
+    table = next(
+        region for region in output if region.provider == "fake-tables"
+    )
+    cells = table.structure["cells"]
+    # The words still fill the boxed cells; no grid text is force-fitted.
+    assert cells[0]["text"] == "Metric"
+    assert cells[0]["confidence"] == 0.98
+    assert cells[0]["source"] == "nemotron-ocr-v2"
+    assert cells[2]["text"] == "Deposits"
+    assert table.structure["text_grid"]["agreement"] is False
+    # Both regions stay: the blob is not consumed, and both sides carry the flag.
+    assert blob.structure["role"] == "table"
+    assert blob.structure["grid_disagreement"] == {
+        "table_id": table.id,
+        "table_shape": [2, 2],
+        "own_shape": [3, 2],
+    }
+
+
+def test_words_the_region_lost_are_not_expanded_twice(tmp_path: Path) -> None:
+    """A word absent from the blob's text is already a repair region of its own; the
+    cell fill must take it from that region, not once from each path."""
+    image_path = _image(tmp_path)
+    blob = _table_blob(
+        (2, 2),
+        ["Metric", "Value", "Deposits", ""],
+        [
+            _word_entry("Metric", (10, 8, 30, 20), 0.98),
+            _word_entry("Value", (55, 8, 75, 20), 0.96),
+            _word_entry("Deposits", (10, 28, 40, 42), 0.90),
+            _word_entry("2,641", (55, 28, 70, 42), 0.88, present=False),
+        ],
+    )
+    repair_child = TextRegion(
+        id="falcon-table-underread-1",
+        kind="text",
+        text="2,641",
+        confidence=0.88,
+        bounding_box=BoundingBox(55, 28, 70, 42),
+        reading_order=1,
+        provider="falcon-on-nemotron",
+        text_provenance={
+            "method": "region_underread_repair",
+            "parent_region_id": "falcon-table",
+        },
+    )
+    stage = TatrTableStage(TwoByTwoExtractor())
+
+    output = stage.apply(image_path, 1, [blob, repair_child])
+
+    table = next(
+        region for region in output if region.provider == "fake-tables"
+    )
+    cell = table.structure["cells"][3]
+    assert cell["text"] == "2,641"
+    assert cell["confidence"] == 0.88
+    assert cell["evidence_ids"] == ["falcon-table-underread-1"]
+
+
 def test_agreed_uncalibrated_challengers_do_not_replace_primary(
     tmp_path: Path,
 ) -> None:

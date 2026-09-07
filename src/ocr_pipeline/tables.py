@@ -193,7 +193,7 @@ class TatrTableStage:
             resolved, dropped = _resolve_cell_collisions(prediction)
             diagnostic = _rejected_table_candidate(
                 resolved,
-                primary,
+                primary + _word_evidence_regions(regions, resolved.cells),
                 page_size,
                 page_number,
                 table_index,
@@ -217,18 +217,26 @@ class TatrTableStage:
             )
 
         primary_by_table = _assign_regions(predictions, regions)
+        # A region that crosses cell boundaries is excluded from cell assignment, so a
+        # table read as one blob leaves every cell blank. Its recognised words carry
+        # boxes and confidences, so they slot into cells the way the official TATR
+        # pipeline slots page tokens.
+        assignable_by_table = [
+            primary + _word_evidence_regions(regions, prediction.cells)
+            for prediction, primary in zip(predictions, primary_by_table, strict=True)
+        ]
         challengers_by_table = self._read_challengers(
             image_path,
             page_number,
             predictions,
-            primary_by_table,
+            assignable_by_table,
         )
 
         tables: list[TextRegion] = []
         retained_challengers: list[TextRegion] = []
         for table_index, prediction in enumerate(predictions, start=1):
             table_id = f"p{page_number}-tables-table-{table_index}"
-            primary = primary_by_table[table_index - 1]
+            primary = assignable_by_table[table_index - 1]
             challenger_groups = {
                 name: assigned[table_index - 1]
                 for name, assigned in challengers_by_table.items()
@@ -240,6 +248,7 @@ class TatrTableStage:
                 challenger_groups,
                 table_index,
                 dropped_cells_by_table.get(id(prediction), ()),
+                page_regions=regions,
             )
             _mark_sources(primary_sources, table_id)
             for items in challenger_sources.values():
@@ -552,19 +561,48 @@ class TatrTableStage:
         challenger_groups: dict[str, list[TextRegion]],
         table_index: int,
         dropped_cells: tuple[TableCell, ...] = (),
+        page_regions: Sequence[TextRegion] = (),
     ) -> tuple[TextRegion, list[TextRegion], dict[str, list[TextRegion]]]:
         primary_cells = _assign_cells(prediction.cells, primary)
         challenger_cells = {
             name: _assign_cells(prediction.cells, regions)
             for name, regions in challenger_groups.items()
         }
-        primary_sources = _assigned_regions(primary_cells)
         challenger_sources = {
             name: _assigned_regions(items) for name, items in challenger_cells.items()
         }
         primary_candidates = [
             _candidate(assigned, "primary") for assigned in primary_cells
         ]
+        row_count = (
+            max(
+                (max(cell.row_nums, default=-1) for cell in prediction.cells),
+                default=-1,
+            )
+            + 1
+        )
+        column_count = (
+            max(
+                (max(cell.column_nums, default=-1) for cell in prediction.cells),
+                default=-1,
+            )
+            + 1
+        )
+        overlay = _text_grid_overlay(
+            page_regions or primary, prediction, row_count, column_count
+        )
+        # A word token's parent is consumed by the table only when the grids agree.
+        # On disagreement the words still give cells text and confidence, but the
+        # parent stays a region of its own so a reviewer sees both readings.
+        primary_sources = _collapse_word_sources(
+            _assigned_regions(primary_cells),
+            primary,
+            consumed_ids=(
+                {overlay.region.id}
+                if overlay is not None and overlay.agreement
+                else frozenset()
+            ),
+        )
         cells = []
         table_alternatives = []
         for cell_index, cell in enumerate(prediction.cells, start=1):
@@ -590,6 +628,14 @@ class TatrTableStage:
                     )
                 ),
             )
+            if overlay is not None and overlay.agreement:
+                resolved = _apply_grid_text(
+                    resolved,
+                    overlay,
+                    cell,
+                    primary_candidate,
+                    challenger_candidates,
+                )
             cell_id = f"{table_id}-cell-{cell_index}"
             cell_alternatives = [
                 TextAlternative(
@@ -641,20 +687,6 @@ class TatrTableStage:
 
         _resolve_structural_blank_corner(cells, self.extractor.name)
 
-        row_count = (
-            max(
-                (max(cell.row_nums, default=-1) for cell in prediction.cells),
-                default=-1,
-            )
-            + 1
-        )
-        column_count = (
-            max(
-                (max(cell.column_nums, default=-1) for cell in prediction.cells),
-                default=-1,
-            )
-            + 1
-        )
         reading_order = min(
             (region.reading_order for region in primary_sources), default=table_index
         )
@@ -689,6 +721,18 @@ class TatrTableStage:
                 "detection_confidence": prediction.confidence,
                 **(
                     {
+                        "text_grid": {
+                            "region_id": overlay.region.id,
+                            "row_count": overlay.shape[0],
+                            "column_count": overlay.shape[1],
+                            "agreement": overlay.agreement,
+                        }
+                    }
+                    if overlay is not None
+                    else {}
+                ),
+                **(
+                    {
                         "dropped_cells": [
                             {
                                 "bounding_box": asdict(cell.bounding_box),
@@ -704,6 +748,22 @@ class TatrTableStage:
                 ),
             },
         )
+        if overlay is not None:
+            if overlay.agreement:
+                # The grid's text now lives in the table's cells; the source region is
+                # marked so the same table does not render twice.
+                if all(region.id != overlay.region.id for region in primary_sources):
+                    primary_sources.append(overlay.region)
+            else:
+                # Two models disagree on the grid's shape. Force-fitting one onto the
+                # other invents structure, so both regions stay, flagged for review.
+                structure = dict(overlay.region.structure or {})
+                structure["grid_disagreement"] = {
+                    "table_id": table_id,
+                    "table_shape": [row_count, column_count],
+                    "own_shape": list(overlay.shape),
+                }
+                overlay.region.structure = structure
         return table, primary_sources, challenger_sources
 
 
@@ -2050,7 +2110,7 @@ def _rejected_table_candidate(
         provider=provider,
         text_provenance={
             "method": method,
-            "source_region_ids": [region.id for region in primary],
+            "source_region_ids": _source_ids(primary),
         },
         resolution="unreadable",
         structure=structure,
@@ -2862,6 +2922,24 @@ def _crosses_cell_boundaries(
     area = _box_area(region_box)
     if area <= 0:
         return False
+    # A region holding cell centres across two rows and two columns cannot belong to
+    # any one cell. The overlap-ratio test below misses this for fine grids: a
+    # whole-table region over a 5x4 grid intersects every cell at a twentieth of its
+    # own area. One axis alone is not enough - text straddling two row bands of its
+    # own column is normal and belongs to the nearest cell.
+    rows_spanned: set[int] = set()
+    columns_spanned: set[int] = set()
+    for cell in cells:
+        centre_x = (cell.bounding_box.left + cell.bounding_box.right) / 2
+        centre_y = (cell.bounding_box.top + cell.bounding_box.bottom) / 2
+        if (
+            region_box.left < centre_x < region_box.right
+            and region_box.top < centre_y < region_box.bottom
+        ):
+            rows_spanned.update(cell.row_nums)
+            columns_spanned.update(cell.column_nums)
+    if len(rows_spanned) >= 2 and len(columns_spanned) >= 2:
+        return True
     overlaps = [
         cell
         for cell in cells
@@ -2888,6 +2966,218 @@ def _assigned_regions(groups: Sequence[Sequence[TextRegion]]) -> list[TextRegion
         (region for group in groups for region in group),
         key=lambda region: (region.reading_order, region.id),
     )
+
+
+def _word_evidence_regions(
+    regions: Sequence[TextRegion], cells: Sequence[TableCell]
+) -> list[TextRegion]:
+    """Word tokens for cell assignment, the way official TATR slots page tokens.
+
+    Only from table regions whose own box cannot land whole in a single cell: those are
+    excluded from direct assignment, so without their words every cell under them
+    renders blank. Words the region's own text lost are skipped - the under-read repair
+    already emitted them as regions of their own, and they assign themselves.
+    """
+    if not cells:
+        return []
+    union = BoundingBox(
+        min(cell.bounding_box.left for cell in cells),
+        min(cell.bounding_box.top for cell in cells),
+        max(cell.bounding_box.right for cell in cells),
+        max(cell.bounding_box.bottom for cell in cells),
+    )
+    words = []
+    for region in regions:
+        structure = region.structure if isinstance(region.structure, dict) else {}
+        evidence = structure.get("word_evidence")
+        if region.kind != "table" or not isinstance(evidence, list):
+            continue
+        box = region.bounding_box
+        centre_in_grid = (
+            union.left <= (box.left + box.right) / 2 <= union.right
+            and union.top <= (box.top + box.bottom) / 2 <= union.bottom
+        )
+        if centre_in_grid and not _crosses_cell_boundaries(cells, box):
+            # The region lands whole in one cell; its words would double that text.
+            continue
+        provider = str(
+            (region.text_provenance or {}).get("geometry_provider") or region.provider
+        )
+        for index, entry in enumerate(evidence, start=1):
+            if not isinstance(entry, dict) or not entry.get("in_region_text", True):
+                continue
+            text = str(entry.get("text") or "").strip()
+            box = entry.get("bbox")
+            if not text or not isinstance(box, dict):
+                continue
+            try:
+                bounding_box = BoundingBox(
+                    int(box["left"]),
+                    int(box["top"]),
+                    int(box["right"]),
+                    int(box["bottom"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (
+                bounding_box.right <= bounding_box.left
+                or bounding_box.bottom <= bounding_box.top
+            ):
+                continue
+            confidence = entry.get("confidence")
+            words.append(
+                TextRegion(
+                    id=f"{region.id}-word-{index}",
+                    kind="text",
+                    text=text,
+                    confidence=(
+                        float(confidence)
+                        if isinstance(confidence, (int, float))
+                        else None
+                    ),
+                    bounding_box=bounding_box,
+                    reading_order=region.reading_order,
+                    provider=provider,
+                    text_provenance={
+                        "method": "table_word_evidence",
+                        "source_region_id": region.id,
+                    },
+                )
+            )
+    return words
+
+
+def _collapse_word_sources(
+    assigned: Sequence[TextRegion],
+    pool: Sequence[TextRegion],
+    *,
+    consumed_ids: frozenset[str] | set[str] = frozenset(),
+) -> list[TextRegion]:
+    """Replace expanded evidence words with the regions they came from.
+
+    A word's parent joins the sources - and is later marked consumed - only when listed
+    in consumed_ids; otherwise the token is dropped and the parent region stands alone.
+    """
+    by_id = {region.id: region for region in pool}
+    collapsed: list[TextRegion] = []
+    seen: set[str] = set()
+    for region in assigned:
+        provenance = region.text_provenance or {}
+        if provenance.get("method") == "table_word_evidence":
+            parent_id = str(provenance.get("source_region_id"))
+            if parent_id not in consumed_ids:
+                continue
+            region = by_id.get(parent_id, region)
+        if region.id not in seen:
+            seen.add(region.id)
+            collapsed.append(region)
+    return collapsed
+
+
+def _source_ids(regions: Sequence[TextRegion]) -> list[str]:
+    ids: list[str] = []
+    for region in regions:
+        provenance = region.text_provenance or {}
+        id_ = (
+            str(provenance["source_region_id"])
+            if provenance.get("method") == "table_word_evidence"
+            else region.id
+        )
+        if id_ not in ids:
+            ids.append(id_)
+    return ids
+
+
+@dataclass(frozen=True)
+class _GridOverlay:
+    region: TextRegion
+    texts: dict[tuple[int, int], str]
+    shape: tuple[int, int]
+    agreement: bool
+
+
+def _text_grid_overlay(
+    regions: Sequence[TextRegion],
+    prediction: TablePrediction,
+    row_count: int,
+    column_count: int,
+) -> _GridOverlay | None:
+    """The text-only grid a layout reader parsed over this table, if any.
+
+    The grid's cells carry text but no geometry, so the only lossless join is by row
+    and column index, and only when both models agree on the grid's shape. Anything
+    else force-fits one model's structure onto the other's and invents cells.
+    """
+    candidates = []
+    for region in regions:
+        structure = region.structure if isinstance(region.structure, dict) else {}
+        cells = structure.get("cells")
+        if region.kind != "table" or not isinstance(cells, list) or not cells:
+            continue
+        if any(isinstance(cell, dict) and cell.get("bbox") for cell in cells):
+            continue
+        overlap = _intersection_area(region.bounding_box, prediction.bounding_box)
+        if overlap > 0:
+            candidates.append((overlap, region))
+    if not candidates:
+        return None
+    _, region = max(candidates, key=lambda item: item[0])
+    structure = region.structure or {}
+    shape = (
+        int(structure.get("row_count") or 0),
+        int(structure.get("column_count") or 0),
+    )
+    texts: dict[tuple[int, int], str] = {}
+    for cell in structure["cells"]:
+        if not isinstance(cell, dict):
+            continue
+        rows = cell.get("row_nums")
+        columns = cell.get("column_nums")
+        text = str(cell.get("text") or "").strip()
+        if rows and columns and text:
+            texts[(min(rows), min(columns))] = text
+    return _GridOverlay(region, texts, shape, shape == (row_count, column_count))
+
+
+def _apply_grid_text(
+    resolved: dict[str, Any],
+    overlay: _GridOverlay,
+    cell: TableCell,
+    primary_candidate: _Candidate,
+    challenger_candidates: list[_Candidate],
+) -> dict[str, Any]:
+    """Land the text grid's cell text in the geometry model's boxed cell.
+
+    The grid's reader parses characters better but carries no confidence of its own, so
+    the cell keeps the recognition confidence of the words that fell inside its box -
+    the same fusion the page-level fused reader performs.
+    """
+    text = overlay.texts.get((min(cell.row_nums), min(cell.column_nums)), "")
+    if not _normalize(text):
+        return resolved
+    selected = resolved["selected"]
+    if _normalize(selected.text) == _normalize(text):
+        return resolved
+    grid_candidate = _Candidate(
+        text=text,
+        confidence=primary_candidate.confidence,
+        source=overlay.region.provider,
+        evidence_ids=(overlay.region.id,),
+        regions=(overlay.region,),
+    )
+    supporters = [grid_candidate]
+    if _normalize(primary_candidate.text):
+        supporters.append(primary_candidate)
+    return {
+        "selected": grid_candidate,
+        "supporters": supporters,
+        "alternatives": _unique_candidates(
+            [selected, primary_candidate, *challenger_candidates],
+            selected_text=text,
+        ),
+        "resolution": "resolved",
+        "decision": "text_grid_cell",
+    }
 
 
 def _span_grid(
