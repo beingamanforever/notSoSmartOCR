@@ -140,16 +140,11 @@ def _with_geometry(
         }
     )
     structure = dict(region.structure or {})
+    # in_region_text: whether the region's own text contains the word. A claimed word
+    # that is absent was read off the page and then lost - the under-read repair and
+    # the table stage's cell fill both key off this flag.
     structure["word_evidence"] = [
-        {
-            "text": word.text,
-            "bbox": _box_dict(word.bounding_box),
-            "confidence": word.confidence,
-            # Whether the region's own text contains this word. A claimed word that is
-            # absent was read off the page and then lost - the under-read repair below
-            # and the table stage's cell fill both key off this flag.
-            "in_region_text": present,
-        }
+        _word_entry(word, present)
         for word, present in zip(words, _present_flags(region.text, words))
     ]
     return replace(
@@ -185,10 +180,20 @@ def _uncovered_regions(
                 "word_count": len(line),
             },
             resolution="resolved",
+            structure={"word_evidence": [_word_entry(word, True) for word in line]},
         )
         for index, line in enumerate(lines, start=1)
         if any(word.text.strip() for word in line)
     ]
+
+
+def _word_entry(word: TextRegion, present: bool) -> dict[str, object]:
+    return {
+        "text": word.text,
+        "bbox": _box_dict(word.bounding_box),
+        "confidence": word.confidence,
+        "in_region_text": present,
+    }
 
 
 def _present_flags(text: str, words: list[TextRegion]) -> list[bool]:
@@ -245,6 +250,7 @@ def _underread_children(region: TextRegion, words: list[TextRegion]) -> list[Tex
                 "word_count": len(line),
             },
             resolution="resolved",
+            structure={"word_evidence": [_word_entry(word, True) for word in line]},
         )
         for index, line in enumerate(_lines(absent), start=1)
     ]

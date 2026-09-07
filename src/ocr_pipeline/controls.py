@@ -83,6 +83,10 @@ class GeometricControlStage:
         page_number: int,
         regions: list[TextRegion],
     ) -> list[TextRegion]:
+        if _reader_transcribes_marks(regions):
+            # The reader already put the mark in the text. Detecting the same box again
+            # would render it twice, as "Colorado ☐ [ ]".
+            return regions
         cv2, np, gray = _load_gray(image_path)
         detection_group_size = (
             1
@@ -144,10 +148,14 @@ class GeometricControlStage:
             detection.source != "table_mark" for detection in detections
         )
         if geometric_count < detection_group_size:
+            option_row = _aligned_option_row(detections)
             supported = [
                 (detection, label)
-                for detection, label in zip(detections, labels, strict=True)
+                for index, (detection, label) in enumerate(
+                    zip(detections, labels, strict=True)
+                )
                 if detection.source != "square"
+                or index in option_row
                 or label is None
                 or _explicit_control_label(label)
                 or (
@@ -213,6 +221,20 @@ class GeometricControlStage:
                 region.id,
             ),
         )
+
+
+# Unicode ballot glyphs a reader emits when it transcribes the box itself.
+TRANSCRIBED_MARKS = ("\u2610", "\u2611", "\u2612", "\u2713", "\u2717")
+
+
+def _reader_transcribes_marks(regions: list[TextRegion]) -> bool:
+    """True when the page text already carries checkbox glyphs from the reader."""
+    return any(
+        symbol in region.text
+        for region in regions
+        if region.kind != "checkbox"
+        for symbol in TRANSCRIBED_MARKS
+    )
 
 
 def detect_controls(image_path: Path) -> list[ControlDetection]:
@@ -409,10 +431,39 @@ def _ring_marks(
                 0.6,
                 area / max(1, box_width * box_height),
                 "ring_mark",
+                # A ring circles a value, not its whole row. When the enclosed region
+                # carries word geometry, the label is the words under the ring; the
+                # full-row fallback is what rendered one row's text once per ring.
+                label=_ring_word_label(box, enclosed),
                 label_ids=tuple(region.id for region in enclosed),
             )
         )
     return detections
+
+
+def _ring_word_label(ring: BoundingBox, enclosed: list[TextRegion]) -> str | None:
+    """The words whose boxes sit inside the ring, in evidence order."""
+    words = []
+    for region in enclosed:
+        for entry in (region.structure or {}).get("word_evidence") or []:
+            if not isinstance(entry, dict):
+                continue
+            box = entry.get("bbox")
+            if not isinstance(box, dict):
+                continue
+            try:
+                centre_x = (box["left"] + box["right"]) / 2
+                centre_y = (box["top"] + box["bottom"]) / 2
+            except (KeyError, TypeError):
+                continue
+            if (
+                ring.left <= centre_x <= ring.right
+                and ring.top <= centre_y <= ring.bottom
+            ):
+                text = str(entry.get("text") or "").strip()
+                if text:
+                    words.append(text)
+    return " ".join(words) or None
 
 
 def _largest_hole_area(component: Any, cv2: Any) -> float:
@@ -464,6 +515,37 @@ def _enclosed_regions(
         ):
             enclosed.append(region)
     return enclosed
+
+
+def _aligned_option_row(
+    detections: list[ControlDetection],
+    minimum_members: int = 3,
+) -> set[int]:
+    """Indices of squares that sit in a row of evenly sized peers.
+
+    Three or more same-sized boxes sharing a baseline are an option row by construction,
+    which is the corroboration the page-wide group count is looking for. Without this a
+    fax cover's untouched Urgent/For Review/Please Reply boxes are dropped outright, and
+    the output cannot say the sender ticked nothing.
+    """
+    squares = [
+        (index, detection)
+        for index, detection in enumerate(detections)
+        if detection.source == "square"
+    ]
+    members: set[int] = set()
+    for index, detection in squares:
+        row = [
+            other_index
+            for other_index, other in squares
+            if _marks_share_axis(detection.bounding_box, other.bounding_box)
+            and 0.75
+            <= _side(other.bounding_box) / max(1, _side(detection.bounding_box))
+            <= 1.33
+        ]
+        if len(row) >= minimum_members:
+            members.update(row)
+    return members
 
 
 def _supported_anchored_groups(
@@ -611,7 +693,10 @@ def _table_marks(
             label = _same_cell_label(cell)
             if label is None:
                 continue
-            mark = _same_cell_mark(gray, _cell_box(cell), cv2, np)
+            cell_box = _cell_box(cell)
+            if cell_box is None:
+                continue
+            mark = _same_cell_mark(gray, cell_box, cv2, np)
             if mark is None or _overlaps_detection(
                 mark.bounding_box,
                 detections,
@@ -655,7 +740,10 @@ def _table_marks(
                 row_label = _row_label(indexed, row, column)
                 if row_label is None or not _mark_cell_text(cell):
                     continue
-                mark = _mark_in_cell(gray, _cell_box(cell), cv2, np)
+                cell_box = _cell_box(cell)
+                if cell_box is None:
+                    continue
+                mark = _mark_in_cell(gray, cell_box, cv2, np)
                 if mark is None or _overlaps_detection(
                     mark.bounding_box, existing + detections
                 ):
@@ -1154,14 +1242,24 @@ def _mark_cell_text(cell: dict[str, Any]) -> bool:
     return isinstance(confidence, int | float) and confidence < 0.6
 
 
-def _cell_box(cell: dict[str, Any]) -> BoundingBox:
-    box = cell["bbox"]
-    return BoundingBox(
-        int(box["left"]),
-        int(box["top"]),
-        int(box["right"]),
-        int(box["bottom"]),
-    )
+def _cell_box(cell: dict[str, Any]) -> BoundingBox | None:
+    """A cell's pixel box, or None when the table came without per-cell geometry.
+
+    A reader that emits table structure as markup gives no box per cell, and a cell
+    with no box cannot be examined for a mark.
+    """
+    box = cell.get("bbox")
+    if not isinstance(box, dict):
+        return None
+    try:
+        return BoundingBox(
+            int(box["left"]),
+            int(box["top"]),
+            int(box["right"]),
+            int(box["bottom"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _mark_in_cell(

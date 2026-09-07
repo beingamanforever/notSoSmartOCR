@@ -826,6 +826,47 @@ def test_control_stage_rejects_empty_checkbox_outline_as_null_mark(
     )
 
 
+def test_ring_over_one_value_labels_the_enclosed_words_not_the_whole_row(
+    tmp_path: Path,
+) -> None:
+    """The JPMorgan page circles single values on long rows. Two rings on one row must
+    not each repeat the row's full text - that rendered every such line twice."""
+    source = tmp_path / "circled-values.png"
+    image = Image.new("L", (900, 100), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((60, 44), "Average deposits", fill="black")
+    draw.text((420, 44), "$187", fill="black")
+    draw.text((640, 44), "$1,064", fill="black")
+    draw.ellipse((410, 36, 480, 64), outline="black", width=2)
+    draw.ellipse((630, 36, 710, 64), outline="black", width=2)
+    image.save(source)
+    row = _region("row", "Average deposits $187 $1,064", (60, 42, 780, 62), 1)
+    row.structure = {
+        "word_evidence": [
+            {"text": "Average", "bbox": {"left": 60, "top": 44, "right": 115, "bottom": 60}, "confidence": 0.99, "in_region_text": True},
+            {"text": "deposits", "bbox": {"left": 120, "top": 44, "right": 180, "bottom": 60}, "confidence": 0.98, "in_region_text": True},
+            {"text": "$187", "bbox": {"left": 420, "top": 44, "right": 460, "bottom": 60}, "confidence": 0.97, "in_region_text": True},
+            {"text": "$1,064", "bbox": {"left": 640, "top": 44, "right": 700, "bottom": 60}, "confidence": 0.96, "in_region_text": True},
+        ]
+    }
+
+    result = process_document(
+        source,
+        FixedReader([row]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    rings = [
+        region
+        for region in result.pages[0].regions
+        if region.kind == "checkbox"
+        and region.text_provenance["method"] == "enclosing_ring_annotation"
+    ]
+    assert len(rings) == 2
+    labels = sorted(ring.structure["label"] for ring in rings)
+    assert labels == ["$1,064", "$187"]
+
+
 def test_control_stage_reports_ring_drawn_over_printed_option(
     tmp_path: Path,
 ) -> None:
@@ -2073,3 +2114,27 @@ def test_prose_with_incidental_colons_is_not_treated_as_a_form() -> None:
         )
     ]
     assert _form_like_regions(real_labels, "reader"), "trailing colons are field labels"
+
+
+def test_controls_stand_down_when_the_reader_already_wrote_the_mark(tmp_path) -> None:
+    """Detecting a box the reader transcribed renders it twice, as "Colorado ☐ [ ]"."""
+    from ocr_pipeline.controls import GeometricControlStage
+
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (400, 200), "white").save(image_path)
+    regions = [
+        TextRegion(
+            id="p1-falcon-1",
+            kind="text",
+            text="☐Ambulance ☒Skilled Nursing Facility",
+            confidence=0.6,
+            bounding_box=BoundingBox(10, 10, 380, 40),
+            reading_order=1,
+            provider="falcon-perception",
+        )
+    ]
+
+    result = GeometricControlStage().apply(image_path, 1, regions)
+
+    assert result == regions
+    assert not [region for region in result if region.kind == "checkbox"]

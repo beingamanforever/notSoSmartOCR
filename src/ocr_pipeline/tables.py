@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import inspect
 import math
 import re
 import sys
@@ -54,6 +55,7 @@ LABEL_UNIT_MARKER_PATTERN = re.compile(r"(\(\s*)(\$[A-Za-z0-9]|[A-Z]{1,3})(?=[,\
 CELL_CROSSING_OVERLAP = 0.2
 CELL_CROSSING_SCALE = 1.25
 RULED_PROPOSAL_SOURCE = "opencv_ruled_table"
+LAYOUT_PROPOSAL_SOURCE = "reader_layout_region"
 RULED_DUPLICATE_OVERLAP = 0.9
 HORIZONTAL_PANEL_PROPOSAL_SOURCE = "opencv_horizontal_panel_decomposition"
 NUMERIC_COLUMN_CORE_SOURCE = "numeric_column_core"
@@ -166,7 +168,18 @@ class TatrTableStage:
         page_number: int,
         regions: list[TextRegion],
     ) -> list[TextRegion]:
-        predictions = self.extractor.extract(image_path, _to_tokens(regions))
+        tokens = _to_tokens(regions)
+        layout_boxes = [
+            region.bounding_box for region in regions if region.kind == "table"
+        ]
+        if layout_boxes and "layout_boxes" in inspect.signature(
+            self.extractor.extract
+        ).parameters:
+            predictions = self.extractor.extract(
+                image_path, tokens, layout_boxes=layout_boxes
+            )
+        else:
+            predictions = self.extractor.extract(image_path, tokens)
         if not predictions:
             return regions
 
@@ -821,6 +834,7 @@ class TatrTableExtractor:
         self,
         image_path: Path,
         tokens: list[dict[str, Any]],
+        layout_boxes: Sequence[BoundingBox] = (),
     ) -> list[TablePrediction]:
         try:
             with Image.open(image_path) as source:
@@ -858,6 +872,13 @@ class TatrTableExtractor:
                     recognition_inputs,
                     proposals,
                 )
+            # Layout-first fallback: the page reader's layout model fires on tables the
+            # table detector's training distribution lacks (a full-page financial
+            # layout), so its table regions become crops when no detection covers them.
+            for box in _novel_layout_boxes(layout_boxes, recognition_inputs, image.size):
+                recognition_inputs.append(
+                    _layout_recognition_input(image, tokens, box)
+                )
             predictions = []
             for obj, crop, proposal, proposal_is_detection in recognition_inputs:
                 try:
@@ -880,6 +901,12 @@ class TatrTableExtractor:
                     continue
                 model = self.model_provenance()
                 confidence = _optional_confidence(obj.get("score"))
+                if obj.get("layout_proposal"):
+                    model["proposal"] = {
+                        "source": LAYOUT_PROPOSAL_SOURCE,
+                        "detection_confidence_calibrated": False,
+                        "used_for_detection": True,
+                    }
                 if proposal is not None:
                     cells, proposal_metadata = _repair_ruled_grid(
                         cells,
@@ -1872,6 +1899,55 @@ def _boxes_match(left: BoundingBox, right: BoundingBox) -> bool:
     intersection = _intersection_area(left, right)
     return (
         intersection / _box_area(left) >= 0.8 and intersection / _box_area(right) >= 0.8
+    )
+
+
+def _novel_layout_boxes(
+    layout_boxes: Sequence[BoundingBox],
+    inputs: Sequence[tuple[dict[str, Any], dict[str, Any], Any, bool]],
+    page_size: tuple[int, int],
+) -> list[BoundingBox]:
+    """Layout table regions no planned table crop substantially covers.
+
+    Majority coverage by an existing crop means the structure model will already read
+    that area; below it, the table detector genuinely missed most of the table.
+    """
+    existing = [_bounded_box(item[0]["bbox"], page_size) for item in inputs]
+    novel = []
+    for box in layout_boxes:
+        area = _box_area(box)
+        if area <= 0:
+            continue
+        if any(
+            _intersection_area(box, other) / area >= 0.5 for other in existing
+        ):
+            continue
+        novel.append(box)
+        existing.append(box)
+    return novel
+
+
+def _layout_recognition_input(
+    image: Image.Image,
+    tokens: list[dict[str, Any]],
+    box: BoundingBox,
+) -> tuple[dict[str, Any], dict[str, Any], None, bool]:
+    bounded = _bounded_box([box.left, box.top, box.right, box.bottom], image.size)
+    return (
+        {
+            "label": "table",
+            "score": None,
+            "bbox": [bounded.left, bounded.top, bounded.right, bounded.bottom],
+            "layout_proposal": True,
+        },
+        {
+            "image": image.crop(
+                (bounded.left, bounded.top, bounded.right, bounded.bottom)
+            ),
+            "tokens": _tokens_for_proposal(tokens, bounded),
+        },
+        None,
+        True,
     )
 
 

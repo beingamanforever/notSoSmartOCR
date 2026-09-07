@@ -1104,6 +1104,46 @@ def test_tatr_adapter_translates_crop_cells_to_page_coordinates(
     assert pipeline.detect_tokens[0]["bbox"] == [60, 30, 80, 40]
 
 
+def test_layout_table_region_becomes_a_crop_when_detection_misses_it(
+    tmp_path: Path,
+) -> None:
+    """The JPMorgan financial page: TATR detection returns nothing over the table, but
+    the page reader's layout model saw it. Its box becomes a structure crop."""
+    image_path = _image(tmp_path, (600, 400))
+    pipeline = FakeTatrPipeline()
+    extractor = TatrTableExtractor(
+        tmp_path,
+        tmp_path / "detection.pth",
+        tmp_path / "structure.pth",
+        device="cpu",
+        pipeline=pipeline,
+    )
+
+    predictions = extractor.extract(
+        image_path,
+        [],
+        layout_boxes=[
+            # Substantially covered by the [50,20,150,100] detection: skipped.
+            BoundingBox(60, 25, 140, 95),
+            # Far from any detection: recognised from its own crop.
+            BoundingBox(300, 200, 500, 300),
+        ],
+    )
+
+    assert len(predictions) == 2
+    detected, proposed = predictions
+    assert detected.model.get("proposal") is None
+    assert proposed.bounding_box == BoundingBox(300, 200, 500, 300)
+    assert proposed.confidence is None
+    assert proposed.model["proposal"] == {
+        "source": "reader_layout_region",
+        "detection_confidence_calibrated": False,
+        "used_for_detection": True,
+    }
+    # Cells translate from crop coordinates back to the layout box's page position.
+    assert proposed.cells[0].bounding_box == BoundingBox(310, 210, 355, 245)
+
+
 def test_tatr_adapter_keeps_blank_section_gap_in_one_clinical_form(
     tmp_path: Path,
 ) -> None:
