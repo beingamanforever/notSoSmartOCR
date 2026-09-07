@@ -12,10 +12,10 @@ import time
 from typing import Any
 
 if __package__:
-    from experiments.benchmark_phi4 import PageCase, load_page_cases
+    from experiments.challenge_pages import PageCase, load_page_cases
     from experiments.evaluate_challenge_set import evaluate_challenge_set
 else:
-    from benchmark_phi4 import PageCase, load_page_cases  # type: ignore[no-redef]
+    from challenge_pages import PageCase, load_page_cases  # type: ignore[no-redef]
     from evaluate_challenge_set import (  # type: ignore[no-redef]
         evaluate_challenge_set,
     )
