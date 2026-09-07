@@ -29,6 +29,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import replace
+from difflib import SequenceMatcher
 from pathlib import Path
 from statistics import fmean
 from typing import Protocol
@@ -42,6 +43,10 @@ INSIDE = "centre"
 # Comparison alphabet for "did the region's text include this word": case, whitespace
 # and punctuation differences between the two readers are not missing content.
 TOKEN = re.compile(r"[a-z0-9%$]+")
+# Recovered content must come from a confident read. Measured across the 18-page set:
+# garbled re-reads of text the region already carries score 0.34-0.70, while every
+# genuine recovery (the financial page's bullet column, 63 lines) scores >= 0.77.
+UNDERREAD_MIN_CONFIDENCE = 0.75
 
 
 class GeometryReader(Protocol):
@@ -199,20 +204,70 @@ def _word_entry(word: TextRegion, present: bool) -> dict[str, object]:
 def _present_flags(text: str, words: list[TextRegion]) -> list[bool]:
     """Whether each claimed word's text survived into the region's own text.
 
-    A multiset test rather than plain substring search, so a word printed twice on the
-    page but kept once in the text is still recovered once. A word with no comparable
-    token (a bare glyph or punctuation mark) is treated as present: there is no text to
-    recover for it, and emitting it would invent content.
+    The geometry reader (Nemotron) sometimes returns a whole printed line as a single
+    "word", re-read in its own pass rather than copied from Falcon's text - so it carries
+    its own character noise ("foctnoted" for "footnoted", "Frie Browwn" for "Eric Brown").
+    An exact token multiset test would call that whole line absent and re-emit it as a
+    near-duplicate child region. A fuzzy match on the tokens that miss exactly tells a
+    re-read with typos (almost every token close to one available in the text) apart from
+    content the region genuinely never read (few or no tokens in common). A word counts
+    as present once at least three quarters of its tokens are accounted for, exactly or
+    fuzzily. A word with no comparable token (a bare glyph or punctuation mark) is treated
+    as present: there is no text to recover for it, and emitting it would invent content.
     """
     available = Counter(TOKEN.findall(text.casefold()))
     flags = []
     for word in words:
-        needed = Counter(TOKEN.findall(word.text.casefold()))
-        present = all(available[token] >= count for token, count in needed.items())
+        tokens = TOKEN.findall(word.text.casefold())
+        if not tokens:
+            flags.append(True)
+            continue
+        consumed: Counter = Counter()
+        matched = 0
+        for token in tokens:
+            if available[token] - consumed[token] > 0:
+                consumed[token] += 1
+                matched += 1
+                continue
+            if len(token) < 4:
+                continue
+            fuzzy_key = _fuzzy_match(token, available, consumed)
+            if fuzzy_key is not None:
+                consumed[fuzzy_key] += 1
+                matched += 1
+        present = matched >= len(tokens) * 0.75
         if present:
-            available.subtract(needed)
+            available.subtract(consumed)
         flags.append(present)
     return flags
+
+
+def _fuzzy_match(token: str, available: Counter, consumed: Counter) -> str | None:
+    """The best still-available token within edit distance of a token that missed exactly.
+
+    A cheap prefilter (length within 2, sharing a first or last character) runs before any
+    difflib comparison, since a table region can claim hundreds of words against a text of
+    thousands of characters and most tokens either hit exactly or share nothing with any
+    available token. quick_ratio further screens out weak candidates before the real
+    (more expensive) ratio is computed. Keys are visited in sorted order so that ties
+    resolve the same way on every run.
+    """
+    matcher = SequenceMatcher(a=token)
+    best_key, best_ratio = None, 0.0
+    for key in sorted(available):
+        if available[key] - consumed[key] <= 0:
+            continue
+        if abs(len(key) - len(token)) > 2:
+            continue
+        if key[0] != token[0] and key[-1] != token[-1]:
+            continue
+        matcher.set_seq2(key)
+        if matcher.quick_ratio() < 0.75:
+            continue
+        ratio = matcher.ratio()
+        if ratio >= 0.75 and ratio > best_ratio:
+            best_key, best_ratio = key, ratio
+    return best_key
 
 
 def _underread_children(region: TextRegion, words: list[TextRegion]) -> list[TextRegion]:
@@ -229,6 +284,15 @@ def _underread_children(region: TextRegion, words: list[TextRegion]) -> list[Tex
     ]
     if not absent:
         return []
+    lines = [
+        line
+        for line in _lines(absent)
+        if fmean(
+            [word.confidence for word in line if isinstance(word.confidence, float)]
+            or [0.0]
+        )
+        >= UNDERREAD_MIN_CONFIDENCE
+    ]
     children = [
         TextRegion(
             id=f"{region.id}-underread-{index}",
@@ -252,7 +316,7 @@ def _underread_children(region: TextRegion, words: list[TextRegion]) -> list[Tex
             resolution="resolved",
             structure={"word_evidence": [_word_entry(word, True) for word in line]},
         )
-        for index, line in enumerate(_lines(absent), start=1)
+        for index, line in enumerate(lines, start=1)
     ]
     provenance = dict(region.text_provenance or {})
     provenance["underread_recovered_words"] = len(absent)

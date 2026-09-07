@@ -79,12 +79,23 @@ def _group_inline_regions(
         if previous is None or not _same_inline_line(previous, region):
             groups.append(region)
             continue
+        merged = f"{_inline_piece(previous)} {_inline_piece(region)}".strip()
+        carrier = region if _semantic_kind(previous) == "control" else previous
+        # The row is prose once a control joins it. Carrying the control's own structure
+        # forward would keep rendering the group as a control and re-attach its label.
         groups[-1] = {
-            **previous,
-            "text": f"{_text(previous)} {_text(region)}",
+            **carrier,
+            "text": merged,
             "bounding_box": region.get("bounding_box"),
         }
     return groups
+
+
+def _inline_piece(region: dict[str, Any]) -> str:
+    """What a region contributes to a shared line: a control gives its mark only."""
+    if _semantic_kind(region) == "control":
+        return _control_mark_text(region)
+    return _text(region)
 
 
 def _same_inline_line(first: dict[str, Any], second: dict[str, Any]) -> bool:
@@ -92,7 +103,9 @@ def _same_inline_line(first: dict[str, Any], second: dict[str, Any]) -> bool:
         return False
     if not _inline_text(first) or not _inline_text(second):
         return False
-    if _semantic_kind(first) != _semantic_kind(second):
+    kinds = {_semantic_kind(first), _semantic_kind(second)}
+    # A control joins the prose around it; other kinds still only merge with their own.
+    if len(kinds) > 1 and "control" not in kinds:
         return False
     first_box = _normalized_box(first.get("bounding_box"))
     second_box = _normalized_box(second.get("bounding_box"))
@@ -112,6 +125,10 @@ def _same_inline_line(first: dict[str, Any], second: dict[str, Any]) -> bool:
 def _inline_text(region: dict[str, Any]) -> bool:
     kind = _kind(region).casefold()
     if kind in {"word", "token"} or kind.endswith(("_word", "_token")):
+        return True
+    # A control is an inline glyph on the row it marks. Kept out of this, it renders as
+    # its own bullet and the option list it belongs to loses the tick that selected it.
+    if _semantic_kind(region) == "control":
         return True
     provenance = region.get("text_provenance")
     return (
@@ -141,21 +158,29 @@ def _display_regions(
         for region in regions
         if _structure(region).get("role") == "layout_block"
     }
+    source_index = {_id(region): region for region in regions if _id(region)}
     ordered = _ordered_regions(regions)
     included = [region for region in ordered if _renderable(region, evidence_ids)]
-    linked_labels = {
-        str(label_id)
+    # A control whose label belongs to a layout block is already drawn inside that row,
+    # in the position it was marked, so rendering it again here would duplicate it.
+    inlined = {
+        _id(region)
         for region in included
-        if _semantic_kind(region) == "control" and _text(region)
-        for label_id in (_structure(region).get("label_evidence_ids") or [])
+        if _semantic_kind(region) == "control"
+        and any(
+            _owned_by_layout(source, owner_ids)
+            for label_id in (_structure(region).get("label_evidence_ids") or [])
+            if (source := source_index.get(str(label_id))) is not None
+        )
     }
     return [
         region
         for region in included
-        if (
-            not _owned_by_layout(region, owner_ids) and _id(region) not in linked_labels
+        if _id(region) not in inlined
+        and (
+            not _owned_by_layout(region, owner_ids)
+            or _semantic_kind(region) in {"table", "figure", "control"}
         )
-        or _semantic_kind(region) in {"table", "figure", "control"}
     ]
 
 
@@ -196,16 +221,13 @@ def _markdown_block(
         else:
             block = text
     elif kind == "control":
+        # Reached only when the control has no row to sit in: a control whose label
+        # belongs to a layout block is drawn inside that row instead, where it was marked.
         if resolution == "resolved":
             block = f"- {text}" if text else ""
         else:
             label = str(_structure(region).get("label") or "").strip()
-            # A slashed loop is evidence of what was drawn, so it keeps its glyph instead
-            # of collapsing into the unknown-state marker.
-            marker = str(_structure(region).get("mark_glyph") or "[?]")
-            if not _structure(region).get("annotation_shape"):
-                marker = "[?]"
-            block = f"- {marker} {label}" if label else ""
+            block = f"- {_control_mark_text(region)} {label}" if label else ""
     elif kind == "field":
         label = str(
             _structure(region).get("label")
@@ -286,6 +308,38 @@ def _display_cell_text(cell: dict[str, Any]) -> str:
     return str(cell.get("text", ""))
 
 
+def _control_mark_text(region: dict[str, Any]) -> str:
+    """The mark on its own. The label stays wherever the page put it."""
+    if _resolution(region) == "resolved":
+        stripped = _text(region).strip()
+        for symbol in CONTROL_SYMBOLS:
+            if stripped.startswith(symbol):
+                return symbol
+        return str(_structure(region).get("mark_glyph") or "").strip()
+    # A slashed loop is evidence of what was drawn, so it keeps its glyph instead of
+    # collapsing into the unknown-state marker.
+    if not _structure(region).get("annotation_shape"):
+        return "[?]"
+    return str(_structure(region).get("mark_glyph") or "[?]")
+
+
+def _controls_by_label(
+    source_index: dict[str, dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    index: dict[str, list[dict[str, Any]]] = {}
+    for region in source_index.values():
+        if _semantic_kind(region) != "control":
+            continue
+        for label_id in _structure(region).get("label_evidence_ids") or []:
+            index.setdefault(str(label_id), []).append(region)
+    return index
+
+
+def _left_edge(region: dict[str, Any]) -> float:
+    box = _normalized_box(region.get("bounding_box"))
+    return box[0] if box else 0.0
+
+
 def _control_label(text: str) -> str:
     stripped = text.strip()
     for prefix in ("[?]", "[x]", "[X]", "[ ]", *MARK_GLYPHS):
@@ -358,18 +412,31 @@ def _canonical_layout_text(
     )
     if not isinstance(groups, list):
         return ""
+    controls = _controls_by_label(source_index)
     rendered_lines = []
     for group in groups:
         if not isinstance(group, dict):
             continue
-        values = [
-            value
-            for evidence_id in group.get("evidence_ids", [])
-            if isinstance(evidence_id, str)
-            and (source := source_index.get(evidence_id)) is not None
-            and (value := _display_text(source))
-        ]
-        rendered_lines.append(" ".join(values))
+        # Marks are placed by where they were drawn, so a tick reads beside the option it
+        # selected instead of being hoisted out of the row.
+        placed: list[tuple[float, str]] = []
+        seen: set[str] = set()
+        for evidence_id in group.get("evidence_ids", []):
+            if not isinstance(evidence_id, str):
+                continue
+            source = source_index.get(evidence_id)
+            if source is None:
+                continue
+            left = _left_edge(source)
+            if value := _display_text(source):
+                placed.append((left, value))
+            for control in controls.get(evidence_id, []):
+                if _id(control) in seen:
+                    continue
+                seen.add(_id(control))
+                if mark := _control_mark_text(control):
+                    placed.append((_left_edge(control), mark))
+        rendered_lines.append(" ".join(text for _, text in sorted(placed)))
     separator = " | " if structure.get("block_type") == "form_row" else " "
     return separator.join(rendered_lines)
 

@@ -276,6 +276,63 @@ def test_a_glyph_only_word_is_never_recovered_as_missing_text() -> None:
     assert fused[0].structure["word_evidence"][1]["in_region_text"] is True
 
 
+def test_a_typo_riddled_reread_of_a_short_line_is_not_recovered_as_a_child() -> None:
+    """The geometry reader's own re-read of 'M = Millions' came back 'M=Millons': a
+    dropped space and a dropped 'i', not missing content."""
+    region = _region("r1", "M = Millions", (0, 0, 100, 20))
+    words = [_word("M=Millons", (0, 0, 100, 20), 0.55)]
+
+    fused = fuse([region], words, 1)
+
+    assert len(fused) == 1
+    assert fused[0].structure["word_evidence"][0]["in_region_text"] is True
+
+
+def test_a_typo_riddled_reread_of_a_whole_line_is_not_recovered_as_a_child() -> None:
+    """financial_pdf: Nemotron returns the whole footnote line as one 'word' and misreads
+    one character in it. Falcon's text for the line is otherwise identical."""
+    region = _region(
+        "r1",
+        "For footnoted information, refer to pages 58-59 in this Annual Report.",
+        (0, 0, 600, 20),
+    )
+    words = [
+        _word(
+            "For foctnoted information, refer to pages 58-59 in this Annual Report.",
+            (0, 0, 600, 20),
+            0.6,
+        )
+    ]
+
+    fused = fuse([region], words, 1)
+
+    assert len(fused) == 1
+    assert fused[0].structure["word_evidence"][0]["in_region_text"] is True
+
+
+def test_a_reread_with_several_misrecognised_names_still_counts_as_present() -> None:
+    """A fax cover sheet: the geometry reader's re-read of the sender line garbles two of
+    eight tokens ('Eric' to 'Frie', 'Brown' to 'Browwn'), well under the quarter allowed
+    to miss."""
+    region = _region(
+        "r1",
+        "SENDER/PHONE NUMBER: June Flynn for Eric Brown /(614) 466-8980",
+        (0, 0, 600, 20),
+    )
+    words = [
+        _word(
+            "June Flynn for Frie Browwn /(614) 466-8980",
+            (0, 0, 600, 20),
+            0.7,
+        )
+    ]
+
+    fused = fuse([region], words, 1)
+
+    assert len(fused) == 1
+    assert fused[0].structure["word_evidence"][0]["in_region_text"] is True
+
+
 def test_no_words_anywhere_means_no_capacity_claim() -> None:
     """With nothing recognised on the page there is no measured character size."""
     region = _region("r1", "x" * 5000, (0, 0, 10, 10))
@@ -284,3 +341,36 @@ def test_no_words_anywhere_means_no_capacity_claim() -> None:
 
     assert fused.resolution == "resolved"
     assert "read_terminated" not in fused.text_provenance
+
+
+def test_a_low_confidence_garbled_reread_is_not_recovered_as_a_child() -> None:
+    """The wellness form: Nemotron re-read the instruction paragraph as character soup
+    ("the aassssmeent Oorm") at 0.34 confidence. Recovery requires a confident read."""
+    region = _region(
+        "r1",
+        "This assessment form is pre-populated with existing data.",
+        (0, 0, 800, 60),
+    )
+    words = [
+        _word("This assessment form is pre-populated", (10, 10, 400, 25), 0.95),
+        _word("the aassssmeent Oorm pee--ppuaac wwin", (10, 30, 400, 45), 0.34),
+    ]
+
+    fused = fuse([region], words, 1)
+
+    assert len(fused) == 1
+    assert "underread" not in " ".join(item.id for item in fused)
+
+
+def test_a_confident_recovery_still_comes_back_as_a_child() -> None:
+    region = _region("r1", "Deposits table", (0, 0, 600, 100), kind="table")
+    words = [
+        _word("Deposits", (10, 10, 80, 25), 0.99),
+        _word("table", (90, 10, 130, 25), 0.98),
+        _word("Serve 84M consumers", (300, 40, 460, 55), 0.91),
+    ]
+
+    fused = fuse([region], words, 1)
+
+    (child,) = [item for item in fused if "underread" in item.id]
+    assert child.text == "Serve 84M consumers"

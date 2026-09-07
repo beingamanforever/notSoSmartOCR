@@ -826,6 +826,251 @@ def test_control_stage_rejects_empty_checkbox_outline_as_null_mark(
     )
 
 
+def test_word_fragment_is_not_a_null_glyph(tmp_path: Path) -> None:
+    """A letter inside an untranscribed printed word (a g or an 8 is a loop with a
+    stroke) passes the null shape test; its same-baseline neighbours must reject it.
+    Seen on the PT forms as '∅ Postural Training...' over printed text."""
+    source = tmp_path / "word-fragment.png"
+    image = Image.new("L", (420, 160), "white")
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((330, 38, 348, 54), outline="black", width=2)
+    draw.line((332, 53, 346, 39), fill="black", width=2)
+    # Same-baseline neighbours hugging both flanks, as letters in a word do.
+    draw.rectangle((316, 40, 328, 52), fill="black")
+    draw.rectangle((350, 40, 362, 52), fill="black")
+    image.save(source)
+    regions = [
+        _region("taps", "TAPS SCORE (Substance Abuse Disorder):", (60, 36, 325, 56), 1),
+        _region(
+            "printed-glyph",
+            "☐G0438: Initial Annual Wellness Exam",
+            (60, 90, 380, 108),
+            2,
+        ),
+    ]
+
+    result = process_document(
+        source,
+        FixedReader(regions),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    assert not [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+
+
+def test_null_glyph_detected_in_transcribed_mode(
+    tmp_path: Path,
+) -> None:
+    """A reader transcribes a printed ballot glyph as text, but never a handwritten
+    null glyph, so the anchored null-glyph channel must still run in that mode."""
+    source = tmp_path / "transcribed-null.png"
+    image = Image.new("L", (420, 160), "white")
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((330, 38, 348, 54), outline="black", width=2)
+    draw.line((332, 53, 346, 39), fill="black", width=2)
+    image.save(source)
+    regions = [
+        _region("taps", "TAPS SCORE (Substance Abuse Disorder):", (60, 36, 325, 56), 1),
+        _region(
+            "printed-glyph",
+            "☐G0438: Initial Annual Wellness Exam",
+            (60, 90, 380, 108),
+            2,
+        ),
+    ]
+
+    result = process_document(
+        source,
+        FixedReader(regions),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert [control.text for control in controls] == [
+        "∅ TAPS SCORE (Substance Abuse Disorder)"
+    ]
+    assert controls[0].text_provenance["method"] == "label_anchored_null_glyph"
+    assert controls[0].text_provenance["label_evidence_ids"] == ["taps"]
+
+
+def test_transcribed_mode_suppresses_ticks(
+    tmp_path: Path,
+) -> None:
+    """Ticks and crosses stay suppressed in transcribed-marks mode: the reader already
+    wrote the printed glyphs, and re-detecting residual ink would duplicate them."""
+    source = tmp_path / "transcribed-tick.png"
+    image = Image.new("L", (420, 160), "white")
+    draw = ImageDraw.Draw(image)
+    draw.line((332, 46, 338, 54), fill="black", width=2)
+    draw.line((338, 54, 348, 39), fill="black", width=2)
+    image.save(source)
+    regions = [
+        _region("option", "First option:", (60, 36, 325, 56), 1),
+        _region(
+            "printed-glyph",
+            "☐G0438: Initial Annual Wellness Exam",
+            (60, 90, 380, 108),
+            2,
+        ),
+    ]
+
+    result = process_document(
+        source,
+        FixedReader(regions),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    assert not [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+
+
+def test_null_glyph_in_label_box_tail(
+    tmp_path: Path,
+) -> None:
+    """The wellness form's layout reader boxes "Family History:" past the colon, over
+    the writing space, and scores the label by detection rather than reading quality.
+    A flat cursive null glyph drawn there must still anchor to its colon label."""
+    source = tmp_path / "label-tail-null.png"
+    image = Image.new("L", (420, 160), "white")
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((116, 40, 132, 52), outline="black", width=2)
+    draw.line((112, 56, 140, 47), fill="black", width=2)
+    image.save(source)
+    label = TextRegion(
+        id="family",
+        kind="text",
+        text="Family History:",
+        confidence=0.49,
+        bounding_box=BoundingBox(11, 36, 144, 58),
+        reading_order=1,
+        provider="fixed",
+    )
+    trigger = _region(
+        "printed-glyph", "☐G0438: Initial Annual Wellness Exam", (60, 100, 380, 118), 2
+    )
+
+    result = process_document(
+        source,
+        FixedReader([label, trigger]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert [control.text for control in controls] == ["∅ Family History"]
+    assert controls[0].text_provenance["method"] == "label_anchored_null_glyph"
+    assert controls[0].text_provenance["label_evidence_ids"] == ["family"]
+
+
+def test_null_glyph_survives_junk_transcription(tmp_path: Path) -> None:
+    """The fused reader's under-read repair writes the null glyph back as a stray
+    character ("Family History: 8"). That junk word must not veto the null-glyph
+    detection whose pixels it re-spells."""
+    source = tmp_path / "junk-transcribed-null.png"
+    image = Image.new("L", (420, 160), "white")
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((116, 40, 132, 52), outline="black", width=2)
+    draw.line((112, 56, 140, 47), fill="black", width=2)
+    image.save(source)
+    label = TextRegion(
+        id="family",
+        kind="text",
+        text="Family History:",
+        confidence=0.49,
+        bounding_box=BoundingBox(11, 36, 144, 58),
+        reading_order=1,
+        provider="fixed",
+    )
+    junk = _region("family-underread", "8", (114, 39, 137, 54), 2)
+    junk.text_provenance = {"method": "region_underread_repair"}
+    trigger = _region(
+        "printed-glyph", "☐G0438: Initial Annual Wellness Exam", (60, 100, 380, 118), 3
+    )
+
+    result = process_document(
+        source,
+        FixedReader([label, junk, trigger]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert [control.text for control in controls] == ["∅ Family History"]
+    assert controls[0].text_provenance["label_evidence_ids"] == ["family"]
+
+
+def test_main_read_single_char_still_vetoes(
+    tmp_path: Path,
+) -> None:
+    """A single-character region from the main read is real page text (a printed 8
+    passes the null shape test), so it must keep vetoing, unlike an under-read
+    repair of the same pixels."""
+    source = tmp_path / "printed-char-not-null.png"
+    image = Image.new("L", (420, 160), "white")
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((116, 40, 132, 52), outline="black", width=2)
+    draw.line((112, 56, 140, 47), fill="black", width=2)
+    image.save(source)
+    label = TextRegion(
+        id="family",
+        kind="text",
+        text="Family History:",
+        confidence=0.49,
+        bounding_box=BoundingBox(11, 36, 144, 58),
+        reading_order=1,
+        provider="fixed",
+    )
+    printed = _region("printed-eight", "8", (114, 39, 137, 54), 2)
+    trigger = _region(
+        "printed-glyph", "☐G0438: Initial Annual Wellness Exam", (60, 100, 380, 118), 3
+    )
+
+    result = process_document(
+        source,
+        FixedReader([label, printed, trigger]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    assert not [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+
+
+def test_printed_glyph_not_redetected_as_null(
+    tmp_path: Path,
+) -> None:
+    """The printed ballot glyph the reader already transcribed must not come back as
+    an anchored detection: its pixels sit inside the reader's own text box."""
+    source = tmp_path / "transcribed-pixels.png"
+    image = Image.new("L", (420, 160), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((62, 38, 78, 54), outline="black", width=2)
+    draw.line((64, 44, 70, 52), fill="black", width=2)
+    draw.line((70, 52, 78, 39), fill="black", width=2)
+    image.save(source)
+    regions = [
+        _region("option", "Other option:", (150, 36, 260, 56), 1),
+        _region("printed-glyph", "☑ Ambulance", (60, 36, 145, 56), 2),
+    ]
+
+    result = process_document(
+        source,
+        FixedReader(regions),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    assert not [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+
+
 def test_ring_over_one_value_labels_the_enclosed_words_not_the_whole_row(
     tmp_path: Path,
 ) -> None:
@@ -843,10 +1088,30 @@ def test_ring_over_one_value_labels_the_enclosed_words_not_the_whole_row(
     row = _region("row", "Average deposits $187 $1,064", (60, 42, 780, 62), 1)
     row.structure = {
         "word_evidence": [
-            {"text": "Average", "bbox": {"left": 60, "top": 44, "right": 115, "bottom": 60}, "confidence": 0.99, "in_region_text": True},
-            {"text": "deposits", "bbox": {"left": 120, "top": 44, "right": 180, "bottom": 60}, "confidence": 0.98, "in_region_text": True},
-            {"text": "$187", "bbox": {"left": 420, "top": 44, "right": 460, "bottom": 60}, "confidence": 0.97, "in_region_text": True},
-            {"text": "$1,064", "bbox": {"left": 640, "top": 44, "right": 700, "bottom": 60}, "confidence": 0.96, "in_region_text": True},
+            {
+                "text": "Average",
+                "bbox": {"left": 60, "top": 44, "right": 115, "bottom": 60},
+                "confidence": 0.99,
+                "in_region_text": True,
+            },
+            {
+                "text": "deposits",
+                "bbox": {"left": 120, "top": 44, "right": 180, "bottom": 60},
+                "confidence": 0.98,
+                "in_region_text": True,
+            },
+            {
+                "text": "$187",
+                "bbox": {"left": 420, "top": 44, "right": 460, "bottom": 60},
+                "confidence": 0.97,
+                "in_region_text": True,
+            },
+            {
+                "text": "$1,064",
+                "bbox": {"left": 640, "top": 44, "right": 700, "bottom": 60},
+                "confidence": 0.96,
+                "in_region_text": True,
+            },
         ]
     }
 
@@ -865,6 +1130,46 @@ def test_ring_over_one_value_labels_the_enclosed_words_not_the_whole_row(
     assert len(rings) == 2
     labels = sorted(ring.structure["label"] for ring in rings)
     assert labels == ["$1,064", "$187"]
+
+
+def test_two_rings_over_a_row_without_word_evidence_never_repeat_the_row_text(
+    tmp_path: Path,
+) -> None:
+    """When the geometry reader returns a row as one chunk with no word_evidence, no ring
+    can find an enclosed word to label with. The row-fallback must not fill in instead,
+    or two rings on one row each render the same full row line."""
+    source = tmp_path / "circled-values-no-words.png"
+    image = Image.new("L", (900, 100), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((60, 44), "Global Investment banking fees", fill="black")
+    draw.text((420, 44), "ECM", fill="black")
+    draw.text((640, 44), "DCM", fill="black")
+    draw.ellipse((410, 36, 480, 64), outline="black", width=2)
+    draw.ellipse((630, 36, 710, 64), outline="black", width=2)
+    image.save(source)
+    row = _region("row", "Global Investment banking fees ECM DCM", (60, 42, 780, 62), 1)
+
+    result = process_document(
+        source,
+        FixedReader([row]),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    rings = [
+        region
+        for region in result.pages[0].regions
+        if region.kind == "checkbox"
+        and region.text_provenance["method"] == "enclosing_ring_annotation"
+    ]
+    assert len(rings) == 2
+    for ring in rings:
+        assert ring.structure["label"] is None
+        assert ring.text == "◯"
+        assert ring.structure["coverage_status"] == "unmatched_label"
+        assert ring.structure["annotation_target"] == {
+            "relation": "encloses",
+            "evidence_ids": ["row"],
+        }
 
 
 def test_control_stage_reports_ring_drawn_over_printed_option(
@@ -903,6 +1208,85 @@ def test_control_stage_reports_ring_drawn_over_printed_option(
         "evidence_ids": ["social"],
     }
     assert rings[0].structure["interpretation_status"] == "unresolved"
+
+
+def test_ring_is_detected_even_when_the_reader_transcribed_a_printed_glyph(
+    tmp_path: Path,
+) -> None:
+    """A reader can transcribe a printed ballot glyph as text, but never a hand-drawn
+    ring, so the ring channel must still run - and the square channel must not - once
+    _reader_transcribes_marks is true."""
+    source = tmp_path / "wellness-form.png"
+    image = Image.new("L", (420, 160), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((60, 44), "Non-Smoker / Smoker", fill="black")
+    draw.ellipse((56, 38, 135, 62), outline="black", width=2)
+    draw.rectangle((300, 90, 318, 108), outline="black", width=2)
+    image.save(source)
+    regions = [
+        _region("social", "Non-Smoker / Smoker", (60, 42, 200, 60), 1),
+        _region("printed-glyph", "☐ Ambulance", (300, 88, 400, 108), 2),
+    ]
+
+    result = process_document(
+        source,
+        FixedReader(regions),
+        stages=[GeometricControlStage(minimum_group_size=1)],
+    )
+
+    controls = [
+        region for region in result.pages[0].regions if region.kind == "checkbox"
+    ]
+    assert [control.text_provenance["method"] for control in controls] == [
+        "enclosing_ring_annotation"
+    ]
+    assert not any(
+        control.text_provenance["method"] == "square_contour_with_line_cleanup"
+        for control in controls
+    )
+
+
+def test_ring_label_matches_enclosed_region_when_its_provider_is_in_the_label_provider_tuple(
+    tmp_path: Path,
+) -> None:
+    """The fused reader's controls stage sees base_reader.name ("falcon-on-nemotron"),
+    but the Falcon layout region a ring encloses keeps its own "falcon-perception"
+    provider. label_provider must accept both so the ring still finds its label."""
+    source = tmp_path / "circled-option-fused.png"
+    image = Image.new("L", (420, 100), "white")
+    draw = ImageDraw.Draw(image)
+    draw.text((60, 44), "Non-Smoker / Smoker", fill="black")
+    draw.ellipse((56, 38, 135, 62), outline="black", width=2)
+    image.save(source)
+    label = TextRegion(
+        id="social",
+        kind="word",
+        text="Non-Smoker / Smoker",
+        confidence=0.98,
+        bounding_box=BoundingBox(60, 42, 200, 60),
+        reading_order=1,
+        provider="falcon-perception",
+    )
+
+    result = process_document(
+        source,
+        FixedReader([label]),
+        stages=[
+            GeometricControlStage(
+                minimum_group_size=1,
+                label_provider=("falcon-on-nemotron", "falcon-perception"),
+            )
+        ],
+    )
+
+    rings = [
+        region
+        for region in result.pages[0].regions
+        if region.kind == "checkbox"
+        and region.text_provenance["method"] == "enclosing_ring_annotation"
+    ]
+    assert len(rings) == 1
+    assert rings[0].text_provenance["label_evidence_ids"] == ["social"]
 
 
 def test_control_stage_rejects_ruled_rectangle_as_ring(tmp_path: Path) -> None:
@@ -2138,3 +2522,49 @@ def test_controls_stand_down_when_the_reader_already_wrote_the_mark(tmp_path) ->
 
     assert result == regions
     assert not [region for region in result if region.kind == "checkbox"]
+
+
+def test_a_label_region_shared_by_several_squares_prints_its_text_once(
+    tmp_path: Path,
+) -> None:
+    """The fax routing row: one region carries "Urgent [ ] For Review [ ] Please
+    Reply", every square resolves to it, and the row rendered once per square."""
+    from ocr_pipeline.controls import _dedupe_shared_labels
+
+    def control(id_, label, evidence_ids):
+        return TextRegion(
+            id=id_,
+            kind="checkbox",
+            text=f"[ ] {label}" if label else "[ ]",
+            confidence=0.8,
+            bounding_box=BoundingBox(0, 0, 10, 10),
+            reading_order=1,
+            provider="opencv-label-anchored-residual-v1",
+            text_provenance={"method": "square_contour_with_line_cleanup"},
+            resolution="resolved",
+            structure={
+                "role": "control",
+                "label": label,
+                "label_evidence_ids": evidence_ids,
+                "association_status": "linked" if label else "unmatched",
+            },
+        )
+
+    row = "Urgent [ ] For Review [ ] Please Reply"
+    controls = [
+        control("cb-1", row, ["row-region"]),
+        control("cb-2", row, ["row-region"]),
+        control("cb-3", row, ["row-region"]),
+        control("cb-4", "Colorado", ["colorado-region"]),
+    ]
+
+    _dedupe_shared_labels(controls)
+
+    assert controls[0].text == f"[ ] {row}"
+    assert controls[1].text == "[ ]"
+    assert controls[1].structure["label"] is None
+    assert controls[1].structure["association_status"] == "shared_label"
+    assert controls[1].structure["label_shared_with"] == "cb-1"
+    assert controls[2].text == "[ ]"
+    # A label with its own region is untouched.
+    assert controls[3].text == "[ ] Colorado"

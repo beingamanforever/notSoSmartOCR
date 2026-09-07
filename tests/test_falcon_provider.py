@@ -412,3 +412,84 @@ def test_cli_selects_falcon_only_as_review_challenger(
 def test_cli_rejects_falcon_without_review_flag(tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
         ocr_cli.main([str(tmp_path / "page.png"), "--reader", "falcon-ocr"])
+
+
+def _serve_layout_elements(elements: list[dict[str, object]]):
+    import json
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = json.dumps({"elements": elements, "model": {}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_looped_element_becomes_unreadable_with_read_terminated_provenance() -> None:
+    """A read that self-terminated inside its loop is not `truncated`, only `looped`."""
+    from ocr_pipeline.falcon_layout import FalconLayoutReader
+
+    server = _serve_layout_elements(
+        [
+            {
+                "category": "table",
+                "bbox": [0, 0, 600, 40],
+                "score": 0.9,
+                "text": "$1,659 $546 " * 24,
+                "truncated": False,
+                "looped": True,
+            }
+        ]
+    )
+    try:
+        reader = FalconLayoutReader(f"http://127.0.0.1:{server.server_address[1]}")
+        region = reader.read(Path(__file__), 1)[0]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert region.resolution == "unreadable"
+    assert (
+        region.text_provenance["read_terminated"]
+        == "repetition loop the retry ladder did not recover"
+    )
+
+
+def test_retried_element_carries_read_retries_provenance() -> None:
+    """A retry that recovered clean text is still recorded, for observability."""
+    from ocr_pipeline.falcon_layout import FalconLayoutReader
+
+    server = _serve_layout_elements(
+        [
+            {
+                "category": "text",
+                "bbox": [0, 0, 600, 40],
+                "score": 0.9,
+                "text": "Patient Name: Hugh Brown",
+                "truncated": False,
+                "retries": 2,
+            }
+        ]
+    )
+    try:
+        reader = FalconLayoutReader(f"http://127.0.0.1:{server.server_address[1]}")
+        region = reader.read(Path(__file__), 1)[0]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert region.resolution == "resolved"
+    assert region.text_provenance["read_retries"] == 2
+    assert "read_terminated" not in region.text_provenance

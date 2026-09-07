@@ -654,7 +654,7 @@
     .semantic-block.author { margin-bottom: 16px; color: var(--text); font-size: .82rem; line-height: 1.45; }
     .semantic-block.author > span { display: block; }
     .semantic-block.footnote { margin-top: 18px; color: var(--muted); font-size: .76rem; line-height: 1.5; }
-    .semantic-block.header { color: var(--muted); font-size: .76rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+    .semantic-block.header { color: var(--muted); font-size: .82rem; font-weight: 600; }
     .semantic-block.footer { padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: .76rem; }
     .semantic-block.aside_text { margin: 2px 0 16px; padding-left: 9px; border-left: 2px solid var(--line-strong); color: var(--muted); font-size: .76rem; }
     .semantic-block.formula { margin: 14px 0; padding: 8px 10px; border-left: 2px solid var(--accent); font-family: "Times New Roman", serif; font-size: 1rem; }
@@ -1044,7 +1044,7 @@
       image: null,
       imageRequest: 0,
       resultRequest: 0,
-      hiddenKinds: new Set(),
+      hiddenKinds: new Set(["text", "line", "table_candidate", "table_cell", "word"]),
       selectedFile: null,
       selectedExample: null,
       feedbackSent: null,
@@ -3255,6 +3255,8 @@
       state.hiddenKinds.add("line");
       state.hiddenKinds.add("table_candidate");
       state.hiddenKinds.add("table_cell");
+      // Word boxes exist for cell assignment and confidence; the drawn unit is the line.
+      state.hiddenKinds.add("word");
     }
 
     function renderPage() {
@@ -3328,12 +3330,26 @@
       };
     }
 
+    function cellUnionBox(region) {
+      const boxes = (region.structure?.cells || [])
+        .map((cell) => normalizedBox(cell.bbox || cell.bounding_box))
+        .filter(Boolean);
+      if (!boxes.length) return null;
+      return {
+        left: Math.min(...boxes.map((box) => box.left)),
+        top: Math.min(...boxes.map((box) => box.top)),
+        right: Math.max(...boxes.map((box) => box.right)),
+        bottom: Math.max(...boxes.map((box) => box.bottom))
+      };
+    }
+
     function withTightBox(region) {
       // The layout reader's region boxes are loose blobs; the word reader's boxes are
-      // exact. Display the union of the words when they exist - the region's own claim
-      // stays untouched in the payload. Tables keep their bounds box.
-      if (region.kind === "table") return region;
-      const union = wordUnionBox(region);
+      // exact. Display one tight block box - the union of the words - per region, the
+      // way a layout model presents blocks. A table tightens to its cells' union.
+      const union = region.kind === "table"
+        ? cellUnionBox(region) || wordUnionBox(region)
+        : wordUnionBox(region);
       if (!union) return region;
       return {
         ...region,
@@ -3404,7 +3420,8 @@
 
     function normalPreviewRegion(region) {
       const role = region.structure?.role;
-      if (role === "layout_block") return true;
+      // Layout blocks group other regions; drawing them boxed every line twice.
+      if (role === "layout_block") return false;
       if (["table_source", "table_candidate", "coverage_risk", "presentation_challenger"].includes(role)) return false;
       if (["table_candidate", "coverage_risk", "layout_block"].includes(region.kind)) return false;
       if (semanticKind(region) === "table") {

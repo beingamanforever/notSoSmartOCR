@@ -1209,3 +1209,69 @@ def _osd(angle: int, confidence: float) -> dict[str, object]:
         "script": "Latin",
         "script_confidence": 10.0,
     }
+
+
+def test_paddle_orientation_detector_follows_the_published_preprocessing(
+    tmp_path: Path,
+) -> None:
+    """Preprocessing comes from the repository's inference.yml, so pin it."""
+    import numpy as np
+
+    from ocr_pipeline.orientation import PaddleDocOrientationDetector
+
+    seen: dict[str, object] = {}
+
+    class StubSession:
+        def get_inputs(self):
+            class _Input:
+                name = "x"
+
+            return [_Input()]
+
+        def run(self, _outputs, feed):
+            seen["tensor"] = feed["x"]
+            # 180 is the top-1 class.
+            return [np.asarray([[0.01, 0.02, 0.95, 0.02]], dtype="float32")]
+
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (900, 300), "white").save(image_path)
+
+    detector = PaddleDocOrientationDetector(session=StubSession())
+    prediction = detector(image_path)
+
+    assert prediction["angle"] == 180
+    assert prediction["confidence"] == pytest.approx(0.95, abs=1e-6)
+    assert prediction["model"]["architecture"] == "PP-LCNet_x1_0_doc_ori"
+    assert prediction["model"]["license"] == "Apache-2.0"
+    tensor = seen["tensor"]
+    assert tensor.shape == (1, 3, 224, 224)
+    assert tensor.dtype == np.dtype("float32")
+    # White pixels normalise to (1 - mean) / std under the published ImageNet stats.
+    assert tensor[0, 0, 0, 0] == pytest.approx((1.0 - 0.485) / 0.229, abs=1e-4)
+    assert tensor[0, 2, 0, 0] == pytest.approx((1.0 - 0.406) / 0.225, abs=1e-4)
+
+
+def test_paddle_orientation_detector_rejects_a_wrong_sized_output(
+    tmp_path: Path,
+) -> None:
+    """A silently wrong class vector would rotate pages at random."""
+    import numpy as np
+
+    from ocr_pipeline.orientation import PaddleDocOrientationDetector
+
+    class StubSession:
+        def get_inputs(self):
+            class _Input:
+                name = "x"
+
+            return [_Input()]
+
+        def run(self, _outputs, _feed):
+            return [np.asarray([[0.5, 0.5]], dtype="float32")]
+
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (400, 400), "white").save(image_path)
+
+    with pytest.raises(ReaderError) as failure:
+        PaddleDocOrientationDetector(session=StubSession())(image_path)
+    assert failure.value.code == "invalid_orientation_classifier_output"

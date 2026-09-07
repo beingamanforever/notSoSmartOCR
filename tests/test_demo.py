@@ -715,7 +715,9 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     # Picking an example names it for the server instead of downloading its bytes and
     # posting them straight back, which doubled the transfer of an unchanged file.
     handle_example_start = html.index("function handleExample(button)")
-    handle_example = html[handle_example_start : html.index("\n    }", handle_example_start)]
+    handle_example = html[
+        handle_example_start : html.index("\n    }", handle_example_start)
+    ]
     assert "fetch(" not in handle_example
     assert "state.selectedExample = name;" in handle_example
     assert "state.selectedFile = null;" in handle_example
@@ -858,7 +860,9 @@ def test_demo_exposes_browser_testable_timer_copy_and_output_states() -> None:
     assert 'if (kind === "table") return "table bounds";' in html
     assert 'if (kind === "table_cell") return "table cell bounds";' in html
     assert "const label = selected ? `${index + 1} ${kind}` : kind;" in html
-    assert 'if (role === "layout_block") return true;' in html
+    assert 'if (role === "layout_block") return false;' in html
+    assert 'state.hiddenKinds.add("word")' in html
+    assert "function cellUnionBox(region)" in html
     assert "function visualTabActive()" in html
 
     assert "Evidence diagnostics" not in html
@@ -943,6 +947,63 @@ def test_confidence_review_uses_reported_values_and_downloaded_markdown() -> Non
         "element.dataset.confidencePercent = validConfidence(confidence)" in index.text
     )
     assert "function markdownUrl()" in index.text
+
+
+def test_markdown_download_polishes_output_when_openrouter_key_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    calls = []
+
+    def fake_polish_markdown(markdown, *, model=None, call=None):
+        calls.append(markdown)
+        return markdown.replace("Controlled page 1", "Polished page 1"), {
+            "polished": True,
+            "model": "qwen/qwen3.7-flash",
+        }
+
+    monkeypatch.setattr(demo_module, "polish_markdown", fake_polish_markdown)
+    app = create_app(ControlledReader())
+
+    with TestClient(app) as client:
+        processed = client.post(
+            "/api/process",
+            files={"file": ("visit.png", _page_png(), "image/png")},
+        )
+        markdown = client.get(
+            f"/api/sessions/{processed.json()['session_id']}/result.md"
+        ).text
+
+    assert len(calls) == 1
+    assert "Polished page 1" in markdown
+    assert "<!-- formatting: qwen3.7-flash -->" in markdown
+
+
+def test_markdown_download_skips_polishing_without_openrouter_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    calls = []
+
+    def fake_polish_markdown(markdown, *, model=None, call=None):
+        calls.append(markdown)
+        return markdown, {"polished": True, "model": "qwen/qwen3.7-flash"}
+
+    monkeypatch.setattr(demo_module, "polish_markdown", fake_polish_markdown)
+    app = create_app(ControlledReader())
+
+    with TestClient(app) as client:
+        processed = client.post(
+            "/api/process",
+            files={"file": ("visit.png", _page_png(), "image/png")},
+        )
+        markdown = client.get(
+            f"/api/sessions/{processed.json()['session_id']}/result.md"
+        ).text
+
+    assert calls == []
+    assert "<!-- formatting: qwen3.7-flash -->" not in markdown
+    assert "Controlled page 1" in markdown
 
 
 def test_generated_table_example_runs_through_table_pipeline() -> None:
@@ -1589,9 +1650,7 @@ def test_demo_defers_the_review_draft_so_the_result_lands_without_waiting_for_it
         "status": "pending",
         "pages": [],
     }
-    assert not any(
-        run["stage"] == "presentation" for run in payload["stage_execution"]
-    )
+    assert not any(run["stage"] == "presentation" for run in payload["stage_execution"])
     assert drafted["status"] == "ready"
     assert drafted["pages"] == inline["presentation"]["pages"]
     assert [run["stage"] for run in drafted["stage_execution"]] == ["presentation"]
@@ -4955,3 +5014,29 @@ def test_feedback_retention_is_bounded_so_it_cannot_fill_the_disk(
 
     _prune_feedback(feedback_root, keep=1)
     assert len(list(feedback_root.iterdir())) == 1
+
+
+def test_demo_labels_a_detection_only_confidence_honestly() -> None:
+    """Falcon reports where a region is, not how sure it is of the characters."""
+    app = create_app(ControlledReader())
+    with TestClient(app) as client:
+        html = client.get("/").text
+
+    assert "function detectionOnlyConfidence(region)" in html
+    assert '.startsWith("layout detection")' in html
+    assert 'if (detectionOnlyConfidence(region)) return "Detection score";' in html
+    assert (
+        'label: detectionOnlyConfidence(region) ? "Detection score" : "Recognition score"'
+        in html
+    )
+
+
+def test_demo_surfaces_the_layout_category_when_the_reader_reports_one() -> None:
+    """PP-DocLayoutV3 names each region; hide the row when there is nothing to name."""
+    app = create_app(ControlledReader())
+    with TestClient(app) as client:
+        html = client.get("/").text
+
+    assert 'id="region-category-row" hidden' in html
+    assert "Layout category" in html
+    assert 'byId("region-category-row").hidden = !category;' in html

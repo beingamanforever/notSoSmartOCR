@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
+import threading
+import urllib.request
 from pathlib import Path
 
 from PIL import Image
 import pytest
 
-from experiments import serve_falcon_ocr
+from experiments import serve_falcon_layout, serve_falcon_ocr
 from ocr_pipeline import falcon as falcon_module
 from ocr_pipeline.falcon import (
     FALCON_MODEL_ID,
@@ -280,3 +284,137 @@ def test_service_reader_enforces_batch_limit() -> None:
             [Image.new("RGB", (1, 1)), Image.new("RGB", (1, 1))],
             ["text", "text"],
         )
+
+
+# --- Falcon-Perception layout service: repetition-loop retry ladder ---
+
+
+class FakeTokenizer:
+    def encode(self, text: str) -> list[str]:
+        return text.split()
+
+
+class FakeLayoutEngine:
+    """Fakes the `LayoutEngine` protocol `serve_falcon_layout.create_server` expects."""
+
+    def __init__(
+        self,
+        elements: list[dict[str, object]],
+        plain_by_temperature: dict | None = None,
+    ) -> None:
+        self.elements = elements
+        self.plain_by_temperature = plain_by_temperature or {}
+        self.retry_calls: list[dict[str, object]] = []
+
+    def generate_with_layout(
+        self, images: list[Image.Image], **options: object
+    ) -> list[list[dict[str, object]]]:
+        return [self.elements]
+
+    def generate_plain(self, images: list[Image.Image], **options: object) -> list[str]:
+        if "category" not in options:
+            return ["page text"]
+        self.retry_calls.append(options)
+        return [self.plain_by_temperature[round(float(options["temperature"]), 2)]]
+
+
+def _start_layout_server(engine: FakeLayoutEngine, **options: object):
+    server = serve_falcon_layout.create_server(
+        engine, "127.0.0.1", 0, model={"id": "test-falcon-layout"}, **options
+    )
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _post_layout_read(server, image: Image.Image) -> dict[str, object]:
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    payload = json.dumps(
+        {"image": base64.b64encode(buffer.getvalue()).decode("ascii")}
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_address[1]}/read",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as reply:
+        return json.loads(reply.read())
+
+
+def test_looped_table_cell_is_retried_and_replaced_by_a_clean_attempt() -> None:
+    looped_text = "$1,659 $546 " * 24
+    clean_text = "$1,659\n$546\nTotal $2,205"
+    engine = FakeLayoutEngine(
+        elements=[
+            {
+                "category": "table",
+                "bbox": [0.0, 0.0, 40.0, 40.0],
+                "score": 0.9,
+                "text": looped_text,
+            }
+        ],
+        plain_by_temperature={0.2: looped_text, 0.5: clean_text, 0.8: clean_text},
+    )
+    server = _start_layout_server(
+        engine, tokenizer=FakeTokenizer(), category_by_layout={"table": "table"}
+    )
+    try:
+        body = _post_layout_read(server, Image.new("RGB", (40, 40), "white"))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    element = body["elements"][0]
+    assert element["text"] == clean_text
+    assert element["truncated"] is False
+    assert element["retries"] == 2
+    assert "looped" not in element
+
+
+def test_looped_table_cell_keeps_original_text_when_every_retry_still_loops() -> None:
+    looped_text = "$1,659 $546 " * 24
+    engine = FakeLayoutEngine(
+        elements=[
+            {
+                "category": "table",
+                "bbox": [0.0, 0.0, 40.0, 40.0],
+                "score": 0.9,
+                "text": looped_text,
+            }
+        ],
+        plain_by_temperature={0.2: looped_text, 0.5: looped_text, 0.8: looped_text},
+    )
+    server = _start_layout_server(
+        engine, tokenizer=FakeTokenizer(), category_by_layout={"table": "table"}
+    )
+    try:
+        body = _post_layout_read(server, Image.new("RGB", (40, 40), "white"))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    element = body["elements"][0]
+    assert element["text"] == looped_text
+    assert element["looped"] is True
+    assert "retries" not in element
+
+
+def test_looped_detects_table_repetition_but_not_na_runs_or_dot_leaders() -> None:
+    tail = "Prior Year $187 " + "$1,659 $546 " * 24
+    assert serve_falcon_layout._looped(tail) is True
+
+    financial_row = "Prior authorization: NA NA NA NA Copay: 20 Deductible: met"
+    assert serve_falcon_layout._looped(financial_row) is False
+
+    dot_leader = "Section 4 ..... 12"
+    assert serve_falcon_layout._looped(dot_leader) is False
+
+
+def test_a_loop_glued_by_markup_tags_is_still_detected() -> None:
+    """The financial cell loop arrives as one <br>-separated blob with no whitespace,
+    which a plain whitespace tokenizer sees as a single giant token."""
+    from serve_falcon_layout import _looped
+
+    glued = "$1,127<br>11.4%<br>" + "$1,659<br>$546<br>" * 24
+    assert _looped(glued)
+    assert not _looped("$1,127<br>11.4%<br>$1,659<br>$546")

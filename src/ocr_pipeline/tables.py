@@ -33,6 +33,7 @@ DEFAULT_SOURCE_REVISION = "16d124f616109746b7785f03085100f1f6247575"
 MODEL_LICENSE = "MIT"
 MODEL_ORIGIN = "Microsoft"
 TABLE_DUPLICATE_CONTAINMENT = 0.98
+SUBGRID_CONTAINMENT = 0.85
 NEAR_PAGE_TABLE_AREA = 0.65
 # Share of cells that may be set aside before a grid is treated as unreliable.
 MAX_RECOVERABLE_CELL_COLLISIONS = 0.1
@@ -172,14 +173,13 @@ class TatrTableStage:
         layout_boxes = [
             region.bounding_box for region in regions if region.kind == "table"
         ]
-        if layout_boxes and "layout_boxes" in inspect.signature(
-            self.extractor.extract
-        ).parameters:
-            predictions = self.extractor.extract(
-                image_path, tokens, layout_boxes=layout_boxes
-            )
-        else:
-            predictions = self.extractor.extract(image_path, tokens)
+        parameters = inspect.signature(self.extractor.extract).parameters
+        keywords: dict[str, Any] = {}
+        if layout_boxes and "layout_boxes" in parameters:
+            keywords["layout_boxes"] = layout_boxes
+        if "word_boxes" in parameters:
+            keywords["word_boxes"] = _word_tokens(regions)
+        predictions = self.extractor.extract(image_path, tokens, **keywords)
         if not predictions:
             return regions
 
@@ -213,12 +213,18 @@ class TatrTableStage:
                 self.extractor.name,
             )
             if diagnostic is None:
-                accepted.append(resolved)
+                accepted.append((table_index, resolved))
                 if dropped:
                     dropped_cells_by_table[id(resolved)] = dropped
             else:
                 rejected.append(diagnostic)
-        predictions = accepted
+        predictions, subgrid_rejected = _reject_subgrid_duplicates(
+            accepted,
+            regions,
+            page_number,
+            self.extractor.name,
+        )
+        rejected.extend(subgrid_rejected)
         if not predictions:
             return sorted(
                 regions + rejected,
@@ -801,6 +807,8 @@ class TatrTableExtractor:
         source_revision: str = DEFAULT_SOURCE_REVISION,
         enable_ruled_table_proposals: bool = False,
         pipeline: object | None = None,
+        proposal_detector: object | None = None,
+        structure_fallback: object | None = None,
     ) -> None:
         if crop_padding < 0:
             raise ValueError("crop_padding must be non-negative")
@@ -827,6 +835,11 @@ class TatrTableExtractor:
         self.structure_revision = structure_revision
         self.source_revision = source_revision
         self.enable_ruled_table_proposals = enable_ruled_table_proposals
+        # A general layout detector proposes crops TATR's training distribution lacks
+        # (full-page financial layouts); the structure fallback replaces a TATR grid
+        # that came back empty or with invalid cell topology.
+        self.proposal_detector = proposal_detector
+        self.structure_fallback = structure_fallback
         self._pipeline = pipeline
         self._lock = threading.Lock()
 
@@ -835,6 +848,7 @@ class TatrTableExtractor:
         image_path: Path,
         tokens: list[dict[str, Any]],
         layout_boxes: Sequence[BoundingBox] = (),
+        word_boxes: Sequence[dict[str, Any]] = (),
     ) -> list[TablePrediction]:
         try:
             with Image.open(image_path) as source:
@@ -879,6 +893,20 @@ class TatrTableExtractor:
                 recognition_inputs.append(
                     _layout_recognition_input(image, tokens, box)
                 )
+            detector_boxes: list[BoundingBox] = []
+            if self.proposal_detector is not None:
+                try:
+                    detector_boxes = self.proposal_detector.detect(image)
+                except ReaderError:
+                    detector_boxes = []
+                for box in _novel_layout_boxes(
+                    detector_boxes, recognition_inputs, image.size
+                ):
+                    recognition_inputs.append(
+                        _layout_recognition_input(
+                            image, tokens, box, source=self.proposal_detector.name
+                        )
+                    )
             predictions = []
             for obj, crop, proposal, proposal_is_detection in recognition_inputs:
                 try:
@@ -890,20 +918,31 @@ class TatrTableExtractor:
                     )
                 except Exception as error:
                     raise ReaderError("table_structure_failed", str(error)) from error
+                fallback_padding = 0 if proposal_is_detection else self.crop_padding
                 cells = self._recognized_cells(
                     recognized,
                     obj,
                     image.size,
                     crop["image"].size,
-                    crop_padding=0 if proposal_is_detection else self.crop_padding,
+                    crop_padding=fallback_padding,
                 )
+                structure_fallback_trigger = None
+                fallback_attempted = False
+                if self.structure_fallback is not None and not cells:
+                    fallback_attempted = True
+                    fallback = self._fallback_cells(
+                        crop, obj, image.size, crop_padding=fallback_padding
+                    )
+                    if fallback:
+                        cells = fallback
+                        structure_fallback_trigger = "tatr structure returned no cells"
                 if proposal_is_detection and not cells:
                     continue
                 model = self.model_provenance()
                 confidence = _optional_confidence(obj.get("score"))
                 if obj.get("layout_proposal"):
                     model["proposal"] = {
-                        "source": LAYOUT_PROPOSAL_SOURCE,
+                        "source": obj.get("proposal_source", LAYOUT_PROPOSAL_SOURCE),
                         "detection_confidence_calibrated": False,
                         "used_for_detection": True,
                     }
@@ -920,6 +959,51 @@ class TatrTableExtractor:
                     model["proposal"] = proposal_metadata
                 parent_conflicts = _table_topology_conflicts(cells)
                 if (
+                    self.structure_fallback is not None
+                    and parent_conflicts
+                    and structure_fallback_trigger is None
+                ):
+                    fallback_attempted = True
+                    fallback = self._fallback_cells(
+                        crop, obj, image.size, crop_padding=fallback_padding
+                    )
+                    if fallback:
+                        cells = fallback
+                        structure_fallback_trigger = (
+                            f"tatr structure had {parent_conflicts} topology conflicts"
+                        )
+                        parent_conflicts = 0
+                if structure_fallback_trigger is not None:
+                    model["structure"] = {
+                        **self.structure_fallback.model_provenance(),
+                        "replaced": model["structure"],
+                        "fallback_reason": structure_fallback_trigger,
+                    }
+                if (
+                    (parent_conflicts or _near_page_trivial_grid(cells, obj, image))
+                    and proposal is None
+                    and detector_boxes
+                ):
+                    # A conflicted detection is often several stacked tables read as
+                    # one - and so is a near-page detection whose grid came back
+                    # trivially small (falcon token variance flips TATR between the
+                    # two across processes). The layout detector's boxes inside it
+                    # are the panels; each gets its own structure pass. Novelty
+                    # filtering skipped these very boxes because the dead detection
+                    # covered them.
+                    recovered = self._recover_detector_panels(
+                        pipeline,
+                        image,
+                        tokens,
+                        obj,
+                        parent_conflicts,
+                        detector_boxes,
+                        word_boxes,
+                    )
+                    if recovered:
+                        predictions.extend(recovered)
+                        continue
+                if (
                     self.enable_ruled_table_proposals
                     and proposal is None
                     and parent_conflicts
@@ -934,6 +1018,16 @@ class TatrTableExtractor:
                     if recovered:
                         predictions.extend(recovered)
                         continue
+                if not fallback_attempted:
+                    cells, model = self._arbitrate_structure(
+                        cells,
+                        model,
+                        crop,
+                        obj,
+                        image.size,
+                        fallback_padding,
+                        list(word_boxes) or tokens,
+                    )
                 predictions.append(
                     TablePrediction(
                         bounding_box=_bounded_box(obj["bbox"], image.size),
@@ -943,6 +1037,173 @@ class TatrTableExtractor:
                     )
                 )
         return predictions
+
+    def _arbitrate_structure(
+        self,
+        cells: list[TableCell],
+        model: dict[str, Any],
+        crop: dict[str, Any],
+        obj: dict[str, Any],
+        page_size: tuple[int, int],
+        crop_padding: int,
+        scoring_tokens: Sequence[dict[str, Any]],
+    ) -> tuple[list[TableCell], dict[str, Any]]:
+        """A valid but coarse TATR grid loses to a fallback grid its tokens fill better.
+
+        The academic-paper author block: TATR's grid is topologically valid, but its
+        merged cells run whole author columns together. Arbitration is gated to the
+        suspect grids because the fallback costs seconds per crop on CPU.
+        """
+        if self.structure_fallback is None:
+            return cells, model
+        table_box = _bounded_box(obj["bbox"], page_size)
+        table_tokens = [
+            token
+            for token in scoring_tokens
+            if _valid_box(token.get("bbox"))
+            and _centre_in_box(token["bbox"], table_box)
+        ]
+        if not _needs_structure_arbitration(cells, table_tokens):
+            return cells, model
+        challenger = self._fallback_cells(
+            crop, obj, page_size, crop_padding=crop_padding
+        )
+        # TATR wins ties: strict tuple comparison on (filled cells, covered tokens).
+        if not challenger or _grid_fill(challenger, table_tokens) <= _grid_fill(
+            cells, table_tokens
+        ):
+            return cells, model
+        model = {
+            **model,
+            "structure": {
+                **self.structure_fallback.model_provenance(),
+                "replaced": model["structure"],
+                "fallback_reason": "table tokens fill this grid better than tatr's",
+            },
+        }
+        return challenger, model
+
+    def _recover_detector_panels(
+        self,
+        pipeline: object,
+        image: Image.Image,
+        tokens: list[dict[str, Any]],
+        parent: dict[str, Any],
+        parent_conflicts: int,
+        detector_boxes: Sequence[BoundingBox],
+        word_boxes: Sequence[dict[str, Any]] = (),
+    ) -> list[TablePrediction]:
+        parent_box = _bounded_box(parent["bbox"], image.size)
+        contained = [
+            box
+            for box in detector_boxes
+            if _box_area(box) > 0
+            and _intersection_area(box, parent_box) / _box_area(box) >= 0.7
+        ]
+        # The detector can propose two near-identical boxes for one table; the
+        # larger one stands for both. Selection greedily favours the larger box,
+        # the surviving panels keep the detector's order.
+        kept: list[BoundingBox] = []
+        for box in sorted(contained, key=_box_area, reverse=True):
+            if any(
+                _intersection_area(box, other) / _box_area(box) >= 0.6
+                for other in kept
+            ):
+                continue
+            kept.append(box)
+        panels = [box for box in contained if box in kept]
+        if len(panels) < 2:
+            return []
+        # Word geometry scores the candidate grids; region-level tokens are far too
+        # coarse to tell a 4x1 band grid from the real one.
+        scoring_tokens = list(word_boxes) or tokens
+        recovered = []
+        for panel_index, panel in enumerate(panels, start=1):
+            detection = {
+                "label": parent["label"],
+                "score": None,
+                "bbox": [panel.left, panel.top, panel.right, panel.bottom],
+            }
+            crop = {
+                "image": image.crop((panel.left, panel.top, panel.right, panel.bottom)),
+                "tokens": _tokens_for_proposal(tokens, panel),
+            }
+            try:
+                recognized = pipeline.recognize(
+                    crop["image"],
+                    crop["tokens"],
+                    out_objects=True,
+                    out_cells=True,
+                )
+                tatr_cells = self._recognized_cells(
+                    recognized,
+                    detection,
+                    image.size,
+                    crop["image"].size,
+                    crop_padding=0,
+                )
+            except Exception:
+                tatr_cells = []
+            # Both structure models parse the panel; the grid the panel's own tokens
+            # fill best wins. TATR read the financial panel as a valid but useless
+            # 4x1 band grid, which token fill scores far below the real 17x5.
+            panel_tokens = [
+                token
+                for token in scoring_tokens
+                if _valid_box(token.get("bbox"))
+                and _centre_in_box(token["bbox"], panel)
+            ]
+            candidates: list[tuple[list[TableCell], dict[str, Any] | None]] = []
+            tatr_cells = _conflict_free_cells(tatr_cells, panel)
+            if tatr_cells:
+                candidates.append((tatr_cells, None))
+            if self.structure_fallback is not None:
+                fallback = self._fallback_cells(
+                    crop, detection, image.size, crop_padding=0
+                )
+                if fallback:
+                    candidates.append(
+                        (fallback, self.structure_fallback.model_provenance())
+                    )
+            if not candidates:
+                # An invalid panel is dropped, not the whole decomposition: the
+                # panels are independent tables, and the reader's own table region
+                # still carries this panel's content as evidence.
+                continue
+            cells, structure_note = max(
+                candidates,
+                key=lambda item: _grid_fill(item[0], panel_tokens),
+            )
+            model = self.model_provenance()
+            if structure_note is not None:
+                model["structure"] = {
+                    **structure_note,
+                    "replaced": model["structure"],
+                    "fallback_reason": (
+                        "panel tokens fill this grid better than tatr's"
+                    ),
+                }
+            model["proposal"] = {
+                "source": f"{self.proposal_detector.name}_panel_decomposition",
+                "detection_confidence_calibrated": False,
+                "used_for_detection": True,
+                "parent_bbox": asdict(parent_box),
+                "parent_detection_confidence": _optional_confidence(
+                    parent.get("score")
+                ),
+                "parent_topology_conflicts": parent_conflicts,
+                "panel_index": panel_index,
+                "panel_count": len(panels),
+            }
+            recovered.append(
+                TablePrediction(
+                    bounding_box=panel,
+                    cells=tuple(cells),
+                    confidence=None,
+                    model=model,
+                )
+            )
+        return recovered
 
     def _recover_horizontal_panels(
         self,
@@ -1076,6 +1337,74 @@ class TatrTableExtractor:
                 **({"row_alignment": row_alignment} if row_alignment else {}),
             },
         )
+
+    def _fallback_cells(
+        self,
+        crop: dict[str, Any],
+        obj: dict[str, Any],
+        page_size: tuple[int, int],
+        *,
+        crop_padding: int,
+    ) -> list[TableCell]:
+        """Structure from the fallback model on the same crop, tokens slotted by us.
+
+        The fallback predicts geometry only; its own token matcher is never used
+        (docling-ibm-models issue 188: it fabricates cell text). A crop token belongs
+        to the cell containing its centre, the same containment rule the official
+        TATR postprocess applies, and a token inside no cell is left for the stage's
+        word-evidence recovery rather than snapped to a nearest column.
+        """
+        try:
+            predicted = self.structure_fallback.predict(crop["image"])
+        except ReaderError:
+            return []
+        rotated = obj["label"] == "table rotated"
+        cells = []
+        for cell in predicted:
+            box = cell.bounding_box
+            spans = [
+                token
+                for token in crop["tokens"]
+                if _valid_box(token.get("bbox"))
+                and _centre_in_box(token["bbox"], box)
+                and str(token.get("text", "")).strip()
+            ]
+            try:
+                translated = _translate_cell_box(
+                    [box.left, box.top, box.right, box.bottom],
+                    obj["bbox"],
+                    crop_padding,
+                    rotated,
+                    page_size,
+                    crop["image"].size,
+                )
+                span_boxes = tuple(
+                    _translate_cell_box(
+                        token["bbox"],
+                        obj["bbox"],
+                        crop_padding,
+                        rotated,
+                        page_size,
+                        crop["image"].size,
+                    )
+                    for token in spans
+                )
+            except ReaderError:
+                continue
+            cells.append(
+                TableCell(
+                    bounding_box=translated,
+                    row_nums=tuple(cell.row_nums),
+                    column_nums=tuple(cell.column_nums),
+                    column_header=cell.column_header,
+                    projected_row_header=cell.projected_row_header,
+                    span_boxes=span_boxes,
+                    span_texts=tuple(
+                        str(token.get("text", "")).strip() for token in spans
+                    ),
+                )
+            )
+        return _conflict_free_cells(cells, _bounded_box(obj["bbox"], page_size))
 
     def model_provenance(self) -> dict[str, Any]:
         return {
@@ -1931,6 +2260,7 @@ def _layout_recognition_input(
     image: Image.Image,
     tokens: list[dict[str, Any]],
     box: BoundingBox,
+    source: str = LAYOUT_PROPOSAL_SOURCE,
 ) -> tuple[dict[str, Any], dict[str, Any], None, bool]:
     bounded = _bounded_box([box.left, box.top, box.right, box.bottom], image.size)
     return (
@@ -1939,6 +2269,7 @@ def _layout_recognition_input(
             "score": None,
             "bbox": [bounded.left, bounded.top, bounded.right, bounded.bottom],
             "layout_proposal": True,
+            "proposal_source": source,
         },
         {
             "image": image.crop(
@@ -2191,6 +2522,79 @@ def _rejected_table_candidate(
         resolution="unreadable",
         structure=structure,
     )
+
+
+def _reject_subgrid_duplicates(
+    accepted: list[tuple[int, TablePrediction]],
+    regions: list[TextRegion],
+    page_number: int,
+    provider: str,
+) -> tuple[list[TablePrediction], list[TextRegion]]:
+    """Reject an accepted grid nested inside another that resolves more word cells.
+
+    TATR can return both a table and a column-truncated sub-grid of it; each passes
+    acceptance on its own, so the sub-grid's rows would render twice.
+    """
+    if len(accepted) < 2:
+        return [prediction for _, prediction in accepted], []
+    tokens = _word_tokens(regions)
+    fills = [_grid_fill(prediction.cells, tokens)[0] for _, prediction in accepted]
+    kept: list[TablePrediction] = []
+    rejections: list[TextRegion] = []
+    for position, (table_index, prediction) in enumerate(accepted):
+        area = _box_area(prediction.bounding_box)
+        parent = next(
+            (
+                other_position
+                for other_position, (_, other) in enumerate(accepted)
+                if other_position != position
+                and area > 0
+                and _intersection_area(prediction.bounding_box, other.bounding_box)
+                / area
+                >= SUBGRID_CONTAINMENT
+                and fills[other_position] > fills[position]
+            ),
+            None,
+        )
+        if parent is None:
+            kept.append(prediction)
+            continue
+        primary = _assign_regions([prediction], regions)[0] + _word_evidence_regions(
+            regions, prediction.cells
+        )
+        row_count, column_count = _table_shape(prediction.cells)
+        rejections.append(
+            TextRegion(
+                id=f"p{page_number}-tables-candidate-{table_index}",
+                kind="table_candidate",
+                text="",
+                confidence=prediction.confidence,
+                bounding_box=prediction.bounding_box,
+                reading_order=min(
+                    (region.reading_order for region in primary),
+                    default=table_index,
+                ),
+                provider=provider,
+                text_provenance={
+                    "method": "table_subgrid_rejection",
+                    "source_region_ids": _source_ids(primary),
+                },
+                resolution="unreadable",
+                structure={
+                    "role": "table_candidate",
+                    "status": "rejected",
+                    "reason": "subgrid_of_accepted_table",
+                    "row_count": row_count,
+                    "column_count": column_count,
+                    "filled_cells": fills[position],
+                    "superset_bbox": asdict(accepted[parent][1].bounding_box),
+                    "superset_filled_cells": fills[parent],
+                    "model": copy.deepcopy(prediction.model),
+                    "detection_confidence": prediction.confidence,
+                },
+            )
+        )
+    return kept, rejections
 
 
 def _resolve_cell_collisions(
@@ -3524,6 +3928,29 @@ def sauvola_view(
     return Image.fromarray(binary)
 
 
+def _word_tokens(regions: Sequence[TextRegion]) -> list[dict[str, Any]]:
+    """Every word box the fused reader recognised, page coordinates, deduplicated."""
+    words = []
+    seen: set[tuple[int, int, int, int, str]] = set()
+    for region in regions:
+        for entry in (region.structure or {}).get("word_evidence") or []:
+            if not isinstance(entry, dict):
+                continue
+            box = entry.get("bbox")
+            text = str(entry.get("text") or "").strip()
+            if not isinstance(box, dict) or not text:
+                continue
+            try:
+                key = (box["left"], box["top"], box["right"], box["bottom"], text)
+            except (KeyError, TypeError):
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            words.append({"bbox": list(key[:4]), "text": text})
+    return words
+
+
 def _to_tokens(regions: Sequence[TextRegion]) -> list[dict[str, Any]]:
     return [
         {
@@ -3644,6 +4071,95 @@ def _indexes(value: object) -> tuple[int, ...]:
     ):
         return ()
     return tuple(sorted(set(value)))
+
+
+def _near_page_trivial_grid(
+    cells: Sequence[TableCell], obj: dict[str, Any], image: Image.Image
+) -> bool:
+    """A detection covering most of the page whose grid is too small to be real.
+
+    Mirrors the stage's near_page_low_complexity rejection so the decomposition
+    runs BEFORE that rejection throws the table away.
+    """
+    try:
+        box = _bounded_box(obj["bbox"], image.size)
+    except ReaderError:
+        return False
+    page_area = image.size[0] * image.size[1]
+    if page_area <= 0 or _box_area(box) / page_area < NEAR_PAGE_TABLE_AREA:
+        return False
+    rows, columns = _table_shape(cells)
+    return (
+        rows < MIN_NEAR_PAGE_ROWS
+        or columns < MIN_NEAR_PAGE_COLUMNS
+        or rows * columns < MIN_NEAR_PAGE_CELLS
+        or len(cells) < MIN_NEAR_PAGE_CELLS
+    )
+
+
+def _conflict_free_cells(
+    cells: Sequence[TableCell], box: BoundingBox
+) -> list[TableCell]:
+    """A candidate grid with its recoverable collisions dropped, or nothing.
+
+    The same tolerance the stage applies to accepted predictions: a few colliding
+    cells in a large grid are set aside; a grid that stays conflicted after that is
+    unusable as a candidate.
+    """
+    if not cells:
+        return []
+    resolved, _ = _resolve_cell_collisions(
+        TablePrediction(
+            bounding_box=box, cells=tuple(cells), confidence=None, model={}
+        )
+    )
+    if _table_topology_conflicts(resolved.cells):
+        return []
+    return list(resolved.cells)
+
+
+def _needs_structure_arbitration(
+    cells: Sequence[TableCell], tokens: Sequence[dict[str, Any]]
+) -> bool:
+    """Whether an accepted TATR grid looks too coarse for the words printed on it.
+
+    Fires on a merged cell spanning three or more rows or columns, or on tokens
+    crowding into fewer than a fifth as many token-bearing cells.
+    """
+    if not cells or not tokens:
+        return False
+    if any(
+        len(cell.row_nums) >= 3 or len(cell.column_nums) >= 3 for cell in cells
+    ):
+        return True
+    filled, _ = _grid_fill(cells, tokens)
+    return filled * 5 < len(tokens)
+
+
+def _grid_fill(
+    cells: Sequence[TableCell], tokens: Sequence[dict[str, Any]]
+) -> tuple[int, int]:
+    """How well a candidate grid resolves the tokens printed on it.
+
+    Distinct token-bearing cells first (a coarse band grid puts every token into a
+    handful of giant cells and scores low), covered tokens second as the tiebreak.
+    """
+    filled: set[int] = set()
+    covered = 0
+    for token in tokens:
+        for index, cell in enumerate(cells):
+            if _centre_in_box(token["bbox"], cell.bounding_box):
+                filled.add(index)
+                covered += 1
+                break
+    return len(filled), covered
+
+
+def _centre_in_box(value: object, box: BoundingBox) -> bool:
+    left, top, right, bottom = _float_box(value)
+    centre_x = (left + right) / 2
+    centre_y = (top + bottom) / 2
+    return box.left <= centre_x <= box.right and box.top <= centre_y <= box.bottom
 
 
 def _valid_box(value: object) -> bool:

@@ -369,3 +369,56 @@ def test_unresolved_table_cells_render_blank_without_mutating_evidence() -> None
     assert "conflicting" not in markdown.casefold()
     assert cells[1]["text"] == "Metforrnin"
     assert cells[1]["alternatives"] == [{"text": "Metformin"}]
+
+
+def test_markdown_keeps_a_mark_on_the_row_it_marks() -> None:
+    """A tick hoisted into its own bullet loses which option on the row was selected."""
+    label = {
+        "id": "opt-1",
+        "kind": "text",
+        "text": "Amendment",
+        "reading_order": 1,
+        "resolution": "resolved",
+        "bounding_box": {"left": 60, "top": 100, "right": 140, "bottom": 112},
+        "text_provenance": {"merge_level": "word"},
+    }
+    control = {
+        "id": "ctl-1",
+        "kind": "checkbox",
+        "text": "[x] Amendment",
+        "reading_order": 1,
+        "resolution": "resolved",
+        "bounding_box": {"left": 48, "top": 101, "right": 58, "bottom": 111},
+        "structure": {"role": "control", "label_evidence_ids": ["opt-1"]},
+    }
+    following = {
+        "id": "opt-2",
+        "kind": "text",
+        "text": "Rate Sheet",
+        "reading_order": 2,
+        "resolution": "resolved",
+        "bounding_box": {"left": 150, "top": 100, "right": 230, "bottom": 112},
+        "text_provenance": {"merge_level": "word"},
+    }
+
+    markdown = render_page_markdown([control, label, following], ["opt-1", "opt-2"])
+
+    assert markdown == "[x] Amendment Rate Sheet"
+    # The label is written once: the mark contributes only its glyph to the row.
+    assert markdown.count("Amendment") == 1
+    assert "- [x]" not in markdown
+
+
+def test_markdown_still_bullets_a_mark_with_no_row_to_join() -> None:
+    """Nothing to attach to means the label has to travel with the mark."""
+    control = {
+        "id": "ctl-1",
+        "kind": "checkbox",
+        "text": "[x] Bed Bath",
+        "reading_order": 1,
+        "resolution": "resolved",
+        "bounding_box": {"left": 48, "top": 101, "right": 58, "bottom": 111},
+        "structure": {"role": "control", "label_evidence_ids": ["missing"]},
+    }
+
+    assert render_page_markdown([control], []) == "- [x] Bed Bath"
