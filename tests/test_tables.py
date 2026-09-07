@@ -92,6 +92,272 @@ def test_table_stage_builds_markdown_and_preserves_nested_evidence(
     assert regions[2].structure is None
 
 
+def _table_blob(
+    grid_shape: tuple[int, int],
+    grid_texts: list[str],
+    word_evidence: list[dict[str, object]],
+    *,
+    text: str = "",
+) -> TextRegion:
+    """A layout reader's table: full text and grid, no per-cell geometry."""
+    rows, columns = grid_shape
+    return TextRegion(
+        id="falcon-table",
+        kind="table",
+        text=text or "\n".join(
+            "\t".join(grid_texts[row * columns : (row + 1) * columns])
+            for row in range(rows)
+        ),
+        confidence=0.93,
+        bounding_box=BoundingBox(5, 5, 95, 45),
+        reading_order=1,
+        provider="falcon-perception",
+        text_provenance={
+            "method": "falcon_perception_layout_ocr",
+            "geometry_provider": "nemotron-ocr-v2",
+        },
+        structure={
+            "role": "table",
+            "row_count": rows,
+            "column_count": columns,
+            "cells": [
+                {
+                    "id": f"falcon-cell-{index + 1}",
+                    "row_nums": [index // columns],
+                    "column_nums": [index % columns],
+                    "text": value,
+                    "resolution": "resolved",
+                    "column_header": False,
+                }
+                for index, value in enumerate(grid_texts)
+            ],
+            "word_evidence": word_evidence,
+        },
+    )
+
+
+def _word_entry(
+    text: str, box: tuple[int, int, int, int], confidence: float, present: bool = True
+) -> dict[str, object]:
+    left, top, right, bottom = box
+    return {
+        "text": text,
+        "bbox": {"left": left, "top": top, "right": right, "bottom": bottom},
+        "confidence": confidence,
+        "in_region_text": present,
+    }
+
+
+class TwoByTwoExtractor:
+    name = "fake-tables"
+
+    def extract(
+        self, image_path: Path, tokens: list[dict[str, object]]
+    ) -> list[TablePrediction]:
+        return [
+            TablePrediction(
+                BoundingBox(5, 5, 95, 45),
+                (
+                    TableCell(BoundingBox(5, 5, 50, 25), (0,), (0,), True),
+                    TableCell(BoundingBox(50, 5, 95, 25), (0,), (1,), True),
+                    TableCell(BoundingBox(5, 25, 50, 45), (1,), (0,)),
+                    TableCell(BoundingBox(50, 25, 95, 45), (1,), (1,)),
+                ),
+                0.99,
+                {"id": "fake", "origin": "test"},
+            )
+        ]
+
+
+def test_table_blob_words_fill_cells_and_matching_grid_lands_its_text(
+    tmp_path: Path,
+) -> None:
+    """clinical_table_result: TATR has the cell boxes with every cell blank, the layout
+    reader has the text with no cell geometry. The words carry both boxes and real
+    recognition confidence, so each boxed cell gains text, confidence and evidence."""
+    image_path = _image(tmp_path)
+    blob = _table_blob(
+        (2, 2),
+        ["Metric", "Value", "Deposits", "$187"],
+        [
+            _word_entry("Metric", (10, 8, 30, 20), 0.98),
+            _word_entry("Value", (55, 8, 75, 20), 0.96),
+            _word_entry("Deposits", (10, 28, 40, 42), 0.90),
+            # The word reader misread the currency glyph; the grid text should win
+            # while the recognition confidence stays the word reader's.
+            _word_entry("S187", (55, 28, 70, 42), 0.88),
+        ],
+    )
+    stage = TatrTableStage(TwoByTwoExtractor())
+
+    output = stage.apply(image_path, 1, [blob])
+
+    table = next(
+        region for region in output if region.provider == "fake-tables"
+    )
+    cells = table.structure["cells"]
+    assert [cell["text"] for cell in cells] == ["Metric", "Value", "Deposits", "$187"]
+    assert [cell["confidence"] for cell in cells] == [0.98, 0.96, 0.90, 0.88]
+    # Three cells agree between the readers; the fourth is the grid's better text.
+    assert [cell["decision"] for cell in cells][:3] == ["primary"] * 3
+    assert cells[3]["decision"] == "text_grid_cell"
+    assert cells[3]["source"] == "falcon-perception"
+    assert [
+        alternative["text"] for alternative in cells[3]["alternatives"]
+    ] == ["S187"]
+    assert table.structure["text_grid"] == {
+        "region_id": "falcon-table",
+        "row_count": 2,
+        "column_count": 2,
+        "agreement": True,
+    }
+    # The blob's text now lives in the table's cells: one table, not two.
+    assert blob.structure["role"] == "table_source"
+    assert blob.structure["parent_id"] == table.id
+    assert "falcon-table" in table.text_provenance["source_region_ids"]
+
+
+def test_grid_shape_disagreement_keeps_both_tables_and_flags_them(
+    tmp_path: Path,
+) -> None:
+    image_path = _image(tmp_path)
+    blob = _table_blob(
+        (3, 2),
+        ["a", "b", "c", "d", "e", "f"],
+        [
+            _word_entry("Metric", (10, 8, 30, 20), 0.98),
+            _word_entry("Deposits", (10, 28, 40, 42), 0.90),
+        ],
+        text="a\tb\nc\td\ne\tf",
+    )
+    stage = TatrTableStage(TwoByTwoExtractor())
+
+    output = stage.apply(image_path, 1, [blob])
+
+    table = next(
+        region for region in output if region.provider == "fake-tables"
+    )
+    cells = table.structure["cells"]
+    # The words still fill the boxed cells; no grid text is force-fitted.
+    assert cells[0]["text"] == "Metric"
+    assert cells[0]["confidence"] == 0.98
+    assert cells[0]["source"] == "nemotron-ocr-v2"
+    assert cells[2]["text"] == "Deposits"
+    assert table.structure["text_grid"]["agreement"] is False
+    # Both regions stay: the blob is not consumed, and both sides carry the flag.
+    assert blob.structure["role"] == "table"
+    assert blob.structure["grid_disagreement"] == {
+        "table_id": table.id,
+        "table_shape": [2, 2],
+        "own_shape": [3, 2],
+    }
+
+
+class SubGridExtractor(TwoByTwoExtractor):
+    """The clinical_table_result shape disagreement: TATR accepts both the full
+    grid and a column-truncated sub-grid over the same table."""
+
+    def extract(
+        self, image_path: Path, tokens: list[dict[str, object]]
+    ) -> list[TablePrediction]:
+        full = super().extract(image_path, tokens)[0]
+        sub = TablePrediction(
+            BoundingBox(50, 5, 95, 45),
+            (
+                TableCell(BoundingBox(50, 5, 95, 25), (0,), (0,), True),
+                TableCell(BoundingBox(50, 25, 95, 45), (1,), (0,)),
+            ),
+            0.97,
+            {"id": "fake", "origin": "test"},
+        )
+        return [full, sub]
+
+
+def test_subgrid_of_accepted_table_is_rejected_not_rendered_twice(
+    tmp_path: Path,
+) -> None:
+    image_path = _image(tmp_path)
+    blob = _table_blob(
+        (2, 2),
+        ["Metric", "Value", "Deposits", "$187"],
+        [
+            _word_entry("Metric", (10, 8, 30, 20), 0.98),
+            _word_entry("Value", (55, 8, 75, 20), 0.96),
+            _word_entry("Deposits", (10, 28, 40, 42), 0.90),
+            _word_entry("$187", (55, 28, 70, 42), 0.88),
+        ],
+    )
+    stage = TatrTableStage(SubGridExtractor())
+
+    output = stage.apply(image_path, 1, [blob])
+
+    tables = [region for region in output if region.kind == "table" and region.provider == "fake-tables"]
+    assert len(tables) == 1
+    assert tables[0].bounding_box == BoundingBox(5, 5, 95, 45)
+    candidate = next(
+        region for region in output if region.kind == "table_candidate"
+    )
+    assert candidate.bounding_box == BoundingBox(50, 5, 95, 45)
+    assert candidate.text_provenance["method"] == "table_subgrid_rejection"
+    assert candidate.structure["reason"] == "subgrid_of_accepted_table"
+    assert candidate.structure["filled_cells"] == 2
+    assert candidate.structure["superset_filled_cells"] == 4
+
+
+def test_side_by_side_tables_are_not_treated_as_subgrids(tmp_path: Path) -> None:
+    image_path = _image(tmp_path)
+    regions = [
+        _region("left", "Metric", 1, (10, 10, 40, 30), 0.98),
+        _region("right", "Value", 2, (65, 10, 95, 30), 0.96),
+    ]
+    stage = TatrTableStage(TwoTableExtractor())
+
+    output = stage.apply(image_path, 1, regions)
+
+    assert sum(region.kind == "table" for region in output) == 2
+    assert not any(region.kind == "table_candidate" for region in output)
+
+
+def test_words_the_region_lost_are_not_expanded_twice(tmp_path: Path) -> None:
+    """A word absent from the blob's text is already a repair region of its own; the
+    cell fill must take it from that region, not once from each path."""
+    image_path = _image(tmp_path)
+    blob = _table_blob(
+        (2, 2),
+        ["Metric", "Value", "Deposits", ""],
+        [
+            _word_entry("Metric", (10, 8, 30, 20), 0.98),
+            _word_entry("Value", (55, 8, 75, 20), 0.96),
+            _word_entry("Deposits", (10, 28, 40, 42), 0.90),
+            _word_entry("2,641", (55, 28, 70, 42), 0.88, present=False),
+        ],
+    )
+    repair_child = TextRegion(
+        id="falcon-table-underread-1",
+        kind="text",
+        text="2,641",
+        confidence=0.88,
+        bounding_box=BoundingBox(55, 28, 70, 42),
+        reading_order=1,
+        provider="falcon-on-nemotron",
+        text_provenance={
+            "method": "region_underread_repair",
+            "parent_region_id": "falcon-table",
+        },
+    )
+    stage = TatrTableStage(TwoByTwoExtractor())
+
+    output = stage.apply(image_path, 1, [blob, repair_child])
+
+    table = next(
+        region for region in output if region.provider == "fake-tables"
+    )
+    cell = table.structure["cells"][3]
+    assert cell["text"] == "2,641"
+    assert cell["confidence"] == 0.88
+    assert cell["evidence_ids"] == ["falcon-table-underread-1"]
+
+
 def test_agreed_uncalibrated_challengers_do_not_replace_primary(
     tmp_path: Path,
 ) -> None:
@@ -901,6 +1167,46 @@ def test_tatr_adapter_translates_crop_cells_to_page_coordinates(
     assert predictions[0].model["origin"] == "Microsoft"
     assert predictions[0].model["license"] == "MIT"
     assert pipeline.detect_tokens[0]["bbox"] == [60, 30, 80, 40]
+
+
+def test_layout_table_region_becomes_a_crop_when_detection_misses_it(
+    tmp_path: Path,
+) -> None:
+    """The JPMorgan financial page: TATR detection returns nothing over the table, but
+    the page reader's layout model saw it. Its box becomes a structure crop."""
+    image_path = _image(tmp_path, (600, 400))
+    pipeline = FakeTatrPipeline()
+    extractor = TatrTableExtractor(
+        tmp_path,
+        tmp_path / "detection.pth",
+        tmp_path / "structure.pth",
+        device="cpu",
+        pipeline=pipeline,
+    )
+
+    predictions = extractor.extract(
+        image_path,
+        [],
+        layout_boxes=[
+            # Substantially covered by the [50,20,150,100] detection: skipped.
+            BoundingBox(60, 25, 140, 95),
+            # Far from any detection: recognised from its own crop.
+            BoundingBox(300, 200, 500, 300),
+        ],
+    )
+
+    assert len(predictions) == 2
+    detected, proposed = predictions
+    assert detected.model.get("proposal") is None
+    assert proposed.bounding_box == BoundingBox(300, 200, 500, 300)
+    assert proposed.confidence is None
+    assert proposed.model["proposal"] == {
+        "source": "reader_layout_region",
+        "detection_confidence_calibrated": False,
+        "used_for_detection": True,
+    }
+    # Cells translate from crop coordinates back to the layout box's page position.
+    assert proposed.cells[0].bounding_box == BoundingBox(310, 210, 355, 245)
 
 
 def test_tatr_adapter_keeps_blank_section_gap_in_one_clinical_form(
@@ -2565,3 +2871,444 @@ def test_a_few_colliding_cells_in_a_large_grid_still_produce_a_table(
     assert dropped[0]["reason"] == "cell_position_collision"
     assert table.structure["row_count"] == 6
     assert table.structure["column_count"] == 6
+
+
+class ConflictedTatrPipeline(FakeTatrPipeline):
+    """TATR structure whose cells collide, the financial_table failure mode."""
+
+    def detect(self, image: Image.Image, **options: object) -> dict[str, object]:
+        # The official pipeline hands each crop its tokens in crop coordinates.
+        value = super().detect(image, **options)
+        for crop in value["crops"]:
+            crop["tokens"] = [
+                {
+                    **token,
+                    "bbox": [
+                        token["bbox"][0] - 45,
+                        token["bbox"][1] - 15,
+                        token["bbox"][2] - 45,
+                        token["bbox"][3] - 15,
+                    ],
+                }
+                for token in crop["tokens"]
+            ]
+        return value
+
+    def recognize(self, image: Image.Image, *args: object, **kwargs: object) -> dict:
+        return {
+            "cells": [
+                [
+                    {"bbox": [10, 10, 55, 45], "row_nums": [0], "column_nums": [0]},
+                    {"bbox": [12, 12, 50, 40], "row_nums": [0], "column_nums": [0]},
+                ]
+            ]
+        }
+
+
+class FakeHeron:
+    name = "heron-101"
+
+    def __init__(self, boxes: list[BoundingBox]) -> None:
+        self.boxes = boxes
+
+    def detect(self, image: Image.Image) -> list[BoundingBox]:
+        return list(self.boxes)
+
+
+class FakeTableFormer:
+    name = "docling-tableformer"
+
+    def __init__(self, cells: tuple[TableCell, ...]) -> None:
+        self.cells = cells
+        self.crops: list[Image.Image] = []
+
+    def predict(self, crop: Image.Image) -> tuple[TableCell, ...]:
+        self.crops.append(crop)
+        return self.cells
+
+    def model_provenance(self) -> dict[str, object]:
+        return {"id": "ds4sd/docling-models", "code_license": "MIT"}
+
+
+def test_heron_proposal_becomes_a_crop_when_nothing_covers_it(tmp_path: Path) -> None:
+    """The layout-first pick: a general layout detector proposes the crop TATR's
+    detection distribution misses, through the same channel as reader layout boxes."""
+    image_path = _image(tmp_path, (600, 400))
+    extractor = TatrTableExtractor(
+        tmp_path,
+        tmp_path / "detection.pth",
+        tmp_path / "structure.pth",
+        device="cpu",
+        pipeline=FakeTatrPipeline(),
+        proposal_detector=FakeHeron(
+            [
+                # Covered by the [50,20,150,100] TATR detection: skipped.
+                BoundingBox(55, 25, 145, 95),
+                # Novel: becomes its own structure crop.
+                BoundingBox(300, 200, 500, 300),
+            ]
+        ),
+    )
+
+    predictions = extractor.extract(image_path, [])
+
+    assert len(predictions) == 2
+    proposed = predictions[1]
+    assert proposed.bounding_box == BoundingBox(300, 200, 500, 300)
+    assert proposed.model["proposal"]["source"] == "heron-101"
+    assert proposed.model["proposal"]["used_for_detection"] is True
+
+
+def test_conflicted_tatr_structure_is_replaced_by_the_fallback_model(
+    tmp_path: Path,
+) -> None:
+    """financial_table: TATR detection fires but its structure has invalid cell
+    topology. The fallback model's grid replaces it, with tokens slotted by us."""
+    image_path = _image(tmp_path, (200, 120))
+    fallback_cells = (
+        TableCell(BoundingBox(10, 10, 55, 45), (0,), (0,), True, False),
+        TableCell(BoundingBox(55, 10, 110, 45), (0,), (1,), True, False),
+    )
+    fallback = FakeTableFormer(fallback_cells)
+    extractor = TatrTableExtractor(
+        tmp_path,
+        tmp_path / "detection.pth",
+        tmp_path / "structure.pth",
+        device="cpu",
+        pipeline=ConflictedTatrPipeline(),
+        structure_fallback=fallback,
+    )
+
+    predictions = extractor.extract(
+        image_path,
+        [
+            {
+                "bbox": [60, 30, 80, 40],
+                "text": "Deposits",
+                "span_num": 0,
+                "line_num": 0,
+                "block_num": 0,
+            }
+        ],
+    )
+
+    assert len(fallback.crops) == 1
+    assert len(predictions) == 1
+    prediction = predictions[0]
+    # Crop coordinates translate to the page exactly as TATR cells do.
+    assert prediction.cells[0].bounding_box == BoundingBox(55, 25, 100, 60)
+    assert prediction.cells[1].bounding_box == BoundingBox(100, 25, 155, 60)
+    # The page token at (60,30)-(80,40) lands in the first fallback cell.
+    assert prediction.cells[0].span_texts == ("Deposits",)
+    assert prediction.cells[1].span_texts == ()
+    structure = prediction.model["structure"]
+    assert structure["id"] == "ds4sd/docling-models"
+    assert "topology conflicts" in structure["fallback_reason"]
+    assert structure["replaced"]["id"].startswith("microsoft/table-transformer")
+
+
+def test_a_fallback_grid_with_conflicts_of_its_own_is_not_adopted(
+    tmp_path: Path,
+) -> None:
+    image_path = _image(tmp_path, (200, 120))
+    colliding = (
+        TableCell(BoundingBox(10, 10, 55, 45), (0,), (0,), True, False),
+        TableCell(BoundingBox(12, 12, 50, 40), (0,), (0,), True, False),
+    )
+    extractor = TatrTableExtractor(
+        tmp_path,
+        tmp_path / "detection.pth",
+        tmp_path / "structure.pth",
+        device="cpu",
+        pipeline=ConflictedTatrPipeline(),
+        structure_fallback=FakeTableFormer(colliding),
+    )
+
+    predictions = extractor.extract(image_path, [])
+
+    # The conflicted TATR grid stays, for the stage's rejection flow to diagnose.
+    assert len(predictions) == 1
+    assert "fallback_reason" not in predictions[0].model["structure"]
+
+
+def test_a_dead_detection_is_decomposed_into_the_detector_panels(
+    tmp_path: Path,
+) -> None:
+    """financial_table end state: TATR detection covers the whole page and its
+    structure is invalid, TableFormer cannot parse the giant crop either, but the
+    layout detector saw the individual stacked tables. Those panels, previously
+    suppressed as non-novel, become their own structure passes."""
+    image_path = _image(tmp_path, (200, 120))
+    fallback_cells = (
+        TableCell(BoundingBox(5, 5, 30, 20), (0,), (0,), True, False),
+        TableCell(BoundingBox(30, 5, 60, 20), (0,), (1,), True, False),
+    )
+
+    class PanelOnlyTableFormer(FakeTableFormer):
+        def predict(self, crop: Image.Image) -> tuple[TableCell, ...]:
+            self.crops.append(crop)
+            # The giant detection crop stays unparseable; panels parse.
+            if crop.size[0] > 80:
+                return (
+                    TableCell(BoundingBox(5, 5, 30, 20), (0,), (0,), True, False),
+                    TableCell(BoundingBox(6, 6, 28, 18), (0,), (0,), True, False),
+                )
+            return fallback_cells
+
+    fallback = PanelOnlyTableFormer(fallback_cells)
+    extractor = TatrTableExtractor(
+        tmp_path,
+        tmp_path / "detection.pth",
+        tmp_path / "structure.pth",
+        device="cpu",
+        pipeline=ConflictedTatrPipeline(),
+        proposal_detector=FakeHeron(
+            [BoundingBox(55, 25, 120, 55), BoundingBox(55, 60, 120, 95)]
+        ),
+        structure_fallback=fallback,
+    )
+
+    predictions = extractor.extract(image_path, [])
+
+    assert len(predictions) == 2
+    for panel_index, prediction in enumerate(predictions, start=1):
+        proposal = prediction.model["proposal"]
+        assert proposal["source"] == "heron-101_panel_decomposition"
+        assert proposal["panel_index"] == panel_index
+        assert proposal["panel_count"] == 2
+        assert prediction.model["structure"]["id"] == "ds4sd/docling-models"
+    assert predictions[0].bounding_box == BoundingBox(55, 25, 120, 55)
+    assert predictions[1].bounding_box == BoundingBox(55, 60, 120, 95)
+
+
+def test_panel_arbitration_prefers_the_grid_the_tokens_fill(tmp_path: Path) -> None:
+    """TATR read the financial panel as a valid but useless single-column band grid;
+    the fallback's finer grid resolves the same tokens into distinct cells and wins."""
+    image_path = _image(tmp_path, (200, 120))
+
+    class BandGridTatrPipeline(ConflictedTatrPipeline):
+        calls = 0
+
+        def recognize(self, image: Image.Image, *args: object, **kwargs: object):
+            BandGridTatrPipeline.calls += 1
+            if BandGridTatrPipeline.calls == 1:
+                return super().recognize(image, *args, **kwargs)
+            # Panel pass: one giant column, valid topology, poor resolution.
+            return {
+                "cells": [
+                    [
+                        {"bbox": [0, 0, 65, 15], "row_nums": [0], "column_nums": [0]},
+                        {"bbox": [0, 15, 65, 30], "row_nums": [1], "column_nums": [0]},
+                    ]
+                ]
+            }
+
+    fine_cells = (
+        TableCell(BoundingBox(0, 0, 30, 15), (0,), (0,), True, False),
+        TableCell(BoundingBox(30, 0, 65, 15), (0,), (1,), True, False),
+        TableCell(BoundingBox(0, 15, 30, 30), (1,), (0,), False, False),
+        TableCell(BoundingBox(30, 15, 65, 30), (1,), (1,), False, False),
+    )
+    tokens = [
+        {"bbox": [56 + dx, 26 + dy, 64 + dx, 34 + dy], "text": text,
+         "span_num": 0, "line_num": 0, "block_num": 0}
+        for (dx, dy, text) in [(0, 0, "a"), (35, 0, "b"), (0, 16, "c"), (35, 16, "d")]
+    ]
+
+    extractor = TatrTableExtractor(
+        tmp_path,
+        tmp_path / "detection.pth",
+        tmp_path / "structure.pth",
+        device="cpu",
+        pipeline=BandGridTatrPipeline(),
+        proposal_detector=FakeHeron(
+            [BoundingBox(55, 25, 120, 55), BoundingBox(55, 60, 120, 95)]
+        ),
+        structure_fallback=FakeTableFormer(fine_cells),
+    )
+
+    predictions = extractor.extract(image_path, tokens)
+
+    assert predictions, "panel decomposition produced nothing"
+    chosen = predictions[0]
+    assert chosen.model["structure"]["id"] == "ds4sd/docling-models"
+    assert "fill" in chosen.model["structure"]["fallback_reason"]
+
+
+class MergedGridTatrPipeline(FakeTatrPipeline):
+    """Valid TATR grid whose top row is one cell merged across three columns,
+    the academic_paper author-block failure mode."""
+
+    def recognize(self, image: Image.Image, *args: object, **kwargs: object) -> dict:
+        return {
+            "cells": [
+                [
+                    {"bbox": [5, 5, 105, 45], "row_nums": [0], "column_nums": [0, 1, 2]},
+                    {"bbox": [5, 45, 35, 85], "row_nums": [1], "column_nums": [0]},
+                    {"bbox": [40, 45, 70, 85], "row_nums": [1], "column_nums": [1]},
+                    {"bbox": [75, 45, 105, 85], "row_nums": [1], "column_nums": [2]},
+                ]
+            ]
+        }
+
+
+def _merged_grid_tokens() -> list[dict[str, object]]:
+    # Two tokens per top-row column plus one per bottom-row cell, page coordinates.
+    positions = [
+        (55, 30), (55, 45), (90, 30), (90, 45), (125, 30), (125, 45),
+        (55, 70), (90, 70), (125, 70),
+    ]
+    return [
+        {"bbox": [x, y, x + 10, y + 10], "text": f"w{index}",
+         "span_num": 0, "line_num": 0, "block_num": 0}
+        for index, (x, y) in enumerate(positions)
+    ]
+
+
+def test_accepted_table_arbitration_prefers_the_grid_the_tokens_fill(
+    tmp_path: Path,
+) -> None:
+    """A valid TATR grid with a cell merged across three columns loses to the
+    fallback grid that resolves the same tokens into distinct cells."""
+    image_path = _image(tmp_path, (200, 120))
+    fine_cells = (
+        TableCell(BoundingBox(5, 5, 35, 45), (0,), (0,), True, False),
+        TableCell(BoundingBox(40, 5, 70, 45), (0,), (1,), True, False),
+        TableCell(BoundingBox(75, 5, 105, 45), (0,), (2,), True, False),
+        TableCell(BoundingBox(5, 45, 35, 85), (1,), (0,), False, False),
+        TableCell(BoundingBox(40, 45, 70, 85), (1,), (1,), False, False),
+        TableCell(BoundingBox(75, 45, 105, 85), (1,), (2,), False, False),
+    )
+    extractor = TatrTableExtractor(
+        tmp_path,
+        tmp_path / "detection.pth",
+        tmp_path / "structure.pth",
+        device="cpu",
+        pipeline=MergedGridTatrPipeline(),
+        structure_fallback=FakeTableFormer(fine_cells),
+    )
+
+    predictions = extractor.extract(image_path, _merged_grid_tokens())
+
+    assert len(predictions) == 1
+    chosen = predictions[0]
+    assert chosen.model["structure"]["id"] == "ds4sd/docling-models"
+    assert "fill" in chosen.model["structure"]["fallback_reason"]
+    assert len(chosen.cells) == 6
+
+
+def test_accepted_table_arbitration_keeps_tatr_on_a_tie(tmp_path: Path) -> None:
+    """The fallback grid matches TATR's fill exactly; the incumbent keeps the table."""
+    image_path = _image(tmp_path, (200, 120))
+    same_cells = (
+        TableCell(BoundingBox(5, 5, 105, 45), (0,), (0, 1, 2), True, False),
+        TableCell(BoundingBox(5, 45, 35, 85), (1,), (0,), False, False),
+        TableCell(BoundingBox(40, 45, 70, 85), (1,), (1,), False, False),
+        TableCell(BoundingBox(75, 45, 105, 85), (1,), (2,), False, False),
+    )
+    fallback = FakeTableFormer(same_cells)
+    extractor = TatrTableExtractor(
+        tmp_path,
+        tmp_path / "detection.pth",
+        tmp_path / "structure.pth",
+        device="cpu",
+        pipeline=MergedGridTatrPipeline(),
+        structure_fallback=fallback,
+    )
+
+    predictions = extractor.extract(image_path, _merged_grid_tokens())
+
+    assert len(predictions) == 1
+    assert fallback.crops, "merged grid should have triggered arbitration"
+    structure = predictions[0].model["structure"]
+    assert structure["id"] == "microsoft/table-transformer-structure-recognition-v1.1-all"
+    assert "replaced" not in structure
+
+
+def test_accepted_table_arbitration_skips_well_filled_grids(tmp_path: Path) -> None:
+    """A grid without big merged cells whose tokens spread across cells never pays
+    the fallback's latency."""
+    image_path = _image(tmp_path, (200, 120))
+    fallback = FakeTableFormer(())
+    extractor = TatrTableExtractor(
+        tmp_path,
+        tmp_path / "detection.pth",
+        tmp_path / "structure.pth",
+        device="cpu",
+        pipeline=FakeTatrPipeline(),
+        structure_fallback=fallback,
+    )
+    tokens = [
+        {"bbox": [70, 40, 80, 50], "text": "a",
+         "span_num": 0, "line_num": 0, "block_num": 0},
+        {"bbox": [120, 40, 130, 50], "text": "b",
+         "span_num": 0, "line_num": 0, "block_num": 0},
+    ]
+
+    predictions = extractor.extract(image_path, tokens)
+
+    assert len(predictions) == 1
+    assert fallback.crops == [], "well-filled grid must not invoke the fallback"
+
+
+def test_a_trivial_near_page_grid_is_decomposed_into_detector_panels(
+    tmp_path: Path,
+) -> None:
+    """Falcon token variance sometimes hands TATR a VALID but useless near-page grid
+    (1x3 over 66% of the page). That must decompose like a conflicted one, not slide
+    into the stage's near_page_low_complexity rejection."""
+    image_path = _image(tmp_path, (200, 120))
+
+    class TrivialGridTatrPipeline(FakeTatrPipeline):
+        def detect(self, image: Image.Image, **options: object) -> dict[str, object]:
+            value = super().detect(image, **options)
+            # Near-page detection: 170x100 of a 200x120 page (~71% area).
+            value["objects"] = [
+                {"label": "table", "score": 0.9, "bbox": [10, 10, 180, 110]}
+            ]
+            value["crops"] = [
+                {"image": image.crop((10, 10, 180, 110)), "tokens": []}
+            ]
+            return value
+
+        def recognize(self, image: Image.Image, *args: object, **kwargs: object):
+            if image.size[0] > 100:
+                # The near-page crop: valid single-row topology, trivially small.
+                return {
+                    "cells": [
+                        [
+                            {"bbox": [0, 0, 55, 90], "row_nums": [0], "column_nums": [0]},
+                            {"bbox": [55, 0, 110, 90], "row_nums": [0], "column_nums": [1]},
+                            {"bbox": [110, 0, 168, 90], "row_nums": [0], "column_nums": [2]},
+                        ]
+                    ]
+                }
+            return {
+                "cells": [
+                    [
+                        {"bbox": [2, 2, 30, 15], "row_nums": [0], "column_nums": [0]},
+                        {"bbox": [30, 2, 60, 15], "row_nums": [0], "column_nums": [1]},
+                        {"bbox": [2, 15, 30, 28], "row_nums": [1], "column_nums": [0]},
+                        {"bbox": [30, 15, 60, 28], "row_nums": [1], "column_nums": [1]},
+                    ]
+                ]
+            }
+
+    extractor = TatrTableExtractor(
+        tmp_path,
+        tmp_path / "detection.pth",
+        tmp_path / "structure.pth",
+        device="cpu",
+        pipeline=TrivialGridTatrPipeline(),
+        proposal_detector=FakeHeron(
+            [BoundingBox(15, 15, 90, 55), BoundingBox(15, 60, 90, 105)]
+        ),
+    )
+
+    predictions = extractor.extract(image_path, [])
+
+    assert len(predictions) == 2
+    assert all(
+        prediction.model["proposal"]["source"] == "heron-101_panel_decomposition"
+        for prediction in predictions
+    )

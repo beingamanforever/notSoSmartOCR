@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -70,12 +71,13 @@ class GeometricControlStage:
         self,
         *,
         minimum_group_size: int = 6,
-        label_provider: str | None = None,
+        label_provider: str | Sequence[str] | None = None,
     ) -> None:
         if minimum_group_size < 1:
             raise ValueError("minimum_group_size must be positive")
         self.minimum_group_size = minimum_group_size
         self.label_provider = label_provider
+        self.label_providers = _normalized_providers(label_provider)
 
     def apply(
         self,
@@ -86,44 +88,63 @@ class GeometricControlStage:
         cv2, np, gray = _load_gray(image_path)
         detection_group_size = (
             1
-            if _form_like_regions(regions, self.label_provider)
+            if _form_like_regions(regions, self.label_providers)
             else self.minimum_group_size
         )
-        detections = _square_detections(gray, cv2, np)
-        detections = [
-            detection
-            for detection in detections
-            if not _contains_readable_text(
-                detection.bounding_box,
+        if _reader_transcribes_marks(regions):
+            # The reader can transcribe a printed ballot glyph as text, but never a
+            # hand-drawn ring or null glyph, so only those channels run here. The
+            # square, anchored tick/cross and table channels would either duplicate
+            # what the reader already wrote or need the square channel this path skips.
+            null_marks = _anchored_marks(
+                gray,
                 regions,
-                self.label_provider,
+                self.label_providers,
+                [],
+                cv2,
+                np,
+                null_only=True,
             )
-            and not _inside_math_region(detection.bounding_box, regions)
-        ]
-        anchored_marks = _anchored_marks(
-            gray,
-            regions,
-            self.label_provider,
-            detections,
-            cv2,
-            np,
-        )
-        anchored_marks = _supported_anchored_groups(
-            anchored_marks,
-            detection_group_size,
-        )
-        detections = _merge_detections(detections, anchored_marks)
-        detections = _merge_detections(
-            detections,
-            _ring_marks(gray, regions, self.label_provider, detections, cv2, np),
-        )
-        table_marks = _table_marks(gray, regions, detections, cv2, np)
-        detections = [
-            detection
-            for detection in detections
-            if not _overlaps_detection(detection.bounding_box, table_marks)
-        ]
-        detections = _merge_detections(detections, table_marks)
+            detections = _merge_detections(
+                null_marks,
+                _ring_marks(gray, regions, self.label_providers, null_marks, cv2, np),
+            )
+        else:
+            detections = _square_detections(gray, cv2, np)
+            detections = [
+                detection
+                for detection in detections
+                if not _contains_readable_text(
+                    detection.bounding_box,
+                    regions,
+                    self.label_providers,
+                )
+                and not _inside_math_region(detection.bounding_box, regions)
+            ]
+            anchored_marks = _anchored_marks(
+                gray,
+                regions,
+                self.label_providers,
+                detections,
+                cv2,
+                np,
+            )
+            anchored_marks = _supported_anchored_groups(
+                anchored_marks,
+                detection_group_size,
+            )
+            detections = _merge_detections(detections, anchored_marks)
+            detections = _merge_detections(
+                detections,
+                _ring_marks(gray, regions, self.label_providers, detections, cv2, np),
+            )
+            table_marks = _table_marks(gray, regions, detections, cv2, np)
+            detections = [
+                detection
+                for detection in detections
+                if not _overlaps_detection(detection.bounding_box, table_marks)
+            ]
+            detections = _merge_detections(detections, table_marks)
         detections = [
             detection
             for detection in detections
@@ -131,23 +152,27 @@ class GeometricControlStage:
             or not _inside_text_region(
                 detection.bounding_box,
                 regions,
-                self.label_provider,
+                self.label_providers,
             )
         ]
         labels = [
             _anchor_label(detection, regions)
             or detection.label
-            or _nearest_label(detection.bounding_box, regions, self.label_provider)
+            or _nearest_label(detection.bounding_box, regions, self.label_providers)
             for detection in detections
         ]
         geometric_count = sum(
             detection.source != "table_mark" for detection in detections
         )
         if geometric_count < detection_group_size:
+            option_row = _aligned_option_row(detections)
             supported = [
                 (detection, label)
-                for detection, label in zip(detections, labels, strict=True)
+                for index, (detection, label) in enumerate(
+                    zip(detections, labels, strict=True)
+                )
                 if detection.source != "square"
+                or index in option_row
                 or label is None
                 or _explicit_control_label(label)
                 or (
@@ -183,7 +208,7 @@ class GeometricControlStage:
                 page_number,
                 index,
                 regions,
-                self.label_provider,
+                self.label_providers,
                 detections,
                 gray.shape,
             )
@@ -205,6 +230,7 @@ class GeometricControlStage:
                 control.structure["coverage_status"] = (
                     "insufficient_control_group" if coverage_missing else "detected"
                 )
+        _dedupe_shared_labels(controls)
         return sorted(
             regions + controls,
             key=lambda region: (
@@ -215,12 +241,66 @@ class GeometricControlStage:
         )
 
 
+def _dedupe_shared_labels(controls: list[TextRegion]) -> None:
+    """Print a label region shared by several controls once, not once per control.
+
+    A reader that returns a whole option row as one region ("Urgent [ ] For Review
+    [ ] Please Reply") makes every square on that row resolve to the same nearest
+    label, and the row's text then renders once per square. The first control keeps
+    the text; the rest keep their mark and their evidence link.
+    """
+    seen: dict[tuple[str, tuple[str, ...]], str] = {}
+    for control in controls:
+        label = control.structure.get("label")
+        evidence_ids = tuple(control.structure.get("label_evidence_ids") or ())
+        if not label or not evidence_ids:
+            continue
+        key = (label, evidence_ids)
+        first = seen.setdefault(key, control.id)
+        if first == control.id:
+            continue
+        symbol = control.text[: len(control.text) - len(label)].strip()
+        control.text = symbol
+        control.structure["label"] = None
+        control.structure["association_status"] = "shared_label"
+        control.structure["label_shared_with"] = first
+
+
+# Unicode ballot glyphs a reader emits when it transcribes the box itself.
+TRANSCRIBED_MARKS = ("\u2610", "\u2611", "\u2612", "\u2713", "\u2717")
+
+
+def _reader_transcribes_marks(regions: list[TextRegion]) -> bool:
+    """True when the page text already carries checkbox glyphs from the reader."""
+    return any(
+        symbol in region.text
+        for region in regions
+        if region.kind != "checkbox"
+        for symbol in TRANSCRIBED_MARKS
+    )
+
+
+def _normalized_providers(
+    label_provider: str | Sequence[str] | None,
+) -> frozenset[str] | None:
+    """None keeps every provider. A single provider still normalizes, so every call
+    site can test membership instead of juggling both a scalar and a collection."""
+    if label_provider is None:
+        return None
+    if isinstance(label_provider, str):
+        return frozenset({label_provider})
+    return frozenset(label_provider)
+
+
 def detect_controls(image_path: Path) -> list[ControlDetection]:
     cv2, np, gray = _load_gray(image_path)
     return _square_detections(gray, cv2, np)
 
 
-def _form_like_regions(regions: list[TextRegion], label_provider: str | None) -> bool:
+def _form_like_regions(
+    regions: list[TextRegion],
+    label_providers: frozenset[str] | None,
+) -> bool:
     # A field label ends with its colon. Counting any word that merely contains one made
     # times, ratios and section references look like form fields, so a dense printed
     # contract was declared form-like and lone spurious marks lost their corroboration
@@ -230,7 +310,7 @@ def _form_like_regions(regions: list[TextRegion], label_provider: str | None) ->
         for region in regions
         if region.resolution == "resolved"
         and region.text.rstrip().endswith((":", "："))
-        and (label_provider is None or region.provider == label_provider)
+        and (label_providers is None or region.provider in label_providers)
     }
     return len(labels) >= 6
 
@@ -289,10 +369,12 @@ def _square_detections(gray: Any, cv2: Any, np: Any) -> list[ControlDetection]:
 def _anchored_marks(
     gray: Any,
     regions: list[TextRegion],
-    label_provider: str | None,
+    label_providers: frozenset[str] | None,
     existing: list[ControlDetection],
     cv2: Any,
     np: Any,
+    *,
+    null_only: bool = False,
 ) -> list[ControlDetection]:
     height, width = gray.shape
     detections = []
@@ -301,11 +383,20 @@ def _anchored_marks(
             continue
         if _math_region(region):
             continue
-        if label_provider is not None and region.provider != label_provider:
+        if label_providers is not None and region.provider not in label_providers:
             continue
         if not _readable_label(region.text):
             continue
-        if region.confidence is None or region.confidence < 0.9:
+        confident = region.confidence is not None and region.confidence >= 0.9
+        # A null glyph declares a field intentionally empty, so only a field label
+        # can anchor one. A layout reader scores printed labels by detection, not
+        # reading quality, so the colon stands in for confidence in null-only mode:
+        # the glyph's own shape and emptiness tests carry the evidence.
+        field_label = region.text.rstrip().endswith((":", "："))
+        if null_only:
+            if not field_label:
+                continue
+        elif not confident:
             continue
         if (region.structure or {}).get("role") == "table_source" and sum(
             character.isalpha() for character in region.text
@@ -318,13 +409,21 @@ def _anchored_marks(
         top = max(0, box.top - vertical_pad)
         bottom = min(height, box.bottom + vertical_pad)
         slot_width = round(line_height * 1.75)
+        # A layout reader's box for "Label:" often runs past the printed colon and
+        # covers the writing space, so the value slot reaches back into the box's
+        # tail. A null glyph found there is trusted; a tick there would be a letter.
+        value_slot_left = (
+            max(box.left, box.right - round(line_height * 2))
+            if field_label
+            else box.right
+        )
         # A handwritten null glyph sits further from its label than a checkbox tick,
         # so the value window extends further but accepts that glyph only.
         slots = [
             (BoundingBox(max(0, box.left - slot_width), top, box.left, bottom), None),
             (
                 BoundingBox(
-                    box.right,
+                    value_slot_left,
                     top,
                     min(width, box.right + round(line_height * 4)),
                     bottom,
@@ -337,18 +436,34 @@ def _anchored_marks(
             for detection in _marks_in_slot(
                 gray, slot, line_height, cv2, np, tick_limit=tick_limit
             ):
+                null_mark = detection.source == "null_mark"
+                if null_only and not null_mark:
+                    continue
+                if null_mark and not field_label:
+                    continue
+                if (
+                    not null_mark
+                    and value_slot_left <= detection.bounding_box.left < box.right
+                ):
+                    continue
                 if _overlaps_detection(detection.bounding_box, existing + detections):
                     continue
+                others = [
+                    other
+                    for other in regions
+                    if other is not region
+                    and not _transcribed_mark_region(other, detection.bounding_box)
+                ]
                 if _center_inside_reader_text(
                     detection.bounding_box,
-                    regions,
-                    label_provider,
+                    others,
+                    label_providers,
                 ):
                     continue
                 if _inside_text_region(
                     detection.bounding_box,
-                    regions,
-                    label_provider,
+                    others,
+                    label_providers,
                 ):
                     continue
                 region_detections.append(detection)
@@ -364,10 +479,34 @@ def _anchored_marks(
     return detections
 
 
+def _transcribed_mark_region(region: TextRegion, mark: BoundingBox) -> bool:
+    """True when the reader region is its own misreading of the mark.
+
+    The fused reader's under-read repair writes a handwritten glyph back as a stray
+    character (the null glyph comes back as "8"). Only that repair channel is
+    exempted: a single-character region from the main read is real page text, and a
+    printed 8 or e passes the null shape test, so exempting it would re-detect it.
+    Mutual centre containment says the region is the mark, not text the mark sits in.
+    """
+    if (region.text_provenance or {}).get("method") != "region_underread_repair":
+        return False
+    if len(region.text.strip()) != 1:
+        return False
+    region_x, region_y = _center(region.bounding_box)
+    mark_x, mark_y = _center(mark)
+    box = region.bounding_box
+    return (
+        mark.left <= region_x <= mark.right
+        and mark.top <= region_y <= mark.bottom
+        and box.left <= mark_x <= box.right
+        and box.top <= mark_y <= box.bottom
+    )
+
+
 def _ring_marks(
     gray: Any,
     regions: list[TextRegion],
-    label_provider: str | None,
+    label_providers: frozenset[str] | None,
     existing: list[ControlDetection],
     cv2: Any,
     np: Any,
@@ -399,7 +538,7 @@ def _ring_marks(
         box = BoundingBox(left, top, left + box_width, top + box_height)
         if _overlaps_detection(box, existing + detections):
             continue
-        enclosed = _enclosed_regions(box, regions, label_provider)
+        enclosed = _enclosed_regions(box, regions, label_providers)
         if not enclosed:
             continue
         detections.append(
@@ -409,10 +548,46 @@ def _ring_marks(
                 0.6,
                 area / max(1, box_width * box_height),
                 "ring_mark",
+                # A ring circles a value, not its whole row. When the enclosed region
+                # carries word geometry, the label is the words under the ring; the
+                # full-row fallback is what rendered one row's text once per ring.
+                label=_ring_word_label(box, enclosed),
                 label_ids=tuple(region.id for region in enclosed),
             )
         )
     return detections
+
+
+def _ring_word_label(ring: BoundingBox, enclosed: list[TextRegion]) -> str | None:
+    """The words whose boxes sit inside the ring, in evidence order.
+
+    A parent region and its repair child can carry the same word entry, so each
+    word box is counted once.
+    """
+    words = []
+    seen: set[tuple[int, int, int, int, str]] = set()
+    for region in enclosed:
+        for entry in (region.structure or {}).get("word_evidence") or []:
+            if not isinstance(entry, dict):
+                continue
+            box = entry.get("bbox")
+            if not isinstance(box, dict):
+                continue
+            try:
+                centre_x = (box["left"] + box["right"]) / 2
+                centre_y = (box["top"] + box["bottom"]) / 2
+            except (KeyError, TypeError):
+                continue
+            if (
+                ring.left <= centre_x <= ring.right
+                and ring.top <= centre_y <= ring.bottom
+            ):
+                text = str(entry.get("text") or "").strip()
+                key = (box["left"], box["top"], box["right"], box["bottom"], text)
+                if text and key not in seen:
+                    seen.add(key)
+                    words.append(text)
+    return " ".join(words) or None
 
 
 def _largest_hole_area(component: Any, cv2: Any) -> float:
@@ -436,20 +611,27 @@ def _largest_hole_area(component: Any, cv2: Any) -> float:
 def _enclosed_regions(
     ring: BoundingBox,
     regions: list[TextRegion],
-    label_provider: str | None,
+    label_providers: frozenset[str] | None,
 ) -> list[TextRegion]:
     enclosed = []
     for region in regions:
-        if region.kind in {"checkbox", "table", "coverage_risk", "page_text"}:
+        if region.kind in {"checkbox", "coverage_risk", "page_text"}:
             continue
-        if label_provider is not None and region.provider != label_provider:
+        if label_providers is not None and region.provider not in label_providers:
             continue
         if region.resolution != "resolved" or not region.text.strip():
             continue
         center_x, center_y = _center(region.bounding_box)
-        if ring.left <= center_x <= ring.right and ring.top <= center_y <= ring.bottom:
+        if (
+            region.kind != "table"
+            and ring.left <= center_x <= ring.right
+            and ring.top <= center_y <= ring.bottom
+        ):
             enclosed.append(region)
             continue
+        # A table region can anchor a ring drawn on one of its rows (a form row the
+        # reader typed as a table), but never by the centre test: a page-sized table
+        # contains every ring's centre.
         # A ring drawn over one option of a long printed row overlaps only part of it.
         overlap = min(ring.right, region.bounding_box.right) - max(
             ring.left, region.bounding_box.left
@@ -464,6 +646,37 @@ def _enclosed_regions(
         ):
             enclosed.append(region)
     return enclosed
+
+
+def _aligned_option_row(
+    detections: list[ControlDetection],
+    minimum_members: int = 3,
+) -> set[int]:
+    """Indices of squares that sit in a row of evenly sized peers.
+
+    Three or more same-sized boxes sharing a baseline are an option row by construction,
+    which is the corroboration the page-wide group count is looking for. Without this a
+    fax cover's untouched Urgent/For Review/Please Reply boxes are dropped outright, and
+    the output cannot say the sender ticked nothing.
+    """
+    squares = [
+        (index, detection)
+        for index, detection in enumerate(detections)
+        if detection.source == "square"
+    ]
+    members: set[int] = set()
+    for index, detection in squares:
+        row = [
+            other_index
+            for other_index, other in squares
+            if _marks_share_axis(detection.bounding_box, other.bounding_box)
+            and 0.75
+            <= _side(other.bounding_box) / max(1, _side(detection.bounding_box))
+            <= 1.33
+        ]
+        if len(row) >= minimum_members:
+            members.update(row)
+    return members
 
 
 def _supported_anchored_groups(
@@ -555,6 +768,14 @@ def _marks_in_slot(
         cv2.bitwise_not(cv2.bitwise_or(horizontal, vertical)),
     )
     count, labels, stats, _ = cv2.connectedComponentsWithStats(residual)
+    # A null glyph asserts an otherwise empty answer area, so it must be the only
+    # significant ink in its slot. A letter passes the same shape test (a g or an 8
+    # is a loop with a stroke), but its sibling letters are significant ink too.
+    significant = sum(
+        int(stats[index][4]) >= 8
+        and min(int(stats[index][2]), int(stats[index][3])) >= line_height * 0.38
+        for index in range(1, count)
+    )
     detections = []
     for index in range(1, count):
         left, top, box_width, box_height, area = map(int, stats[index])
@@ -572,6 +793,8 @@ def _marks_in_slot(
         beyond_tick_reach = tick_limit is not None and slot.left + left >= tick_limit
         shape = _mark_shape(component, cv2, np)
         null_mark = shape == "slashed_loop"
+        if null_mark and significant > 1:
+            continue
         if not null_mark and (beyond_tick_reach or shape == "unknown"):
             continue
         box = BoundingBox(
@@ -611,7 +834,10 @@ def _table_marks(
             label = _same_cell_label(cell)
             if label is None:
                 continue
-            mark = _same_cell_mark(gray, _cell_box(cell), cv2, np)
+            cell_box = _cell_box(cell)
+            if cell_box is None:
+                continue
+            mark = _same_cell_mark(gray, cell_box, cv2, np)
             if mark is None or _overlaps_detection(
                 mark.bounding_box,
                 detections,
@@ -655,7 +881,10 @@ def _table_marks(
                 row_label = _row_label(indexed, row, column)
                 if row_label is None or not _mark_cell_text(cell):
                     continue
-                mark = _mark_in_cell(gray, _cell_box(cell), cv2, np)
+                cell_box = _cell_box(cell)
+                if cell_box is None:
+                    continue
+                mark = _mark_in_cell(gray, cell_box, cv2, np)
                 if mark is None or _overlaps_detection(
                     mark.bounding_box, existing + detections
                 ):
@@ -1154,14 +1383,24 @@ def _mark_cell_text(cell: dict[str, Any]) -> bool:
     return isinstance(confidence, int | float) and confidence < 0.6
 
 
-def _cell_box(cell: dict[str, Any]) -> BoundingBox:
-    box = cell["bbox"]
-    return BoundingBox(
-        int(box["left"]),
-        int(box["top"]),
-        int(box["right"]),
-        int(box["bottom"]),
-    )
+def _cell_box(cell: dict[str, Any]) -> BoundingBox | None:
+    """A cell's pixel box, or None when the table came without per-cell geometry.
+
+    A reader that emits table structure as markup gives no box per cell, and a cell
+    with no box cannot be examined for a mark.
+    """
+    box = cell.get("bbox")
+    if not isinstance(box, dict):
+        return None
+    try:
+        return BoundingBox(
+            int(box["left"]),
+            int(box["top"]),
+            int(box["right"]),
+            int(box["bottom"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _mark_in_cell(
@@ -1385,8 +1624,10 @@ def _has_null_mark_shape(component: Any, cv2: Any, np: Any) -> bool:
     if lines is None:
         return False
     span = max(width, height)
+    # A handwritten slash through a flat cursive loop can sit below 20 degrees, so
+    # the floor is lower than the tick/cross band; a ruled line at 0 stays excluded.
     return any(
-        20 <= abs(float(np.degrees(np.arctan2(bottom - top, right - left)))) <= 75
+        15 <= abs(float(np.degrees(np.arctan2(bottom - top, right - left)))) <= 75
         and float(np.hypot(right - left, bottom - top)) >= span * 0.3
         for left, top, right, bottom in lines.reshape(-1, 4)
     )
@@ -1703,15 +1944,17 @@ def _control_region(
     page_number: int,
     index: int,
     regions: list[TextRegion],
-    label_provider: str | None,
+    label_providers: frozenset[str] | None,
     detections: list[ControlDetection],
     page_shape: tuple[int, ...],
 ) -> TextRegion:
+    # A ring circles one value, not its whole row. Falling back to the anchor/nearest
+    # label for an unmatched ring_mark would render the row's full text once per ring.
     label = (
         None
-        if detection.label is not None
+        if detection.label is not None or detection.source == "ring_mark"
         else _anchor_label(detection, regions)
-        or _nearest_label(detection.bounding_box, regions, label_provider)
+        or _nearest_label(detection.bounding_box, regions, label_providers)
     )
     label_regions = _label_regions(detection.bounding_box, label, regions)
     selection_supported = _selection_supported(
@@ -1856,13 +2099,13 @@ def _selection_supported(
 def _contains_readable_text(
     control: BoundingBox,
     regions: list[TextRegion],
-    label_provider: str | None,
+    label_providers: frozenset[str] | None,
 ) -> bool:
     side = _side(control)
     for region in regions:
         if region.kind in {"checkbox", "table", "coverage_risk", "page_text"}:
             continue
-        if label_provider is not None and region.provider != label_provider:
+        if label_providers is not None and region.provider not in label_providers:
             continue
         if sum(character.isalnum() for character in region.text) < 2:
             continue
@@ -1911,14 +2154,14 @@ def _math_region(region: TextRegion) -> bool:
 def _inside_text_region(
     control: BoundingBox,
     regions: list[TextRegion],
-    label_provider: str | None,
+    label_providers: frozenset[str] | None,
 ) -> bool:
     center_x, center_y = _center(control)
     control_height = max(1, control.bottom - control.top)
     for region in regions:
         if region.kind in {"checkbox", "table", "coverage_risk", "page_text"}:
             continue
-        if label_provider is not None and region.provider != label_provider:
+        if label_providers is not None and region.provider not in label_providers:
             continue
         if not _readable_label(region.text):
             continue
@@ -1939,12 +2182,12 @@ def _inside_text_region(
 def _center_inside_reader_text(
     control: BoundingBox,
     regions: list[TextRegion],
-    label_provider: str | None,
+    label_providers: frozenset[str] | None,
 ) -> bool:
     center_x, center_y = _center(control)
     return any(
         region.kind not in {"checkbox", "table", "coverage_risk", "page_text"}
-        and (label_provider is None or region.provider == label_provider)
+        and (label_providers is None or region.provider in label_providers)
         and _readable_label(region.text)
         and region.bounding_box.left <= center_x <= region.bounding_box.right
         and region.bounding_box.top <= center_y <= region.bounding_box.bottom
@@ -1998,7 +2241,7 @@ def _anchor_label(
 ) -> TextRegion | None:
     """A label-anchored mark keeps its anchor; geometric nearness would pick the next field."""
     if (
-        detection.source not in {"anchored_mark", "ring_mark"}
+        detection.source not in {"anchored_mark", "null_mark", "ring_mark"}
         or not detection.label_ids
     ):
         return None
@@ -2009,7 +2252,7 @@ def _anchor_label(
 def _nearest_label(
     control: BoundingBox,
     regions: list[TextRegion],
-    label_provider: str | None,
+    label_providers: frozenset[str] | None,
 ) -> TextRegion | None:
     center_x, center_y = _center(control)
     candidates = []
@@ -2039,7 +2282,7 @@ def _nearest_label(
         if distance > 150:
             continue
         provider_penalty = (
-            0 if label_provider is None or region.provider == label_provider else 1000
+            0 if label_providers is None or region.provider in label_providers else 1000
         )
         readability_penalty = (
             0 if sum(character.isalnum() for character in text) >= 2 else 100

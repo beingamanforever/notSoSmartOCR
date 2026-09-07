@@ -6,6 +6,7 @@ import copy
 import io
 import json
 import logging
+import os
 import secrets
 import re
 import shutil
@@ -28,6 +29,7 @@ from PIL import Image, ImageDraw, ImageFont
 from .contracts import BoundingBox, PageResult, RegionStage, TextAlternative, TextRegion
 from .cross_page_tables import CrossPageTableStage
 from .falcon import is_verified_falcon_model_provenance
+from .markdown_polish import polish_markdown
 from .pipeline import (
     IMAGE_SUFFIXES,
     PipelineError,
@@ -3211,7 +3213,12 @@ def _result_markdown(response: dict[str, Any]) -> str:
             lines.append(
                 f"- `{failure['stage']}/{failure['code']}`{page}: {failure['message']}"
             )
-    return "\n".join(lines) + "\n"
+    markdown = "\n".join(lines) + "\n"
+    if os.environ.get("OPENROUTER_API_KEY"):
+        markdown, provenance = polish_markdown(markdown)
+        if provenance["polished"]:
+            markdown += "<!-- formatting: qwen3.7-flash -->\n"
+    return markdown
 
 
 def _presentation_page_markdown(

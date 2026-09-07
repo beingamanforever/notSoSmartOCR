@@ -12,11 +12,15 @@ from typing import Any
 from ocr_pipeline.anchored_ink import AnchoredInkProposalStage
 from ocr_pipeline.digit_verification import DigitVerificationStage
 from ocr_pipeline.handwriting_lines import DocTRLineDetector, HandwritingLineStage
+from ocr_pipeline.comprehension import HttpTiltEngine, TiltFieldStage, VllmTiltEngine
 from ocr_pipeline.controls import GeometricControlStage
+from ocr_pipeline.correction import LexiconCorrectionStage
 from ocr_pipeline.demo import CompositionDescriptor, _read_presentations, create_app
 from ocr_pipeline.dispute_resolution import DisputeResolutionStage
 from ocr_pipeline.evidence_layout import EvidenceLayoutStage
 from ocr_pipeline.falcon import FalconOCRServiceReader
+from ocr_pipeline.falcon_layout import FalconLayoutReader
+from ocr_pipeline.fused_reader import FusedReader
 from ocr_pipeline.falcon_presentation import (
     FalconFormulaStage,
     FalconPresentationReader,
@@ -29,10 +33,15 @@ from ocr_pipeline.handwriting import (
     TrOCRHandwritingReader,
     is_verified_trocr_model_provenance,
 )
-from ocr_pipeline.orientation import DocTROrientationDetector, OrientationReader
+from ocr_pipeline.orientation import (
+    DocTROrientationDetector,
+    OrientationReader,
+    PaddleDocOrientationDetector,
+)
 from ocr_pipeline.pipeline import process_document
 from ocr_pipeline.preprocessing import (
     PageFrameReader,
+    RestoredViewReader,
     TiledReader,
     WideBandFallbackReader,
 )
@@ -49,8 +58,11 @@ from ocr_pipeline.providers import (
     ReaderError,
     TesseractReader,
 )
+from ocr_pipeline.restoration import DocResRestorer
 from ocr_pipeline.risk import EvidenceRiskStage
+from ocr_pipeline.heron_layout import HeronTableDetector
 from ocr_pipeline.tables import TableChallenger, TatrTableExtractor, TatrTableStage
+from ocr_pipeline.tableformer_structure import TableFormerStructure
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -68,6 +80,7 @@ def create_verified_app(
     args: argparse.Namespace,
     *,
     native_factory: Callable[..., object] | None = None,
+    line_detector_factory: Callable[..., Any] = DocTRLineDetector,
     handwriting_reader_factory: Callable[..., object] = Phi4HandwritingReader,
     handwriting_service_reader_factory: Callable[..., object] = (
         Phi4HandwritingServiceReader
@@ -111,34 +124,67 @@ def create_verified_app(
             "handwriting localization did not meet the adoption threshold"
         )
 
-    if native_factory is None:
-        _validate_local_configuration(
-            args,
-            adapter_path=adapter_path,
-            classifier_path=classifier_path,
-        )
-        try:
-            from nemotron_ocr.inference.pipeline_v2 import NemotronOCRV2
-        except (ImportError, OSError) as error:
-            raise RuntimeError("Nemotron OCR v2 is unavailable") from error
-        native_factory = NemotronOCRV2
+    falcon_layout_url = getattr(args, "falcon_layout_url", None)
+    if falcon_layout_url is not None:
+        # Falcon-Perception reads checkbox glyphs that Nemotron drops entirely, so it is
+        # the reader when its service is configured. Regions are page areas, not words.
+        layout_reader = FalconLayoutReader(falcon_layout_url)
+        layout_reader.check_health()
+        base_reader = layout_reader
+        # With Nemotron as well, the two are fused: Falcon's text keeps its parse while
+        # the word reader supplies pixel boxes, a real recognition confidence, and the
+        # words no layout region covered.
+        if getattr(args, "nemotron_model_dir", None) is not None:
+            if native_factory is None:
+                try:
+                    from nemotron_ocr.inference.pipeline_v2 import NemotronOCRV2
+                except (ImportError, OSError) as error:
+                    raise RuntimeError("Nemotron OCR v2 is unavailable") from error
+                native_factory = NemotronOCRV2
+            base_reader = FusedReader(
+                layout_reader,
+                NemotronOCRV2Reader(
+                    language="multi",
+                    merge_level="word",
+                    batch_size=1,
+                    pipeline=native_factory(
+                        model_dir=str(args.nemotron_model_dir), lang="multi"
+                    ),
+                    execution_lock=threading.Lock(),
+                ),
+            )
+        faint_text_reader = base_reader
+        native_factory = None
+    else:
+        if native_factory is None:
+            _validate_local_configuration(
+                args,
+                adapter_path=adapter_path,
+                classifier_path=classifier_path,
+            )
+            try:
+                from nemotron_ocr.inference.pipeline_v2 import NemotronOCRV2
+            except (ImportError, OSError) as error:
+                raise RuntimeError("Nemotron OCR v2 is unavailable") from error
+            native_factory = NemotronOCRV2
 
-    native = native_factory(model_dir=str(args.nemotron_model_dir), lang="multi")
-    nemotron_execution_lock = threading.Lock()
-    base_reader = NemotronOCRV2Reader(
-        language="multi",
-        merge_level="word",
-        batch_size=1,
-        pipeline=native,
-        execution_lock=nemotron_execution_lock,
-    )
-    faint_text_reader = NemotronOCRV2Reader(
-        language="multi",
-        merge_level="word",
-        batch_size=8,
-        pipeline=native,
-        execution_lock=nemotron_execution_lock,
-    )
+        native = native_factory(model_dir=str(args.nemotron_model_dir), lang="multi")
+        nemotron_execution_lock = threading.Lock()
+        base_reader = NemotronOCRV2Reader(
+            language="multi",
+            merge_level="word",
+            batch_size=1,
+            pipeline=native,
+            execution_lock=nemotron_execution_lock,
+        )
+        faint_text_reader = NemotronOCRV2Reader(
+            language="multi",
+            merge_level="word",
+            batch_size=8,
+            pipeline=native,
+            execution_lock=nemotron_execution_lock,
+        )
+
     wide_band = TesseractReader(
         executable=str(args.tesseract_executable),
         language="eng",
@@ -152,25 +198,56 @@ def create_verified_app(
         page_segmentation_mode=6,
         thresholding_method=2,
     )
-    tiny_text_reader = TiledReader(base_reader)
-    wide_band_reader = WideBandFallbackReader(
-        tiny_text_reader,
-        wide_band,
-        confirmation_reader=wide_band_confirmation,
-    )
-    reader = PageFrameReader(
-        OrientationReader(
-            wide_band_reader,
-            osd_executable=str(args.tesseract_executable),
-            orientation_detector=DocTROrientationDetector(device=args.device),
-            margin_reader=TesseractReader(
-                executable=str(args.tesseract_executable),
-                language="eng",
-                timeout_seconds=120,
-                page_segmentation_mode=3,
-            ),
-            defer_restore=True,
+    # Restoration sits innermost so it sees the deskewed, frame-cropped page, and it is a
+    # no-op unless a DocRes checkout and checkpoint are configured.
+    docres_checkpoint = getattr(args, "docres_checkpoint", None)
+    docres_source = getattr(args, "docres_source", None)
+    page_reader = base_reader
+    if docres_checkpoint and docres_source:
+        page_reader = RestoredViewReader(
+            base_reader,
+            DocResRestorer(docres_checkpoint, docres_source),
+            maximum_mean_confidence=getattr(args, "docres_max_mean_confidence", 0.75),
         )
+    if falcon_layout_url is not None:
+        # Tiling and the wide-band Tesseract fallback exist to compensate for a word-level
+        # detector missing small or shallow text. Falcon reads whole regions, so each
+        # wrapper only buys a second full pass: they cost 32s of a 41s page here.
+        wide_band_reader = page_reader
+    else:
+        tiny_text_reader = TiledReader(page_reader)
+        wide_band_reader = WideBandFallbackReader(
+            tiny_text_reader,
+            wide_band,
+            confirmation_reader=wide_band_confirmation,
+        )
+    oriented = OrientationReader(
+        wide_band_reader,
+        osd_executable=str(args.tesseract_executable),
+        orientation_detector=_orientation_detector(args),
+        margin_reader=TesseractReader(
+            executable=str(args.tesseract_executable),
+            language="eng",
+            timeout_seconds=120,
+            page_segmentation_mode=3,
+        ),
+        defer_restore=True,
+    )
+    # The frame crop focuses a word-level detector and then re-reads the whole page to
+    # check nothing fell outside it. Falcon's layout model already ignores scan borders,
+    # so that second full pass is 6.5s of pure duplication.
+    reader = oriented if falcon_layout_url is not None else PageFrameReader(oriented)
+    # Both run on CPU: the GPU is within 1.5 GB of full with the readers loaded, and
+    # heron is 28 ms on an A100 class card, so CPU latency is affordable per page.
+    proposal_detector = (
+        HeronTableDetector(device=getattr(args, "heron_device", "cpu"))
+        if getattr(args, "heron_proposals", True)
+        else None
+    )
+    structure_fallback = (
+        TableFormerStructure(device=getattr(args, "tableformer_device", "cpu"))
+        if getattr(args, "tableformer_fallback", True)
+        else None
     )
     extractor = TatrTableExtractor(
         args.tatr_source,
@@ -180,6 +257,8 @@ def create_verified_app(
         crop_padding=5,
         minimum_detection_score=0.5,
         enable_ruled_table_proposals=True,
+        proposal_detector=proposal_detector,
+        structure_fallback=structure_fallback,
     )
     raw = TesseractReader(
         executable=str(args.tesseract_executable),
@@ -210,10 +289,19 @@ def create_verified_app(
         low_primary_confidence=0.88,
         parallel_challengers=True,
     )
-    controls = GeometricControlStage(label_provider=base_reader.name)
+    controls = GeometricControlStage(
+        label_provider=(
+            (base_reader.name, "falcon-perception")
+            if falcon_layout_url is not None
+            else base_reader.name
+        )
+    )
     risk = EvidenceRiskStage(text_provider=base_reader.name)
-    faint_text = FaintTinyTextStage(faint_text_reader)
-    stages: list[object] = [stage, controls, faint_text]
+    stages: list[object] = [stage, controls]
+    if falcon_layout_url is None:
+        # The faint-text stage retiles the page and rereads it. With Falcon that is a
+        # second full pass per tile for text it already read in the first one.
+        stages.append(FaintTinyTextStage(faint_text_reader))
     handwriting_stage = None
     if adapter_path is not None or service_url is not None or trocr_model is not None:
         using_trocr = trocr_model is not None
@@ -320,15 +408,38 @@ def create_verified_app(
         stages.append(formula_stage)
     stages.append(DigitVerificationStage(cell, text_provider=base_reader.name))
     stages.append(AnchoredInkProposalStage(label_provider=base_reader.name))
+    lexicon_path = getattr(args, "lexicon", None)
+    if lexicon_path:
+        # Runs before layout so downstream stages see the alternatives. Proposes only
+        # words already in the supplied list, so it cannot invent a drug name.
+        stages.insert(
+            0,
+            LexiconCorrectionStage(
+                set(Path(lexicon_path).read_text(encoding="utf-8").split())
+            ),
+        )
     if handwriting_stage is not None:
+        line_detector = line_detector_factory(device=args.device)
+        # loaded now so the first real request does not pay for the model
+        line_detector.check_health()
         stages.append(
             HandwritingLineStage(
-                DocTRLineDetector(device=args.device),
+                line_detector,
                 text_provider=base_reader.name,
                 max_lines=getattr(args, "handwriting_max_lines", 24),
             )
         )
         stages.append(handwriting_stage)
+    tilt_url = getattr(args, "tilt_url", None)
+    if tilt_url is not None or getattr(args, "arctic_tilt", False):
+        # Last, so the fields it is asked about carry their final state: anything still
+        # not_located or illegible here is what geometry genuinely could not settle.
+        engine = (
+            HttpTiltEngine(tilt_url)
+            if tilt_url is not None
+            else VllmTiltEngine(gpu_memory_utilization=args.tilt_gpu_memory_utilization)
+        )
+        stages.append(TiltFieldStage(engine, max_questions=args.tilt_max_questions))
     handwriting = "configured" if handwriting_stage is not None else "not configured"
     configured_stages = [item.name for item in stages]
     if presentation_reader is not None:
@@ -343,8 +454,11 @@ def create_verified_app(
         id="full-gpu-pipeline",
         label="Full GPU pipeline",
         scope="full",
-        primary_ocr="NVIDIA Nemotron OCR v2 (word merge, batch size 1)",
-        orientation="Mindee docTR proposals with Tesseract OSD evidence check",
+        primary_ocr=_primary_ocr_label(args, falcon_layout_url),
+        orientation=(
+            f"{_orientation_detector(args).name} proposals "
+            "with Tesseract OSD evidence check"
+        ),
         tesseract_roles=(
             "orientation OSD",
             "side-margin text",
@@ -407,6 +521,26 @@ def create_verified_app(
     return app_factory(reader, **app_options)
 
 
+def _primary_ocr_label(args: argparse.Namespace, falcon_layout_url: str | None) -> str:
+    if falcon_layout_url is None:
+        return "NVIDIA Nemotron OCR v2 (word merge, batch size 1)"
+    falcon = "Falcon-Perception layout OCR (PP-DocLayoutV3 regions, per-region read)"
+    if getattr(args, "nemotron_model_dir", None) is None:
+        return falcon
+    return (
+        f"{falcon}, fused with NVIDIA Nemotron OCR v2 word boxes "
+        "for pixel geometry and recognition confidence"
+    )
+
+
+def _orientation_detector(args: argparse.Namespace) -> Any:
+    """PP-LCNet by default: docTR's classifier returns near-chance confidence on
+    pages that are not document-shaped, and the pipeline then rotates them."""
+    if getattr(args, "orientation_model", "paddle") == "doctr":
+        return DocTROrientationDetector(device=args.device)
+    return PaddleDocOrientationDetector()
+
+
 def _validate_local_configuration(
     args: argparse.Namespace,
     *,
@@ -455,10 +589,22 @@ def _validate_local_configuration(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--nemotron-model-dir", required=True, type=Path)
+    parser.add_argument("--nemotron-model-dir", type=Path)
+    parser.add_argument(
+        "--falcon-layout-url",
+        help="Read pages with the Falcon-Perception layout OCR service instead of Nemotron",
+    )
     parser.add_argument("--tatr-source", required=True, type=Path)
     parser.add_argument("--tatr-detection-model", required=True, type=Path)
     parser.add_argument("--tatr-structure-model", required=True, type=Path)
+    parser.add_argument(
+        "--heron-proposals", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument("--heron-device", default="cpu")
+    parser.add_argument(
+        "--tableformer-fallback", action=argparse.BooleanOptionalAction, default=True
+    )
+    parser.add_argument("--tableformer-device", default="cpu")
     parser.add_argument("--tesseract-executable", required=True, type=Path)
     presentation = parser.add_mutually_exclusive_group()
     presentation.add_argument(
@@ -566,10 +712,26 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--trocr-context-padding", type=_positive_int, default=12)
     parser.add_argument("--device", default="cuda")
     parser.add_argument(
+        "--orientation-model",
+        choices=("paddle", "doctr"),
+        default="paddle",
+    )
+    parser.add_argument(
         "--warmup-image",
         type=Path,
         help="Run the full pipeline twice before the server becomes ready",
     )
+    parser.add_argument("--lexicon", type=Path, default=None)
+    parser.add_argument("--arctic-tilt", action="store_true")
+    parser.add_argument(
+        "--tilt-url",
+        help="Use a warm Arctic-TILT service on loopback HTTP instead of in-process vLLM",
+    )
+    parser.add_argument("--tilt-max-questions", type=_positive_int, default=24)
+    parser.add_argument("--tilt-gpu-memory-utilization", type=float, default=0.2)
+    parser.add_argument("--docres-checkpoint", type=Path, default=None)
+    parser.add_argument("--docres-source", type=Path, default=None)
+    parser.add_argument("--docres-max-mean-confidence", type=float, default=0.75)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8081)
     return parser

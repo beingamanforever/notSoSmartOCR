@@ -226,7 +226,7 @@
       padding: 10px 16px;
       border-bottom: 1px solid var(--line);
     }
-    .card-title { font-weight: 720; letter-spacing: -.01em; }
+    .card-title { flex: none; white-space: nowrap; font-weight: 720; letter-spacing: -.01em; }
     .page-controls { display: flex; align-items: center; gap: 8px; }
     .icon-button {
       height: 34px;
@@ -504,7 +504,15 @@
     .technical-details { grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 8px; }
     .technical-details summary { cursor: pointer; color: var(--muted); font-size: .74rem; font-weight: 700; }
     .technical-grid { display: grid; gap: 10px; margin-top: 10px; }
-    .region-list { display: flex; gap: 6px; overflow: auto; margin-top: 12px; padding-bottom: 2px; }
+    .region-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      max-height: 148px;
+      overflow-y: auto;
+      margin-top: 12px;
+      padding-bottom: 2px;
+    }
     .region-button {
       flex: 0 0 auto;
       max-width: 170px;
@@ -646,7 +654,7 @@
     .semantic-block.author { margin-bottom: 16px; color: var(--text); font-size: .82rem; line-height: 1.45; }
     .semantic-block.author > span { display: block; }
     .semantic-block.footnote { margin-top: 18px; color: var(--muted); font-size: .76rem; line-height: 1.5; }
-    .semantic-block.header { color: var(--muted); font-size: .76rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+    .semantic-block.header { color: var(--muted); font-size: .82rem; font-weight: 600; }
     .semantic-block.footer { padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: .76rem; }
     .semantic-block.aside_text { margin: 2px 0 16px; padding-left: 9px; border-left: 2px solid var(--line-strong); color: var(--muted); font-size: .76rem; }
     .semantic-block.formula { margin: 14px 0; padding: 8px 10px; border-left: 2px solid var(--accent); font-family: "Times New Roman", serif; font-size: 1rem; }
@@ -702,7 +710,14 @@
     .failure-code { color: var(--accent); font: .78rem ui-monospace, monospace; }
     .failure-message { margin-top: 6px; line-height: 1.5; }
     .success-note { color: var(--text); }
-    .downloads { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .downloads {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+      margin-left: auto;
+      gap: 8px;
+    }
     .action-menu { position: relative; }
     .action-menu > summary { list-style: none; }
     .action-menu > summary::-webkit-details-marker { display: none; }
@@ -988,6 +1003,7 @@
             </div>
             <div class="inspector-grid">
               <div class="datum"><span class="label">Kind</span><span class="value" id="region-kind">None selected</span></div>
+              <div class="datum" id="region-category-row" hidden><span class="label">Layout category</span><span class="value" id="region-category">-</span></div>
               <div class="datum"><span class="label" id="region-confidence-label">Recognition score</span><span class="value" id="region-confidence">Not available</span></div>
               <div class="datum"><span class="label">Provider</span><span class="value" id="region-provider">-</span></div>
               <div class="datum"><span class="label">Reading order</span><span class="value" id="region-order">-</span></div>
@@ -1028,7 +1044,7 @@
       image: null,
       imageRequest: 0,
       resultRequest: 0,
-      hiddenKinds: new Set(),
+      hiddenKinds: new Set(["text", "line", "table_candidate", "table_cell", "word"]),
       selectedFile: null,
       selectedExample: null,
       feedbackSent: null,
@@ -1077,7 +1093,9 @@
       formula: "#2563eb",
       formula_candidate: "#64748b",
       handwriting: "#be185d",
-      aside_text: "#c2410c"
+      aside_text: "#c2410c",
+      word: "#0f766e",
+      table_cell: "#0369a1"
     };
 
     fileInput.addEventListener("change", () => {
@@ -1729,8 +1747,12 @@
       );
       const seconds = Number(payload.timing?.total_seconds);
       setMetric("metric-time", "\u23F1", Number.isFinite(seconds) ? `${seconds.toFixed(2)} s` : "");
-      setMetric("metric-pages", "\u25A4", pages.length ? String(pages.length) : "");
-      setMetric("metric-chars", "Tt", characters ? formatCount(characters) : "");
+      setMetric(
+        "metric-pages",
+        "\u25A4",
+        pages.length ? `${pages.length} ${pages.length === 1 ? "page" : "pages"}` : ""
+      );
+      setMetric("metric-chars", "Tt", characters ? `${formatCount(characters)} chars` : "");
       setMetric("metric-size", "\u{1F5AB}", formatBytes(payload.source_bytes || 0));
       const metrics = byId("doc-metrics");
       metrics.hidden = !Array.from(metrics.children).some((item) => !item.hidden);
@@ -2101,7 +2123,15 @@
         return "Detection score";
       }
       if (semanticKind(region) === "control") return "State score";
+      // A reader that only reports where a region is must not be shown as if it were
+      // reporting how sure it is about the characters.
+      if (detectionOnlyConfidence(region)) return "Detection score";
       return "Recognition score";
+    }
+
+    function detectionOnlyConfidence(region) {
+      return String(region?.text_provenance?.confidence_meaning || "")
+        .startsWith("layout detection");
     }
 
     const renderedView = byId("rendered-view");
@@ -2307,9 +2337,11 @@
         };
       }
       return {
-        label: "Recognition score",
+        label: detectionOnlyConfidence(region) ? "Detection score" : "Recognition score",
         value: region?.confidence,
-        scope: confidenceScope(region)
+        scope: detectionOnlyConfidence(region)
+          ? "region detection"
+          : confidenceScope(region)
       };
     }
 
@@ -3223,6 +3255,8 @@
       state.hiddenKinds.add("line");
       state.hiddenKinds.add("table_candidate");
       state.hiddenKinds.add("table_cell");
+      // Word boxes exist for cell assignment and confidence; the drawn unit is the line.
+      state.hiddenKinds.add("word");
     }
 
     function renderPage() {
@@ -3283,11 +3317,77 @@
       return pageOverlays().filter((region) => !state.hiddenKinds.has(categoryKey(region)));
     }
 
+    function wordUnionBox(region) {
+      const boxes = (region.structure?.word_evidence || [])
+        .map((word) => normalizedBox(word.bbox))
+        .filter(Boolean);
+      if (!boxes.length) return null;
+      return {
+        left: Math.min(...boxes.map((box) => box.left)),
+        top: Math.min(...boxes.map((box) => box.top)),
+        right: Math.max(...boxes.map((box) => box.right)),
+        bottom: Math.max(...boxes.map((box) => box.bottom))
+      };
+    }
+
+    function cellUnionBox(region) {
+      const boxes = (region.structure?.cells || [])
+        .map((cell) => normalizedBox(cell.bbox || cell.bounding_box))
+        .filter(Boolean);
+      if (!boxes.length) return null;
+      return {
+        left: Math.min(...boxes.map((box) => box.left)),
+        top: Math.min(...boxes.map((box) => box.top)),
+        right: Math.max(...boxes.map((box) => box.right)),
+        bottom: Math.max(...boxes.map((box) => box.bottom))
+      };
+    }
+
+    function withTightBox(region) {
+      // The layout reader's region boxes are loose blobs; the word reader's boxes are
+      // exact. Display one tight block box - the union of the words - per region, the
+      // way a layout model presents blocks. A table tightens to its cells' union.
+      const union = region.kind === "table"
+        ? cellUnionBox(region) || wordUnionBox(region)
+        : wordUnionBox(region);
+      if (!union) return region;
+      return {
+        ...region,
+        bounding_box: union,
+        text_provenance: {
+          ...(region.text_provenance || {}),
+          displayed_box: "union of word evidence; the layout region's own box is looser"
+        }
+      };
+    }
+
     function pageOverlays() {
       const overlays = [];
       currentRegions().forEach((region) => {
         const role = region.structure?.role;
-        if (normalPreviewRegion(region)) overlays.push(region);
+        if (normalPreviewRegion(region)) overlays.push(withTightBox(region));
+        // The word reader's boxes carry the only recognition confidence on the page, so
+        // they are what the confidence colouring and the per-word highlights come from.
+        (region.structure?.word_evidence || []).forEach((word, wordIndex) => {
+          const box = normalizedBox(word.bbox);
+          if (!box) return;
+          overlays.push({
+            id: `${region.id}-word-${wordIndex + 1}`,
+            kind: "word",
+            text: word.text || "",
+            confidence: word.confidence,
+            bounding_box: box,
+            reading_order: wordIndex + 1,
+            provider: region.text_provenance?.geometry_provider || region.provider,
+            text_provenance: {
+              method: "word_reader_geometry",
+              region_id: region.id,
+              confidence_meaning: "recognition, from the word reader"
+            },
+            resolution: "resolved",
+            alternatives: []
+          });
+        });
         if (region.structure?.role !== "table") return;
         (region.structure.cells || []).forEach((cell, cellIndex) => {
           const box = normalizedBox(cell.bbox || cell.bounding_box);
@@ -3320,7 +3420,8 @@
 
     function normalPreviewRegion(region) {
       const role = region.structure?.role;
-      if (role === "layout_block") return true;
+      // Layout blocks group other regions; drawing them boxed every line twice.
+      if (role === "layout_block") return false;
       if (["table_source", "table_candidate", "coverage_risk", "presentation_challenger"].includes(role)) return false;
       if (["table_candidate", "coverage_risk", "layout_block"].includes(region.kind)) return false;
       if (semanticKind(region) === "table") {
@@ -3359,6 +3460,7 @@
     function overlayCategoryLabel(kind) {
       if (kind === "table") return "table bounds";
       if (kind === "table_cell") return "table cell bounds";
+      if (kind === "word") return "word boxes";
       if (kind === "table_candidate") return "table candidate bounds";
       return kind.replaceAll("_", " ");
     }
@@ -3522,8 +3624,9 @@
         const button = document.createElement("button");
         button.type = "button";
         button.className = `region-button${index === selectedIndex ? " active" : ""}`;
-        button.textContent = `${index + 1} ${region.kind}: ${region.text || "No text"}`;
-        button.title = `Region ${index + 1}: ${region.kind}`;
+        const label = overlayCategoryLabel(categoryKey(region));
+        button.textContent = `${index + 1} ${label}: ${region.text || "No text"}`;
+        button.title = `Region ${index + 1}: ${label}`;
         button.addEventListener("click", () => selectRegion(index));
         button.addEventListener("focus", () => {
           const box = button.getBoundingClientRect();
@@ -3576,6 +3679,10 @@
       updateReviewActions(region);
       byId("inspector").classList.toggle("empty", !region);
       byId("region-kind").textContent = region?.kind || "None selected";
+      // The layout reader names what it thinks a region is; show it when it says.
+      const category = region?.text_provenance?.layout_category;
+      byId("region-category-row").hidden = !category;
+      byId("region-category").textContent = category || "-";
       const confidence = displayConfidence(region);
       byId("region-confidence-label").textContent = confidence.label;
       byId("region-confidence").textContent = validConfidence(confidence.value)

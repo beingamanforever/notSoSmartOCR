@@ -59,12 +59,139 @@ DOCTR_MODEL = {
     "publisher": "Mindee",
     "license": "Apache-2.0",
 }
+PADDLE_ORIENTATION_REPOSITORY = "PaddlePaddle/PP-LCNet_x1_0_doc_ori_onnx"
+PADDLE_ORIENTATION_MODEL = {
+    "library": "onnxruntime",
+    "architecture": "PP-LCNet_x1_0_doc_ori",
+    "publisher": "PaddlePaddle",
+    "license": "Apache-2.0",
+    "reported_accuracy": 0.9906,
+}
+# From the repository's own inference.yml, not inferred: resize short side to 256,
+# centre crop 224, scale to [0,1], then ImageNet mean/std, CHW, top-1 over these labels.
+PADDLE_ORIENTATION_LABELS = (0, 90, 180, 270)
+PADDLE_RESIZE_SHORT = 256
+PADDLE_CROP = 224
+PADDLE_MEAN = (0.485, 0.456, 0.406)
+PADDLE_STD = (0.229, 0.224, 0.225)
+
+
+class PaddleDocOrientationDetector:
+    """Predict one lossless page rotation with PaddleOCR's document-orientation model.
+
+    docTR's small classifier returns near-chance confidence on pages that are not
+    document-shaped, and the pipeline then rotates them on thin evidence. This model is
+    purpose-built for the four-way document orientation task and reports 99.06% on
+    PaddleOCR's own benchmark, at 7 MB.
+    """
+
+    name = "paddle-doc-orientation"
+    # A dedicated four-class classifier reporting 99.06% is trusted at its own
+    # argmax. Measured over the evaluation pages its correct calls run 0.73 to 0.93
+    # with no errors, so docTR's 0.9 gate would discard sound predictions and hand
+    # the page back to OCR-evidence voting, which is what rotated the posters.
+    direct_confidence = 0.70
+
+    def __init__(
+        self,
+        *,
+        model_path: Path | None = None,
+        repository: str = PADDLE_ORIENTATION_REPOSITORY,
+        providers: tuple[str, ...] | None = None,
+        session: Any | None = None,
+    ) -> None:
+        self.model_path = model_path
+        self.repository = repository
+        self.providers = providers
+        self._session = session
+        self._lock = threading.Lock()
+
+    def __call__(self, image_path: Path) -> dict[str, object]:
+        try:
+            import numpy as np
+
+            with Image.open(image_path) as source:
+                image = ImageOps.exif_transpose(source).convert("RGB")
+                tensor = _paddle_orientation_tensor(image, np)
+        except (ImportError, OSError, UnidentifiedImageError, ValueError) as error:
+            raise ReaderError(
+                "orientation_classifier_image_failed", str(error)
+            ) from error
+
+        with self._lock:
+            session = self._session or self._load_session()
+            try:
+                outputs = session.run(None, {session.get_inputs()[0].name: tensor})
+            except Exception as error:
+                raise ReaderError(
+                    "orientation_classifier_failed", str(error)
+                ) from error
+
+        scores = outputs[0][0] if outputs else None
+        if scores is None or len(scores) != len(PADDLE_ORIENTATION_LABELS):
+            raise ReaderError(
+                "invalid_orientation_classifier_output",
+                "PP-LCNet returned an unexpected score vector",
+            )
+        index = int(max(range(len(scores)), key=lambda item: scores[item]))
+        return {
+            "angle": int(PADDLE_ORIENTATION_LABELS[index]),
+            "confidence": float(scores[index]),
+            "model": dict(PADDLE_ORIENTATION_MODEL),
+        }
+
+    def _load_session(self) -> Any:
+        try:
+            import onnxruntime
+        except ImportError as error:
+            raise ReaderError(
+                "orientation_classifier_unavailable",
+                "onnxruntime is required for the PaddleOCR orientation model",
+            ) from error
+        path = self.model_path
+        if path is None:
+            try:
+                from huggingface_hub import hf_hub_download
+
+                path = Path(hf_hub_download(self.repository, filename="inference.onnx"))
+            except Exception as error:
+                raise ReaderError(
+                    "orientation_classifier_unavailable", str(error)
+                ) from error
+        providers = list(self.providers or onnxruntime.get_available_providers())
+        try:
+            self._session = onnxruntime.InferenceSession(str(path), providers=providers)
+        except Exception as error:
+            raise ReaderError(
+                "orientation_classifier_unavailable", str(error)
+            ) from error
+        return self._session
+
+
+def _paddle_orientation_tensor(image: Image.Image, np: Any) -> Any:
+    width, height = image.size
+    if min(width, height) <= 0:
+        raise ValueError("page image has no area")
+    scale = PADDLE_RESIZE_SHORT / min(width, height)
+    resized = image.resize(
+        (max(1, round(width * scale)), max(1, round(height * scale))),
+        Image.BILINEAR,
+    )
+    left = max(0, (resized.width - PADDLE_CROP) // 2)
+    top = max(0, (resized.height - PADDLE_CROP) // 2)
+    cropped = resized.crop((left, top, left + PADDLE_CROP, top + PADDLE_CROP))
+    array = np.asarray(cropped, dtype="float32") / 255.0
+    array = (array - np.asarray(PADDLE_MEAN, dtype="float32")) / np.asarray(
+        PADDLE_STD, dtype="float32"
+    )
+    return np.ascontiguousarray(array.transpose(2, 0, 1)[None], dtype="float32")
 
 
 class DocTROrientationDetector:
     """Predict one lossless page rotation with docTR's small classifier."""
 
     name = "doctr-page-orientation"
+    direct_confidence = DIRECT_ORIENTATION_CONFIDENCE
 
     def __init__(
         self,
@@ -514,7 +641,7 @@ class OrientationReader:
 
         angle = int(prediction["angle"])
         if angle == 0:
-            if float(prediction["confidence"]) < DIRECT_ORIENTATION_CONFIDENCE:
+            if float(prediction["confidence"]) < self._direct_confidence():
                 assessment["selector"] = "orientation_evidence_fallback"
                 assessment["osd_status"] = "skipped_uncertain_zero_prediction"
                 return [0], [90, 180, 270]
@@ -529,6 +656,15 @@ class OrientationReader:
         assessment["selector"] = "orientation_evidence_fallback"
         alternate = int(osd["angle"]) if osd else 0
         return list(dict.fromkeys((angle, alternate))), []
+
+    def _direct_confidence(self) -> float:
+        return float(
+            getattr(
+                self.orientation_detector,
+                "direct_confidence",
+                DIRECT_ORIENTATION_CONFIDENCE,
+            )
+        )
 
     def _detect_orientation(
         self,

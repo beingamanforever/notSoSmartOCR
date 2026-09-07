@@ -20,6 +20,8 @@ from PIL import Image, ImageStat, UnidentifiedImageError
 
 from .contracts import BoundingBox, TextAlternative, TextRegion
 from .providers import LocalReader, ReaderError, TesseractReader
+from .restoration import MODEL as RESTORATION_MODEL
+from .restoration import PROVIDER as RESTORATION_PROVIDER
 from .verification import has_character_repetition
 
 MAX_LOCATOR_SIZE = 512
@@ -533,6 +535,139 @@ class TiledReader:
                         )
                     )
             return regions
+
+    def _save_assessment(self, page_number: int, value: dict[str, object]) -> None:
+        with self._lock:
+            self._assessments[page_number] = value
+
+
+class RestoredViewReader:
+    """Reread degraded pages from a restored view without replacing baseline evidence.
+
+    Restoration is expensive, so it runs only where the baseline read is weak. The restored
+    reading joins the baseline as alternatives; restored-only regions are promoted on the
+    same agreement rule the tile route uses, so a restoration artefact cannot silently
+    become canonical text.
+    """
+
+    def __init__(
+        self,
+        reader: LocalReader,
+        restorer: Any,
+        *,
+        maximum_mean_confidence: float = 0.75,
+    ) -> None:
+        if not 0 <= maximum_mean_confidence <= 1:
+            raise ValueError("maximum_mean_confidence must be from 0 to 1")
+        self.reader = reader
+        self.restorer = restorer
+        self.name = f"{reader.name}-restored"
+        self.maximum_mean_confidence = maximum_mean_confidence
+        self._assessments: dict[int, dict[str, object]] = {}
+        self._lock = threading.Lock()
+
+    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        baseline = self.reader.read(image_path, page_number)
+        baseline_confidence = _mean_confidence(baseline)
+        skipped = {
+            "page_number": page_number,
+            "reader": self.name,
+            "status": "not_routed",
+            "selected_view": "baseline",
+            "baseline_mean_confidence": round(baseline_confidence, 6),
+            "review_reasons": [],
+        }
+        if not self.restorer.available():
+            self._save_assessment(
+                page_number, {**skipped, "reason": "restorer_unavailable"}
+            )
+            return baseline
+        if baseline and baseline_confidence > self.maximum_mean_confidence:
+            self._save_assessment(page_number, {**skipped, "reason": "baseline_legible"})
+            return baseline
+
+        with tempfile.TemporaryDirectory(prefix="ocr-restored-") as work:
+            restored_path = Path(work) / f"{image_path.stem}-restored.png"
+            try:
+                self.restorer.restore(image_path, restored_path)
+                restored = self.reader.read(restored_path, page_number)
+            except ReaderError as error:
+                self._save_assessment(
+                    page_number,
+                    {
+                        **skipped,
+                        "status": "failed",
+                        "failure": {"code": error.code, "message": str(error)},
+                        "review_reasons": ["restoration_failed"],
+                    },
+                )
+                return baseline
+            for region in restored:
+                region.provider = f"{region.provider}+{RESTORATION_PROVIDER}"
+
+        fused, fusion = _fuse_tiled_view(baseline, restored)
+        self._save_assessment(
+            page_number,
+            {
+                "page_number": page_number,
+                "reader": self.name,
+                "status": fusion["status"],
+                "selected_view": "fused",
+                "restoration_model": RESTORATION_MODEL,
+                "baseline_regions": fusion["baseline_regions"],
+                "restored_candidates": fusion["tiled_candidates"],
+                "agreeing_candidates": fusion["exact_overlap_candidates"],
+                "conflicting_candidates": fusion["conflicting_candidates"],
+                "promoted_restored_regions": fusion["promoted_tile_only_regions"],
+                "unresolved_restored_regions": fusion["unresolved_tile_only_regions"],
+                "baseline_tokens": fusion["baseline_tokens"],
+                "restored_tokens": fusion["tiled_tokens"],
+                "added_tokens": fusion["added_tokens"],
+                "baseline_mean_confidence": fusion["baseline_mean_confidence"],
+                "restored_mean_confidence": fusion["tiled_mean_confidence"],
+                "review_reasons": [
+                    reason
+                    for present, reason in (
+                        (
+                            bool(fusion["conflicting_candidates"]),
+                            "conflicting_restored_candidates",
+                        ),
+                        (
+                            bool(fusion["unresolved_tile_only_regions"]),
+                            "unsupported_restored_candidates",
+                        ),
+                    )
+                    if present
+                ],
+            },
+        )
+        return fused
+
+    def coverage_assessment(self, page_count: int) -> dict[str, object]:
+        with self._lock:
+            pages = [
+                dict(self._assessments.get(number, {}))
+                for number in range(1, page_count + 1)
+            ]
+        routed = [page for page in pages if page.get("selected_view") == "fused"]
+        if not routed:
+            return {
+                "status": "not_assessed",
+                "message": "No page was degraded enough to route through restoration.",
+                "pages": pages,
+            }
+        promoted = sum(int(page.get("promoted_restored_regions", 0)) for page in routed)
+        conflicts = sum(int(page.get("conflicting_candidates", 0)) for page in routed)
+        added = sum(int(page.get("added_tokens", 0)) for page in routed)
+        return {
+            "status": "review_recommended",
+            "message": (
+                f"Restoration was read on {len(routed)} degraded page(s), recovering "
+                f"{added} token(s) across {promoted} promoted region(s) and exposing "
+                f"{conflicts} conflict(s). Baseline evidence was preserved throughout."
+            ),
+            "pages": pages,
+        }
 
     def _save_assessment(self, page_number: int, value: dict[str, object]) -> None:
         with self._lock:
