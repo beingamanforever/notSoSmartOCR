@@ -52,16 +52,16 @@ flowchart LR
     F --> G[Review and feedback]
 ```
 
-DocTR and Tesseract OSD provide orientation evidence. Heron detects document regions; Falcon-OCR reads their crops and generates text, table markup, and formulas. Images retain source pixels. Shared evidence drives rendering and review, with local KaTeX for math.
-
-This is the restored Heron + Falcon route. The PP-OCRv5/Docling/TATR experiment is not active.
+DocTR and Tesseract OSD provide orientation evidence. Heron detects document regions; Falcon-OCR reads their crops and generates text, table markup, and formulas. Table recognition uses Falcon-OCR. Images retain source pixels. Shared evidence drives rendering and review, with local KaTeX for math.
 
 ## Walkthroughs
 
-1. [From an image to recognized text](docs/walkthroughs/01-from-image-to-text.md)
-2. [Layout, tables, formulas, and visual elements](docs/walkthroughs/02-layout-tables-and-crops.md)
-3. [Confidence, exports, and review](docs/walkthroughs/03-confidence-exports-and-review.md)
+Three articles with 50 additional questions answered:
+
+1. [From pixels to text: the models and pipeline](docs/walkthroughs/01-from-image-to-text.md)
+2. [Layout, tables, and our Falcon contributions](docs/walkthroughs/02-layout-tables-and-crops.md)
+3. [Confidence, Markdown, and review](docs/walkthroughs/03-confidence-exports-and-review.md)
 
 ## Acknowledgements
 
-Thank you to the teams behind [Falcon-Perception](https://github.com/tiiuae/Falcon-Perception), [Heron and Docling IBM models](https://github.com/docling-project/docling-ibm-models), [DocTR](https://github.com/mindee/doctr), [Tesseract](https://github.com/tesseract-ocr/tesseract), [Poppler](https://gitlab.freedesktop.org/poppler/poppler), and [KaTeX](https://github.com/KaTeX/KaTeX) for their open implementations and models. Their respective licenses apply.
+Thank you to the teams behind [Falcon-Perception](https://github.com/tiiuae/Falcon-Perception), [IBM's Heron layout model](https://huggingface.co/docling-project/docling-layout-heron-101), [DocTR](https://github.com/mindee/doctr), [Tesseract](https://github.com/tesseract-ocr/tesseract), [Poppler](https://gitlab.freedesktop.org/poppler/poppler), and [KaTeX](https://github.com/KaTeX/KaTeX). Heron comes from the Docling project; this demo uses its detector directly. Their respective licenses apply.
