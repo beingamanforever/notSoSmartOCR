@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
@@ -292,15 +293,21 @@ class OrientationReader:
         orientation_detector: Callable[[Path], dict[str, object]] | None = None,
         margin_reader: LocalReader | None = None,
         defer_restore: bool = False,
+        compare_ocr_views: bool = True,
+        batch_size: int = 1,
     ) -> None:
         if osd_min_confidence < 0:
             raise ValueError("osd_min_confidence cannot be negative")
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
         self.reader = reader
         self.name = f"{reader.name}-oriented"
         self.osd_min_confidence = osd_min_confidence
         self.orientation_detector = orientation_detector
         self.margin_reader = margin_reader or reader
         self.defer_restore = defer_restore
+        self.compare_ocr_views = compare_ocr_views
+        self.batch_size = batch_size
         self.osd_detector = osd_detector
         if self.osd_detector is None and osd_executable:
             self.osd_detector = partial(
@@ -310,6 +317,29 @@ class OrientationReader:
         self.executable = getattr(reader, "executable", None)
         self._assessments: dict[int, dict[str, object]] = {}
         self._lock = threading.Lock()
+
+    def read_batch(
+        self, image_paths: list[Path], page_numbers: list[int]
+    ) -> list[list[TextRegion] | ReaderError]:
+        """Overlap page preparation and I/O with an explicitly thread-safe reader."""
+        if len(image_paths) != len(page_numbers):
+            raise ValueError("image_paths and page_numbers must have equal lengths")
+        if not image_paths:
+            return []
+        results: list[list[TextRegion] | ReaderError] = []
+        with ThreadPoolExecutor(
+            max_workers=min(self.batch_size, len(image_paths))
+        ) as pool:
+            futures = [
+                pool.submit(self.read, path, number)
+                for path, number in zip(image_paths, page_numbers, strict=True)
+            ]
+            for future in futures:
+                try:
+                    results.append(future.result())
+                except ReaderError as error:
+                    results.append(error)
+        return results
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
         assessment: dict[str, Any] = {
@@ -431,7 +461,11 @@ class OrientationReader:
                 (angle != 0, "rotated_view_selected"),
                 (
                     assessment["selector"]
-                    in {"evidence_fallback", "orientation_evidence_fallback"},
+                    in {
+                        "evidence_fallback",
+                        "orientation_evidence_fallback",
+                        "orientation_uncertain",
+                    },
                     str(assessment["selector"]),
                 ),
                 (bool(assessment["view_failures"]), "orientation_view_failed"),
@@ -628,6 +662,29 @@ class OrientationReader:
         assessment: dict[str, Any],
     ) -> tuple[list[int], list[int]]:
         prediction = self._detect_orientation(image_path, assessment)
+        if not self.compare_ocr_views:
+            # Generative token likelihood is not an orientation classifier: fluent
+            # invented text can score higher than the correct source transcription.
+            predicted = (
+                int(prediction["angle"])
+                if prediction
+                and float(prediction["confidence"]) >= self._direct_confidence()
+                else None
+            )
+            osd = self._detect_osd(image_path, assessment) if predicted != 0 else None
+            detected = (
+                int(osd["angle"])
+                if osd and float(osd["confidence"]) >= self.osd_min_confidence
+                else None
+            )
+            if predicted is not None and (detected is None or predicted == detected):
+                assessment["selector"] = "orientation_classifier"
+                return [predicted], []
+            if predicted is None and detected is not None:
+                assessment["selector"] = "tesseract_osd"
+                return [detected], []
+            assessment["selector"] = "orientation_uncertain"
+            return [0], []
         if prediction is None:
             osd = self._detect_osd(image_path, assessment)
             if osd and float(osd["confidence"]) >= self.osd_min_confidence:

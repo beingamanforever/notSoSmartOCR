@@ -15,7 +15,13 @@ from ocr_pipeline.handwriting_lines import DocTRLineDetector, HandwritingLineSta
 from ocr_pipeline.comprehension import HttpTiltEngine, TiltFieldStage, VllmTiltEngine
 from ocr_pipeline.controls import GeometricControlStage
 from ocr_pipeline.correction import LexiconCorrectionStage
-from ocr_pipeline.demo import CompositionDescriptor, _read_presentations, create_app
+from ocr_pipeline.demo import (
+    MAX_DECODED_PIXELS,
+    MAX_DOCUMENT_PAGES,
+    CompositionDescriptor,
+    _read_presentations,
+    create_app,
+)
 from ocr_pipeline.dispute_resolution import DisputeResolutionStage
 from ocr_pipeline.evidence_layout import EvidenceLayoutStage
 from ocr_pipeline.falcon import FalconOCRServiceReader
@@ -232,73 +238,91 @@ def create_verified_app(
             page_segmentation_mode=3,
         ),
         defer_restore=True,
+        compare_ocr_views=falcon_layout_url is None,
+        batch_size=(
+            getattr(args, "page_workers", 4)
+            if falcon_layout_url is not None
+            and getattr(args, "nemotron_model_dir", None) is None
+            and not docres_checkpoint
+            else 1
+        ),
     )
     # The frame crop focuses a word-level detector and then re-reads the whole page to
     # check nothing fell outside it. Falcon's layout model already ignores scan borders,
     # so that second full pass is 6.5s of pure duplication.
     reader = oriented if falcon_layout_url is not None else PageFrameReader(oriented)
-    # Both run on CPU: the GPU is within 1.5 GB of full with the readers loaded, and
-    # heron is 28 ms on an A100 class card, so CPU latency is affordable per page.
-    proposal_detector = (
-        HeronTableDetector(device=getattr(args, "heron_device", "cpu"))
-        if getattr(args, "heron_proposals", True)
-        else None
-    )
-    structure_fallback = (
-        TableFormerStructure(device=getattr(args, "tableformer_device", "cpu"))
-        if getattr(args, "tableformer_fallback", True)
-        else None
-    )
-    extractor = TatrTableExtractor(
-        args.tatr_source,
-        args.tatr_detection_model,
-        args.tatr_structure_model,
-        device=args.device,
-        crop_padding=5,
-        minimum_detection_score=0.5,
-        enable_ruled_table_proposals=True,
-        proposal_detector=proposal_detector,
-        structure_fallback=structure_fallback,
-    )
-    raw = TesseractReader(
-        executable=str(args.tesseract_executable),
-        language="eng",
-        timeout_seconds=120,
-        page_segmentation_mode=4,
-    )
-    enhanced = TesseractReader(
-        executable=str(args.tesseract_executable),
-        language="eng",
-        timeout_seconds=120,
-        page_segmentation_mode=4,
-        thresholding_method=2,
-    )
-    cell = TesseractReader(
-        executable=str(args.tesseract_executable),
-        language="eng",
-        timeout_seconds=120,
-        page_segmentation_mode=7,
-    )
-    stage = TatrTableStage(
-        extractor,
-        challengers=(
-            TableChallenger("tesseract_raw", raw),
-            TableChallenger("sauvola", enhanced),
-            TableChallenger("tesseract_cell", cell, scope="cell"),
-        ),
-        low_primary_confidence=0.88,
-        parallel_challengers=True,
-    )
-    controls = GeometricControlStage(
-        label_provider=(
-            (base_reader.name, "falcon-perception")
-            if falcon_layout_url is not None
-            else base_reader.name
+    word_reader = getattr(args, "nemotron_model_dir", None) is not None
+    stages: list[object] = []
+    if word_reader:
+        # Both run on CPU: the GPU is within 1.5 GB of full with the readers loaded, and
+        # heron is 28 ms on an A100 class card, so CPU latency is affordable per page.
+        shared_layout = bool(
+            falcon_layout_url
+            and layout_reader.provenance.get("layout_model")
+            in {
+                "ds4sd/docling-layout-heron-101",
+                "docling-project/docling-layout-heron-101",
+            }
         )
+        proposal_detector = (
+            HeronTableDetector(device=getattr(args, "heron_device", "cpu"))
+            if getattr(args, "heron_proposals", True) and not shared_layout
+            else None
+        )
+        structure_fallback = (
+            TableFormerStructure(device=getattr(args, "tableformer_device", "cpu"))
+            if getattr(args, "tableformer_fallback", True)
+            else None
+        )
+        extractor = TatrTableExtractor(
+            args.tatr_source,
+            args.tatr_detection_model,
+            args.tatr_structure_model,
+            device=args.device,
+            crop_padding=5,
+            minimum_detection_score=0.5,
+            enable_ruled_table_proposals=not shared_layout,
+            layout_proposals_only=shared_layout,
+            proposal_detector=proposal_detector,
+            structure_fallback=structure_fallback,
+        )
+        raw = TesseractReader(
+            executable=str(args.tesseract_executable),
+            language="eng",
+            timeout_seconds=120,
+            page_segmentation_mode=4,
+        )
+        enhanced = TesseractReader(
+            executable=str(args.tesseract_executable),
+            language="eng",
+            timeout_seconds=120,
+            page_segmentation_mode=4,
+            thresholding_method=2,
+        )
+        cell = TesseractReader(
+            executable=str(args.tesseract_executable),
+            language="eng",
+            timeout_seconds=120,
+            page_segmentation_mode=7,
+        )
+        stage = TatrTableStage(
+            extractor,
+            challengers=(
+                TableChallenger("tesseract_raw", raw),
+                TableChallenger("sauvola", enhanced),
+                TableChallenger("tesseract_cell", cell, scope="cell"),
+            ),
+            low_primary_confidence=0.88,
+            parallel_challengers=True,
+        )
+        stages.append(stage)
+    risk = EvidenceRiskStage(
+        text_provider="falcon-perception"
+        if falcon_layout_url is not None
+        else base_reader.name
     )
-    risk = EvidenceRiskStage(text_provider=base_reader.name)
-    stages: list[object] = [stage, controls]
     if falcon_layout_url is None:
+        stages.append(GeometricControlStage(label_provider=base_reader.name))
         # The faint-text stage retiles the page and rereads it. With Falcon that is a
         # second full pass per tile for text it already read in the first one.
         stages.append(FaintTinyTextStage(faint_text_reader))
@@ -406,8 +430,9 @@ def create_verified_app(
     stages.extend((risk, EvidenceLayoutStage()))
     if formula_stage is not None:
         stages.append(formula_stage)
-    stages.append(DigitVerificationStage(cell, text_provider=base_reader.name))
-    stages.append(AnchoredInkProposalStage(label_provider=base_reader.name))
+    if word_reader:
+        stages.append(DigitVerificationStage(cell, text_provider=base_reader.name))
+        stages.append(AnchoredInkProposalStage(label_provider=base_reader.name))
     lexicon_path = getattr(args, "lexicon", None)
     if lexicon_path:
         # Runs before layout so downstream stages see the alternatives. Proposes only
@@ -460,20 +485,30 @@ def create_verified_app(
             "with Tesseract OSD evidence check"
         ),
         tesseract_roles=(
-            "orientation OSD",
-            "side-margin text",
-            "selective wide-band fallback and confirmation",
-            "table challengers (raw, Sauvola, and selective cell reread)",
+            ("orientation OSD", "side-margin text")
+            if falcon_layout_url is not None and not word_reader
+            else (
+                "orientation OSD",
+                "side-margin text",
+                "selective wide-band fallback and confirmation",
+                "table challengers (raw, Sauvola, and selective cell reread)",
+            )
         ),
         stages=tuple(configured_stages),
         handwriting=handwriting,
-        build_label="2026-09-06-form-evidence-v4",
+        build_label="source-linked OCR",
         note=(
-            "Configuration only. Table Transformer is augmented by conservative "
-            "ruled-form proposals and count-gated grid repair. Models are loaded "
-            "lazily where supported. Label-anchored form ink is proposed "
-            "automatically, but specialist text remains pending until independently "
-            "validated. Optional page presentation never mutates canonical evidence. "
+            (
+                "Configuration only. Layout regions and checkbox states come from "
+                "the learned detector; text and transcribed marks come from Falcon. "
+                "Contour-based control proposals are disabled for this reader. "
+                if falcon_layout_url is not None
+                else "Configuration only. Table Transformer is augmented by conservative "
+                "ruled-form proposals and count-gated grid repair. "
+            )
+            + "Models are loaded lazily where supported. "
+            "Optional specialist text remains review evidence until accepted. "
+            "Optional page presentation never mutates canonical evidence. "
             "Readiness and execution are "
             f"reported only after processing.{presentation_note}"
         ),
@@ -483,6 +518,10 @@ def create_verified_app(
         "handwriting_stage": handwriting_stage,
         "composition": composition,
     }
+    if hasattr(args, "max_document_pages"):
+        app_options["max_pages"] = args.max_document_pages
+    if hasattr(args, "max_decoded_pixels"):
+        app_options["max_decoded_pixels"] = args.max_decoded_pixels
     katex_asset_root = getattr(args, "katex_asset_root", None)
     if katex_asset_root is not None:
         app_options["katex_asset_root"] = katex_asset_root
@@ -524,7 +563,7 @@ def create_verified_app(
 def _primary_ocr_label(args: argparse.Namespace, falcon_layout_url: str | None) -> str:
     if falcon_layout_url is None:
         return "NVIDIA Nemotron OCR v2 (word merge, batch size 1)"
-    falcon = "Falcon-Perception layout OCR (PP-DocLayoutV3 regions, per-region read)"
+    falcon = "Falcon OCR with learned layout and native decoder scores"
     if getattr(args, "nemotron_model_dir", None) is None:
         return falcon
     return (
@@ -534,9 +573,8 @@ def _primary_ocr_label(args: argparse.Namespace, falcon_layout_url: str | None) 
 
 
 def _orientation_detector(args: argparse.Namespace) -> Any:
-    """PP-LCNet by default: docTR's classifier returns near-chance confidence on
-    pages that are not document-shaped, and the pipeline then rotates them."""
-    if getattr(args, "orientation_model", "paddle") == "doctr":
+    """Use the Mindee classifier; uncertain generative reads retain source orientation."""
+    if getattr(args, "orientation_model", "doctr") == "doctr":
         return DocTROrientationDetector(device=args.device)
     return PaddleDocOrientationDetector()
 
@@ -589,6 +627,24 @@ def _validate_local_configuration(
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--page-workers",
+        type=_positive_int,
+        default=4,
+        help="Concurrent native OCR page requests; the GPU service controls model execution",
+    )
+    parser.add_argument(
+        "--max-document-pages",
+        type=_positive_int,
+        default=MAX_DOCUMENT_PAGES,
+        help="Maximum pages accepted per uploaded document",
+    )
+    parser.add_argument(
+        "--max-decoded-pixels",
+        type=_positive_int,
+        default=MAX_DECODED_PIXELS,
+        help="Maximum total decoded pixels per uploaded document",
+    )
     parser.add_argument("--nemotron-model-dir", type=Path)
     parser.add_argument(
         "--falcon-layout-url",
@@ -714,7 +770,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--orientation-model",
         choices=("paddle", "doctr"),
-        default="paddle",
+        default="doctr",
     )
     parser.add_argument(
         "--warmup-image",

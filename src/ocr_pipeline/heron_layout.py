@@ -53,6 +53,14 @@ class HeronTableDetector:
         self._lock = threading.Lock()
 
     def detect(self, image: Image.Image) -> list[BoundingBox]:
+        return [
+            _clamped_box(item["box"], *image.size)
+            for item in self.detect_elements(image)
+            if item["label"] in TABLE_LABELS
+        ]
+
+    def detect_elements(self, image: Image.Image) -> list[Detection]:
+        """Return all learned layout classes using the same detector pass."""
         width, height = image.size
         with self._lock:
             detector = self._get_detector()
@@ -63,13 +71,22 @@ class HeronTableDetector:
 
         boxes = []
         for item in detections:
-            if item.get("label") not in TABLE_LABELS:
-                continue
             if float(item.get("score", 0.0)) < self.score_threshold:
                 continue
             box = _clamped_box(item.get("box"), width, height)
             if box is not None:
-                boxes.append(box)
+                boxes.append(
+                    {
+                        "label": str(item["label"]).lower(),
+                        "score": float(item["score"]),
+                        "box": (box.left, box.top, box.right, box.bottom),
+                        **{
+                            key: item[key]
+                            for key in ("query_id", "class_scores")
+                            if key in item
+                        },
+                    }
+                )
         return boxes
 
     def model_provenance(self) -> dict[str, Any]:
@@ -100,20 +117,26 @@ class HeronTableDetector:
                 inputs = processor(images=[image], return_tensors="pt").to(device)
                 with torch.inference_mode():
                     outputs = model(**inputs)
-                result = processor.post_process_object_detection(
-                    outputs,
-                    target_sizes=torch.tensor([image.size[::-1]]),
-                    threshold=score_threshold,
-                )[0]
+                # Heron's targets assign one class per query. Flattened focal top-k
+                # emits several alternative labels for one box and drops other queries.
+                probabilities = outputs.logits[0].sigmoid().float().cpu()
+                scores, labels = probabilities.max(dim=-1)
+                centers, sizes = outputs.pred_boxes[0].float().cpu().split(2, dim=-1)
+                boxes = torch.cat((centers - sizes / 2, centers + sizes / 2), dim=-1)
+                boxes *= torch.tensor([*image.size, *image.size])
                 return [
                     {
-                        "label": id2label[int(label_id)],
-                        "score": float(score),
-                        "box": tuple(float(value) for value in box.tolist()),
+                        "label": id2label[int(labels[query])],
+                        "score": float(scores[query]),
+                        "box": tuple(boxes[query].tolist()),
+                        "query_id": int(query),
+                        "class_scores": {
+                            id2label[label]: float(score)
+                            for label, score in enumerate(probabilities[query])
+                        },
                     }
-                    for score, label_id, box in zip(
-                        result["scores"], result["labels"], result["boxes"]
-                    )
+                    for query in scores.argsort(descending=True, stable=True)
+                    if scores[query] >= score_threshold
                 ]
         except Exception as error:
             raise ReaderError("heron_load_failed", str(error)) from error

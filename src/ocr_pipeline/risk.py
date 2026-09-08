@@ -79,6 +79,16 @@ class EvidenceRiskStage:
         )
 
         reasons = []
+        low_token_regions = [
+            region.id
+            for region in evidence
+            if (region.text_provenance or {})
+            .get("generation", {})
+            .get("token_score_min", 1.0)
+            < self.minimum_mean_confidence
+        ]
+        if low_token_regions:
+            reasons.append("low_decoder_token_score")
         if mean_confidence < self.minimum_mean_confidence:
             reasons.append("low_mean_confidence")
         if (
@@ -120,6 +130,7 @@ class EvidenceRiskStage:
                     "mean_confidence": round(mean_confidence, 6),
                     "median_height": median_height,
                     "large_low_confidence_regions": large_low_confidence,
+                    "low_decoder_token_region_ids": low_token_regions,
                 },
             },
         )

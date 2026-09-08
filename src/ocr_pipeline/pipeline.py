@@ -560,7 +560,15 @@ def _merge_timings(
 def _region_needs_review(region: TextRegion) -> bool:
     if region.resolution != "resolved":
         return True
+    provenance = region.text_provenance or {}
+    if (
+        provenance.get("recognition_agreement") is False
+        or provenance.get("recognition_status") == "unavailable"
+    ):
+        return True
     structure = region.structure or {}
+    if structure.get("grid_disagreement"):
+        return True
     if structure.get("coverage_status") == "insufficient_control_group":
         return True
     if structure.get("block_type") == "formula" and structure.get(

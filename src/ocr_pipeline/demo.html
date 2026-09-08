@@ -55,6 +55,10 @@
     }
     h1 { margin: 3px 0 1px; font-size: clamp(1.65rem, 3vw, 2.2rem); letter-spacing: -.04em; }
     .subtitle { margin: 0; color: var(--muted); }
+    .has-document .examples { display: none; }
+    .has-document header { text-align: left; display: flex; align-items: baseline; gap: 16px; }
+    .has-document h1 { font-size: 1.25rem; }
+    .has-document .shell { max-width: 2100px; padding: 16px 20px; }
     .toolbar, .card {
       border: 1px solid var(--line);
       background: var(--panel);
@@ -240,7 +244,9 @@
     .icon-button:disabled { opacity: .35; cursor: not-allowed; }
     .page-count { min-width: 74px; color: var(--muted); text-align: center; font-size: .84rem; }
 
-    .categories { display: flex; justify-content: flex-end; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+    .categories { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
+    .source-zoom { display: flex; align-items: center; gap: 8px; font-size: .74rem; color: var(--muted); }
+    .source-zoom select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); }
     .layers-control { position: relative; }
     .layers-control > summary {
       list-style: none;
@@ -290,17 +296,20 @@
       min-height: 620px;
       max-height: 74vh;
       overflow: auto;
-      display: grid;
-      place-items: center;
+      display: block;
       padding: 20px;
       background-color: var(--panel-raised);
     }
+    .preview-wrap:has(> #preview-empty:not([hidden])) {
+      display: grid;
+      place-items: center;
+    }
     canvas {
       display: none;
-      width: auto;
+      width: var(--source-zoom, 100%);
       height: auto;
-      max-width: 100%;
-      max-height: 64vh;
+      max-width: none;
+      max-height: none;
       border-radius: 3px;
       background: var(--panel);
       box-shadow: 0 10px 34px #17203324;
@@ -500,7 +509,7 @@
     .value { display: block; margin-top: 3px; overflow-wrap: anywhere; font-size: .86rem; }
     .region-text { grid-column: 1 / -1; padding-top: 8px; border-top: 1px solid var(--line); }
     .region-transcription { margin-bottom: 9px; }
-    .region-transcription .value { font-size: .94rem; line-height: 1.5; }
+    .region-transcription .value { font-size: .94rem; line-height: 1.5; white-space: pre-wrap; }
     .technical-details { grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 8px; }
     .technical-details summary { cursor: pointer; color: var(--muted); font-size: .74rem; font-weight: 700; }
     .technical-grid { display: grid; gap: 10px; margin-top: 10px; }
@@ -590,10 +599,8 @@
     .rendered-page-head { margin-bottom: 9px; }
     .rendered-page-head h2 { margin-bottom: 0; }
     .confidence-review .confidence-evidence {
-      display: inline;
       padding: 0 1px;
       border-radius: 3px;
-      padding: 0 1px;
       color: inherit;
       box-decoration-break: clone;
       -webkit-box-decoration-break: clone;
@@ -658,6 +665,8 @@
     .semantic-block.footer { padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted); font-size: .76rem; }
     .semantic-block.aside_text { margin: 2px 0 16px; padding-left: 9px; border-left: 2px solid var(--line-strong); color: var(--muted); font-size: .76rem; }
     .semantic-block.formula { margin: 14px 0; padding: 8px 10px; border-left: 2px solid var(--accent); font-family: "Times New Roman", serif; font-size: 1rem; }
+    .semantic-block.code { overflow-x: auto; white-space: pre; word-break: normal; }
+    .rendered-content .katex-display { overflow-x: auto; overflow-y: hidden; padding: 3px 0; }
     .semantic-block.table { overflow-x: auto; padding: 2px 0 8px; }
     .document-table { width: 100%; border-collapse: collapse; font-size: .84rem; line-height: 1.45; }
     .document-table th, .document-table td { min-width: 90px; padding: 9px 10px; border: 1px solid var(--line-strong); text-align: left; vertical-align: top; white-space: pre-wrap; }
@@ -668,6 +677,7 @@
       border: 1px solid var(--line-strong); border-radius: 4px;
       font-size: .72rem; font-weight: 700; line-height: 1.5; text-align: center; color: var(--muted);
     }
+    .control-state.checkbox-symbol { border: 0; padding: 0; min-width: 1.1em; font-size: 1.15rem; line-height: 1.2; }
     .control-state[data-state="selected"] { border-color: var(--confidence-high); color: var(--confidence-high); }
     .control-state[data-state="ambiguous"] { border-style: dashed; border-color: var(--confidence-medium); color: var(--confidence-medium); }
     .control-state[data-state="annotation"] { border-style: dashed; border-color: var(--accent); color: var(--accent); }
@@ -677,10 +687,14 @@
       color: var(--muted); font-size: .7rem; font-style: normal; letter-spacing: .01em; vertical-align: baseline;
     }
     .semantic-block.handwriting { padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--accent-soft); }
-    .semantic-block.figure, .semantic-block.field { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-raised); }
+    .semantic-block.field { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-raised); }
+    .semantic-block.figure { margin: 16px 0; width: fit-content; min-width: min(100%, 64px); max-width: 100%; border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px; }
+    .semantic-block.figure figcaption { color: #047857; font-size: 12px; margin-bottom: 6px; }
+    .semantic-block.figure img { display: block; max-width: 100%; height: auto; }
     .semantic-block.list { padding-left: 18px; }
-    .semantic-block.form-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px 20px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+    .semantic-block.form-row { display: grid; grid-template-columns: repeat(var(--fields, 2), minmax(160px, 1fr)); overflow-x: auto; gap: 8px 20px; padding: 10px 0; border-bottom: 1px solid var(--line); }
     .semantic-block.form-row > span { min-width: 0; }
+    .semantic-block.form-row > button { grid-column: 1 / -1; }
     .semantic-block.form-row strong { display: block; margin-bottom: 2px; font-size: .76rem; color: var(--muted); letter-spacing: .02em; }
     .presentation-content p { margin: 0 0 12px; line-height: 1.65; white-space: pre-wrap; }
     .presentation-content h3 { margin: 22px 0 9px; font-size: 1.08rem; }
@@ -809,37 +823,28 @@
     </form>
 
     <nav id="examples" class="examples" aria-label="Example documents">
-      <span class="examples-label">Try a public example</span>
-      <button class="example-button" type="button" data-example="contract-agreement">
-        <img class="example-preview" src="/api/examples/contract-agreement" alt="Provider agreement preview" loading="lazy">
-        <span class="example-name">Provider agreement</span>
-        <span class="example-kind">Contract cover and terms</span>
-      </button>
-      <button class="example-button" type="button" data-example="contract-amendment">
-        <img class="example-preview" src="/api/examples/contract-amendment" alt="Contract amendment preview" loading="lazy">
-        <span class="example-name">Contract amendment</span>
-        <span class="example-kind">Dense legal prose</span>
-      </button>
+      <span class="examples-label">Try an example</span>
       <button class="example-button" type="button" data-example="academic-paper">
-        <img class="example-preview" src="/api/examples/academic-paper" alt="Academic paper preview" loading="lazy">
-        <span class="example-name">Academic paper</span>
+        <img class="example-preview" src="/api/examples/academic-paper" alt="Attention Is All You Need preview" loading="lazy">
+        <span class="example-name">Attention Is All You Need</span>
         <span class="example-kind">Math and columns</span>
       </button>
-      <button class="example-button" type="button" data-example="code">
-        <img class="example-preview" src="/api/examples/code" alt="Code document preview" loading="lazy">
-        <span class="example-name">Code</span>
-        <span class="example-kind">Mixed typography</span>
+      <button class="example-button" type="button" data-example="gsoc">
+        <img class="example-preview" src="/api/examples/gsoc" alt="GSoC Final Evaluation preview" loading="lazy">
+        <span class="example-name">GSoC Final Evaluation</span>
+        <span class="example-kind">Text and images</span>
+      </button>
+      <button class="example-button" type="button" data-example="handwriting">
+        <img class="example-preview" src="/api/examples/handwriting" alt="Handwritten notes preview" loading="lazy">
+        <span class="example-name">Handwritten notes</span>
+        <span class="example-kind">Handwriting and formulas</span>
       </button>
       <button class="example-button" type="button" data-example="financial-table">
         <img class="example-preview" src="/api/examples/financial-table" alt="Financial table preview" loading="lazy">
         <span class="example-name">Financial table</span>
         <span class="example-kind">Dense layout</span>
       </button>
-      <button class="example-button" type="button" data-example="scanned-form">
-        <img class="example-preview" src="/api/examples/scanned-form" alt="Scanned form preview" loading="lazy">
-        <span class="example-name">Scanned form</span>
-        <span class="example-kind">Fields and lines</span>
-      </button>
+
     </nav>
 
     <div class="activity-line" id="activity-line" hidden>
@@ -868,6 +873,14 @@
           </div>
         </div>
         <div class="categories" id="region-categories" hidden>
+          <label class="source-zoom" for="source-zoom">Zoom
+            <select id="source-zoom">
+              <option value="100">Fit width</option>
+              <option value="150">1.5×</option>
+              <option value="200">2×</option>
+              <option value="300">3×</option>
+            </select>
+          </label>
           <details class="layers-control" id="layers-control">
             <summary>Layers <span id="layer-count"></span></summary>
             <div class="category-list" id="category-list" role="group" aria-label="Filter overlay layers"></div>
@@ -984,6 +997,7 @@
             <div class="inspector-empty">Select a region on the page to inspect its evidence.</div>
             <div class="inspector-head">
               <span class="reread-status" id="reread-status" role="status" aria-live="polite" aria-atomic="true"></span>
+              <button class="download inspector-action" id="download-crop" type="button" disabled>Download crop</button>
               <button class="download inspector-action" id="reread-handwriting" type="button" hidden disabled>Reread handwriting</button>
             </div>
             <div class="inspector-primary">
@@ -1006,7 +1020,7 @@
               <div class="datum" id="region-category-row" hidden><span class="label">Layout category</span><span class="value" id="region-category">-</span></div>
               <div class="datum"><span class="label" id="region-confidence-label">Recognition score</span><span class="value" id="region-confidence">Not available</span></div>
               <div class="datum"><span class="label">Provider</span><span class="value" id="region-provider">-</span></div>
-              <div class="datum"><span class="label">Reading order</span><span class="value" id="region-order">-</span></div>
+              <div class="datum"><span class="label" id="region-order-label">Reading order</span><span class="value" id="region-order">-</span></div>
               <div class="datum"><span class="label">Bounding box</span><span class="value" id="region-box">-</span></div>
               <div class="datum"><span class="label">Resolution</span><span class="value" id="region-resolution">-</span></div>
               <details class="technical-details">
@@ -1047,7 +1061,7 @@
       hiddenKinds: new Set(["text", "line", "table_candidate", "table_cell", "word"]),
       selectedFile: null,
       selectedExample: null,
-      feedbackSent: null,
+      feedbackSent: {},
       clientTimerStartedAt: null,
       clientTimerId: null,
       copyResetId: null,
@@ -1086,6 +1100,7 @@
       footnote: "#4f46e5",
       text: "#a21caf",
       figure: "#047857",
+      signature: "#b45309",
       table: "#0369a1",
       field: "#c026d3",
       form_row: "#be185d",
@@ -1164,6 +1179,7 @@
         if (!response.ok) throw new Error(payload.detail || "The document could not be parsed");
         if (resultRequest !== state.resultRequest) return;
         state.response = payload;
+        history.replaceState(null, "", `?session=${encodeURIComponent(payload.session_id)}`);
         state.pageIndex = 0;
         state.selectedRegionKey = null;
         resetHiddenKinds();
@@ -1194,6 +1210,7 @@
     });
 
     byId("clear-button").addEventListener("click", async () => {
+      history.replaceState(null, "", location.pathname);
       state.resultRequest += 1;
       const sessionId = state.response?.session_id;
       fileInput.value = "";
@@ -1506,6 +1523,7 @@
 
     function updateReviewActions(region) {
       const canonical = region && currentRegions().some((item) => item.id === region.id);
+      const structuredTable = Boolean(region?.structure?.cells?.length);
       const alternatives = canonical
         ? (region.alternatives || [])
           .map((alternative, index) => ({ alternative, index }))
@@ -1513,7 +1531,8 @@
         : [];
       const pending = Boolean(
         canonical
-        && (region.resolution !== "resolved" || alternatives.length)
+        && (region.resolution !== "resolved" || alternatives.length
+          || region.structure?.layout_owner_id)
       );
       const controls = byId("review-actions");
       controls.hidden = !pending;
@@ -1523,11 +1542,12 @@
         option.textContent = alternative.text || `Alternative ${index + 1}`;
         return option;
       }));
-      byId("review-alternative").hidden = alternatives.length === 0;
-      byId("accept-alternative").hidden = alternatives.length === 0;
+      byId("review-alternative").hidden = structuredTable || alternatives.length === 0;
+      byId("accept-alternative").hidden = structuredTable || alternatives.length === 0;
       controls.querySelectorAll("button, select, input").forEach((control) => {
         control.disabled = state.rereadBusy;
       });
+      byId("edit-region").hidden = structuredTable;
       byId("region-edit-text").hidden = true;
       byId("region-edit-text").value = "";
       byId("save-region-edit").hidden = true;
@@ -1695,6 +1715,7 @@
     }
 
     function renderResult() {
+      document.body.classList.add("has-document");
       const payload = state.response;
       const result = payload.result;
       renderTiming(payload.timing, payload.page_execution, payload.stage_execution);
@@ -1763,7 +1784,7 @@
     }
 
     function resetFeedback() {
-      state.feedbackSent = null;
+      state.feedbackSent = {};
       byId("feedback").hidden = !state.response;
       byId("feedback-up").disabled = !state.response;
       byId("feedback-up").setAttribute("aria-pressed", "false");
@@ -1778,9 +1799,19 @@
       byId("feedback-send").disabled = true;
     }
 
+    function renderFeedback() {
+      const page = state.response?.result?.pages?.[state.pageIndex];
+      const verdict = state.feedbackSent[`${state.response?.revision}:${page?.page_number}`];
+      byId("feedback-up").setAttribute("aria-pressed", String(verdict === "good"));
+      byId("feedback-down").toggleAttribute("data-sent", verdict === "problem");
+    }
+
     async function sendFeedback(verdict, reason = null, note = "") {
-      if (!state.response || state.feedbackSent === verdict) return;
+      if (!state.response) return;
+      const sessionId = state.response.session_id;
       const page = state.response.result?.pages?.[state.pageIndex];
+      const key = `${state.response.revision}:${page?.page_number}`;
+      if (state.feedbackSent[key] === verdict) return;
       try {
         const response = await fetch(
           `/api/sessions/${state.response.session_id}/feedback`,
@@ -1798,12 +1829,12 @@
           }
         );
         if (!response.ok) throw new Error(`Feedback failed (${response.status})`);
-        state.feedbackSent = verdict;
-        byId("feedback-up").setAttribute("aria-pressed", String(verdict === "good"));
-        byId("feedback-down").toggleAttribute("data-sent", verdict === "problem");
+        if (state.response?.session_id !== sessionId) return;
+        state.feedbackSent[key] = verdict;
+        renderFeedback();
         byId("feedback-problem").open = false;
         setCopyStatus(
-          verdict === "good" ? "Thanks, marked as good." : "Reported to the review team."
+          verdict === "good" ? "Saved with this page image." : "Feedback and page image saved."
         );
       } catch (error) {
         setCopyStatus(error.message, true);
@@ -1883,7 +1914,7 @@
           ? []
           : [["Manual reread", timing.manual_reread_seconds]]),
         ...pageExecution.map((run) => [
-          `Page ${run.page_number} total`,
+          `Page ${run.page_number} ${run.batched_reader ? "post-read processing" : "total"}`,
           run.execution_seconds,
           `${Number(run.queue_seconds).toFixed(3)} s queued${run.batched_reader ? " · batched reader" : ""}`
         ]),
@@ -2085,21 +2116,76 @@
       );
       usable.forEach((region, index) => {
         if (index) parent.append(document.createTextNode(separator));
-        const marker = document.createElement("span");
-        marker.textContent = region.text;
-        decorateConfidence(marker, region.confidence, true, {
-          id: region.id,
-          provider: region.provider,
-          scope: confidenceScope(region),
-          confidenceKind: confidenceKind(region)
+        const math = renderInlineMath(region.text);
+        if (math) {
+          decorateConfidence(math, region.confidence, true, {
+            id: region.id,
+            provider: region.provider,
+            scope: confidenceScope(region),
+            confidenceKind: confidenceKind(region)
+          });
+          parent.append(math);
+          return;
+        }
+        const words = region.structure?.word_evidence || [];
+        const tokens = region.text.match(/\S+|\s+/gu) || [];
+        const evidenceTokens = words.flatMap((word, index) =>
+          (word.text.match(/\S+/gu) || []).map((text) => ({ text, word, index }))
+        );
+        const aligned = tokens.filter((text) => /\S/u.test(text)).join(" ")
+          === evidenceTokens.map((entry) => entry.text).join(" ");
+        const generation = region.text_provenance?.generation;
+        const nativeScores = region.text_provenance?.raw_text === region.text
+          && Array.isArray(generation?.tokens) ? generation.tokens : null;
+        let tokenIndex = 0;
+        let characterOffset = 0;
+        (aligned || nativeScores ? tokens : [region.text]).forEach((text) => {
+          const start = characterOffset;
+          characterOffset += Array.from(text).length;
+          if ((aligned || nativeScores) && !/\S/u.test(text)) {
+            parent.append(document.createTextNode(text));
+            return;
+          }
+          const entry = aligned ? evidenceTokens[tokenIndex++] : null;
+          const scores = nativeScores?.filter((token) => token.start < characterOffset && token.end > start)
+            .map((token) => token.score) || [];
+          const score = scores.length
+            ? Math.exp(scores.reduce((sum, value) => sum + Math.log(Math.max(value, 1e-30)), 0) / scores.length)
+            : entry ? entry.word.confidence : region.confidence;
+          const marker = document.createElement("span");
+          marker.textContent = text;
+          decorateConfidence(marker, score, true, {
+            id: entry ? `${region.id}-word-${entry.index + 1}` : region.id,
+            provider: nativeScores ? region.provider : entry ? region.text_provenance?.geometry_provider : region.provider,
+            scope: entry ? "word" : nativeScores ? "word score; region location" : confidenceScope(region),
+            confidenceKind: nativeScores ? "Decoder token score" : confidenceKind(region)
+          });
+          parent.append(marker);
         });
-        parent.append(marker);
       });
       if (!usable.length) return false;
       parent.classList.add("confidence-host");
       parent.tabIndex = 0;
       parent.setAttribute("aria-describedby", "confidence-inspector");
       return true;
+    }
+
+    function renderInlineMath(text) {
+      if (typeof window.renderMathInElement !== "function") return null;
+      const marker = document.createElement("span");
+      marker.textContent = text;
+      window.renderMathInElement(marker, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "\\[", right: "\\]", display: true },
+          { left: "\\(", right: "\\)", display: false },
+          { left: "$", right: "$", display: false }
+        ],
+        throwOnError: true,
+        strict: "error",
+        trust: false
+      });
+      return marker.querySelector(".katex") ? marker : null;
     }
 
     function confidenceScope(region) {
@@ -2118,6 +2204,8 @@
     }
 
     function confidenceKind(region) {
+      if (region?.text_provenance?.generation?.token_score !== undefined) return "Decoder token score";
+      if (region?.text_provenance?.method === "learned_checkbox_detection") return "Recognition score";
       const role = region?.structure?.role;
       if (role === "table" && validConfidence(region?.structure?.detection_confidence)) {
         return "Detection score";
@@ -2201,7 +2289,8 @@
 
     function confidenceTarget(target) {
       if (!(target instanceof Element)) return null;
-      if (target.matches(".confidence-evidence")) return target;
+      const evidence = target.closest(".confidence-evidence");
+      if (evidence) return evidence;
       const host = target.closest(".confidence-host");
       const markers = host ? host.querySelectorAll(".confidence-evidence") : [];
       return markers[Number(host?.dataset.confidenceIndex) || 0] || null;
@@ -2307,6 +2396,7 @@
       state.activeEvidenceId = region.id;
       const linked = [...renderedView.querySelectorAll(".confidence-evidence")].find(
         (item) => item.dataset.evidenceId === region.id
+          || item.dataset.evidenceId === region.structure?.layout_owner_id
       );
       renderedView.querySelector(".confidence-active")?.classList.remove("confidence-active");
       linked?.classList.add("confidence-active");
@@ -2337,7 +2427,7 @@
         };
       }
       return {
-        label: detectionOnlyConfidence(region) ? "Detection score" : "Recognition score",
+        label: confidenceKind(region),
         value: region?.confidence,
         scope: detectionOnlyConfidence(region)
           ? "region detection"
@@ -2607,8 +2697,8 @@
       };
       const element = document.createElement(tags[kind] || "div");
       element.className = `semantic-block ${kind}`;
-      const marker = document.createElement("span");
-      marker.textContent = rawText;
+      const marker = renderInlineMath(rawText) || document.createElement("span");
+      if (!marker.childNodes.length) marker.textContent = rawText;
       decorateConfidence(marker, source.confidence, true, {
         id: source.id,
         provider: source.provider,
@@ -2660,7 +2750,10 @@
       const formula = document.createElement("div");
       formula.className = "presentation-formula";
       try {
-        window.katex.render(rawText, formula, {
+        const expression = rawText.trim();
+        const wrapped = [["$$", "$$"], ["\\[", "\\]"], ["\\(", "\\)"], ["$", "$"]]
+          .find(([open, close]) => expression.startsWith(open) && expression.endsWith(close));
+        window.katex.render(wrapped ? expression.slice(wrapped[0].length, -wrapped[1].length) : expression, formula, {
           displayMode: true,
           throwOnError: true,
           strict: "error",
@@ -2867,7 +2960,7 @@
       );
       const included = orderedRegions(page.regions).filter((region) => {
         const role = region.structure?.role;
-        if (["table_source", "coverage_risk", "table_candidate"].includes(role)) return false;
+        if (["table_source", "figure_source", "coverage_risk", "table_candidate"].includes(role)) return false;
         if (["coverage_risk", "table_candidate"].includes(region.kind)) return false;
         return evidenceIds.has(region.id)
           || semanticKind(region) === "control"
@@ -2942,10 +3035,71 @@
 
     function renderSemanticBlock(group) {
       const kind = group.kind;
-      if (kind === "table") return renderDocumentTable(group.region);
-      if (kind === "form_row") return renderFormRow(group.region, group.sourceIndex);
+      const ownedSources = group.role === "layout_block"
+        ? (group.region.structure?.lines || []).flatMap((line) => line.evidence_ids || [])
+          .map((evidenceId) => group.sourceIndex.get(evidenceId))
+        : [];
+      const source = ownedSources.length === 1
+        && ownedSources[0]?.resolution === "resolved"
+        && String(ownedSources[0].text).trim() === group.text.trim()
+        ? ownedSources[0] : group.region;
+      if (kind === "figure" && group.region.structure?.image) {
+        const asset = group.region.structure.image;
+        if (asset.media_type !== "image/png" || !/^[A-Za-z0-9+/=]+$/.test(asset.data || "")) return null;
+        const figure = document.createElement("figure");
+        figure.className = "semantic-block figure";
+        figure.dataset.regionKind = "figure";
+        const sourcePage = state.response?.result.pages.find(
+          (page) => page.regions.some((region) => region.id === group.region.id)
+        );
+        if (sourcePage?.width > 0) figure.style.width = `${100 * asset.width / sourcePage.width}%`;
+        decoratePresentationSource(figure, { rendering: {
+          source_confidence: group.region.text_provenance?.layout_detection_score,
+          source_confidence_kind: "Detection score",
+          source_confidence_scope: "figure detection"
+        } }, group.region);
+        const link = document.createElement("a");
+        link.href = `data:image/png;base64,${asset.data}`;
+        link.download = `${group.region.id}.png`;
+        link.setAttribute("aria-label", "Download extracted image");
+        const image = document.createElement("img");
+        image.src = link.href;
+        image.alt = "Extracted document image";
+        image.width = asset.width;
+        image.height = asset.height;
+        image.loading = "lazy";
+        link.append(image);
+        const label = document.createElement("figcaption");
+        label.textContent = "Image";
+        figure.append(label, link);
+        return figure;
+      }
+      if (kind === "table") {
+        const block = renderDocumentTable(group.region);
+        return block;
+      }
+      if (kind === "form_row" || kind === "spatial_row") {
+        const block = renderFormRow(group.region, group.sourceIndex);
+        return block;
+      }
       if (kind === "author") return renderAuthor(group.region, group.sourceIndex);
-      if (kind === "control") return renderControl(group.region);
+      if (kind === "control") return renderControl(group.region, group.sourceIndex);
+      if (kind === "code") {
+        const block = document.createElement("pre");
+        block.className = "semantic-block code";
+        block.dataset.regionKind = "code";
+        const code = document.createElement("code");
+        const text = group.text.trim();
+        const fence = text.match(/^(`{3,}|~{3,})[^\n]*\n([\s\S]*?)\n\1\s*$/u);
+        code.textContent = fence ? fence[2] : text;
+        block.append(code);
+        decoratePresentationSource(block, { rendering: {
+          source_confidence: source.confidence,
+          source_confidence_kind: confidenceKind(source),
+          source_confidence_scope: confidenceScope(source)
+        } }, source);
+        return block;
+      }
       const tag = {
         title: "h3",
         heading: "h4",
@@ -2972,11 +3126,11 @@
         const rendered = renderPresentationFormula(group.text);
         if (!rendered.failure) {
           block.append(rendered.formula);
-          decorateConfidence(block, group.region.confidence, true, {
-            id: group.region.id,
-            provider: group.region.provider,
-            scope: confidenceScope(group.region),
-            confidenceKind: confidenceKind(group.region)
+          decorateConfidence(block, source.confidence, false, {
+            id: source.id,
+            provider: source.provider,
+            scope: confidenceScope(source),
+            confidenceKind: confidenceKind(source)
           });
           block.classList.add("confidence-host");
           block.tabIndex = 0;
@@ -2984,17 +3138,13 @@
           return block;
         }
       }
-      const ownedSources = group.role === "layout_block"
-        ? (group.region.structure?.child_evidence_ids || [])
-          .map((evidenceId) => group.sourceIndex.get(evidenceId))
-        : [];
       if (label) {
         const strong = document.createElement("strong");
         strong.textContent = `${label}: `;
         block.append(strong);
         appendEvidenceRun(block, [group.region]);
       } else if (kind === "formula" && group.region.resolution === "resolved") {
-        appendEvidenceRun(block, [{ ...group.region, text: displayedText }]);
+        appendEvidenceRun(block, [{ ...source, text: displayedText }]);
       } else if (ownedSources.length) {
         appendEvidenceRun(block, ownedSources);
       } else if (group.inline) {
@@ -3009,33 +3159,48 @@
       return block;
     }
 
-    function renderControl(region) {
+    function renderControl(region, sourceIndex) {
       const block = document.createElement("div");
       block.className = "semantic-block control confidence-host";
       block.dataset.regionKind = "control";
       block.dataset.resolution = region.resolution || "resolved";
       block.tabIndex = 0;
       block.setAttribute("aria-describedby", "confidence-inspector");
+      const native = region.text_provenance?.method === "learned_checkbox_detection";
       const state = region.structure?.state || "ambiguous";
       const chip = document.createElement("span");
       chip.className = "control-state";
       chip.dataset.state = state;
-      // Show the glyph that was actually drawn. Collapsing a slashed loop or a ring into
-      // "?" discards the evidence a reviewer needs to interpret the mark.
+      if (native) { chip.classList.add("checkbox-symbol"); chip.title = `${state} checkbox`; }
       const annotation = Boolean(region.structure?.annotation_shape);
-      chip.textContent = region.structure?.mark_glyph
+      chip.textContent = native
+        ? ({ selected: "☑", unselected: "☐" }[state] || "?")
+        : region.structure?.mark_shape === "unknown" ? "?" : region.structure?.mark_glyph
         || ({ selected: "✓", unselected: "", ambiguous: "?" }[state] ?? "?");
       if (annotation) chip.dataset.state = "annotation";
       chip.setAttribute("aria-label", `${state} control`);
-      const marker = document.createElement("span");
-      marker.className = "control-label";
-      marker.textContent = controlLabel(region);
-      decorateConfidence(marker, region.confidence, true, {
+      decorateConfidence(chip, native ? region.structure?.state_confidence : region.structure?.state_confidence ?? region.confidence, true, {
         id: region.id,
         provider: region.provider,
         scope: "control state",
         confidenceKind: "State score"
       });
+      if (native) {
+        block.append(chip);
+        if (!appendEvidenceRun(block, [region]) && region.resolution !== "resolved") {
+          block.append(document.createTextNode("[unresolved text]"));
+        }
+        return block;
+      }
+      const marker = document.createElement("span");
+      marker.className = "control-label";
+      const label = controlLabel(region);
+      const sources = (region.structure?.label_evidence_ids || []).map(id => sourceIndex.get(id)).filter(Boolean);
+      if (sources.map(source => source.text).join(" ").replace(/\s+/g, " ").trim() === label.replace(/\s+/g, " ").trim()) {
+        appendEvidenceRun(marker, sources);
+      } else {
+        marker.textContent = label;
+      }
       block.append(chip, marker);
       return block;
     }
@@ -3065,7 +3230,9 @@
       const block = document.createElement("div");
       block.className = "semantic-block form-row";
       block.dataset.regionKind = "form_row";
-      (region.structure?.fields || region.structure?.segments || []).forEach((segment) => {
+      const fields = region.structure?.fields || region.structure?.segments || [];
+      block.style.setProperty("--fields", Math.max(1, fields.length));
+      fields.forEach((segment) => {
         const item = document.createElement("span");
         const sources = (segment.evidence_ids || []).map(
           (evidenceId) => sourceIndex.get(evidenceId)
@@ -3097,11 +3264,11 @@
     function canonicalLayoutText(region, sourceIndex) {
       if (region.structure?.role !== "layout_block") return region.text || "";
       if (region.structure?.block_type === "formula") return region.text || "";
-      const groups = region.structure?.block_type === "form_row"
+      const groups = ["form_row", "spatial_row"].includes(region.structure?.block_type)
         ? region.structure?.fields || region.structure?.segments
         : region.structure?.lines;
       if (!Array.isArray(groups)) return "";
-      const separator = region.structure?.block_type === "form_row" ? " | " : " ";
+      const separator = ["form_row", "spatial_row"].includes(region.structure?.block_type) ? " | " : " ";
       return groups
         .map((group) => canonicalEvidenceText(group.evidence_ids, sourceIndex))
         .join(separator);
@@ -3177,13 +3344,15 @@
             }
           }
           const resolution = cell.resolution || "resolved";
-          const marker = document.createElement("span");
-          marker.textContent = renderedLiteral(cell.text, resolution);
+          const text = renderedLiteral(cell.text, resolution);
+          const marker = renderInlineMath(text) || document.createElement("span");
+          if (!marker.childNodes.length) marker.textContent = text;
           decorateConfidence(marker, cell.confidence, true, {
-            id: cell.evidenceId,
+            id: cell.bbox || cell.bounding_box ? cell.evidenceId : region.id,
             pageNumber: cell.sourcePageNumber,
             provider: cell.source || region.provider,
-            scope: "cell"
+            scope: cell.bbox ? "cell" : "cell score; table location",
+            confidenceKind: cell.confidence_kind || "Recognition score"
           });
           element.classList.add("confidence-host");
           element.tabIndex = 0;
@@ -3241,6 +3410,10 @@
 
     byId("previous-page").addEventListener("click", () => changePage(-1));
     byId("next-page").addEventListener("click", () => changePage(1));
+    byId("source-zoom").addEventListener("change", (event) => {
+      canvas.style.setProperty("--source-zoom", `${event.target.value}%`);
+      hideConfidenceInspector();
+    });
     function changePage(offset) {
       state.pageIndex += offset;
       clearInteraction();
@@ -3251,8 +3424,6 @@
 
     function resetHiddenKinds() {
       state.hiddenKinds.clear();
-      state.hiddenKinds.add("text");
-      state.hiddenKinds.add("line");
       state.hiddenKinds.add("table_candidate");
       state.hiddenKinds.add("table_cell");
       // Word boxes exist for cell assignment and confidence; the drawn unit is the line.
@@ -3260,6 +3431,7 @@
     }
 
     function renderPage() {
+      renderFeedback();
       const imageRequest = ++state.imageRequest;
       const payload = state.response;
       const pages = payload ? payload.result.pages : [];
@@ -3317,57 +3489,12 @@
       return pageOverlays().filter((region) => !state.hiddenKinds.has(categoryKey(region)));
     }
 
-    function wordUnionBox(region) {
-      const boxes = (region.structure?.word_evidence || [])
-        .map((word) => normalizedBox(word.bbox))
-        .filter(Boolean);
-      if (!boxes.length) return null;
-      return {
-        left: Math.min(...boxes.map((box) => box.left)),
-        top: Math.min(...boxes.map((box) => box.top)),
-        right: Math.max(...boxes.map((box) => box.right)),
-        bottom: Math.max(...boxes.map((box) => box.bottom))
-      };
-    }
-
-    function cellUnionBox(region) {
-      const boxes = (region.structure?.cells || [])
-        .map((cell) => normalizedBox(cell.bbox || cell.bounding_box))
-        .filter(Boolean);
-      if (!boxes.length) return null;
-      return {
-        left: Math.min(...boxes.map((box) => box.left)),
-        top: Math.min(...boxes.map((box) => box.top)),
-        right: Math.max(...boxes.map((box) => box.right)),
-        bottom: Math.max(...boxes.map((box) => box.bottom))
-      };
-    }
-
-    function withTightBox(region) {
-      // The layout reader's region boxes are loose blobs; the word reader's boxes are
-      // exact. Display one tight block box - the union of the words - per region, the
-      // way a layout model presents blocks. A table tightens to its cells' union.
-      const union = region.kind === "table"
-        ? cellUnionBox(region) || wordUnionBox(region)
-        : wordUnionBox(region);
-      if (!union) return region;
-      return {
-        ...region,
-        bounding_box: union,
-        text_provenance: {
-          ...(region.text_provenance || {}),
-          displayed_box: "union of word evidence; the layout region's own box is looser"
-        }
-      };
-    }
-
     function pageOverlays() {
       const overlays = [];
       currentRegions().forEach((region) => {
         const role = region.structure?.role;
-        if (normalPreviewRegion(region)) overlays.push(withTightBox(region));
-        // The word reader's boxes carry the only recognition confidence on the page, so
-        // they are what the confidence colouring and the per-word highlights come from.
+        if (normalPreviewRegion(region)) overlays.push(region);
+        // Word geometry stays separate from the layout region and its decoder scores.
         (region.structure?.word_evidence || []).forEach((word, wordIndex) => {
           const box = normalizedBox(word.bbox);
           if (!box) return;
@@ -3422,12 +3549,12 @@
       const role = region.structure?.role;
       // Layout blocks group other regions; drawing them boxed every line twice.
       if (role === "layout_block") return false;
-      if (["table_source", "table_candidate", "coverage_risk", "presentation_challenger"].includes(role)) return false;
+      if (["table_source", "figure_source", "table_candidate", "coverage_risk", "presentation_challenger"].includes(role)) return false;
       if (["table_candidate", "coverage_risk", "layout_block"].includes(region.kind)) return false;
       if (semanticKind(region) === "table") {
         return Array.isArray(region.structure?.cells) && region.structure.cells.length > 0;
       }
-      return Boolean(String(region.text || "").trim()) || semanticKind(region) === "control";
+      return Boolean(String(region.text || "").trim()) || ["control", "figure", "signature"].includes(semanticKind(region));
     }
 
     function renderCategories() {
@@ -3458,6 +3585,7 @@
     }
 
     function overlayCategoryLabel(kind) {
+      if (kind === "figure") return "Image";
       if (kind === "table") return "table bounds";
       if (kind === "table_cell") return "table cell bounds";
       if (kind === "word") return "word boxes";
@@ -3477,6 +3605,8 @@
     }
 
     function categoryKey(regionOrKind) {
+      if (typeof regionOrKind === "object" && regionOrKind !== null
+        && regionOrKind.text_provenance?.layout_category === "signature") return "signature";
       if (
         typeof regionOrKind === "object"
         && regionOrKind !== null
@@ -3500,7 +3630,8 @@
     function semanticKind(regionOrKind) {
       const region = typeof regionOrKind === "object" && regionOrKind !== null ? regionOrKind : null;
       const kind = region ? region.kind : regionOrKind;
-      const role = region?.structure?.role || "";
+      const role = region?.structure?.role === "table_source"
+        ? region.structure.source_role || "" : region?.structure?.role || "";
       const blockType = region?.structure?.block_type;
       if (role === "layout_block" && blockType) return blockType;
       const value = `${kind || "text"} ${role}`.toLowerCase();
@@ -3512,6 +3643,7 @@
       if (value.includes("table")) return "table";
       if (value.includes("formula") || value.includes("equation")) return "formula";
       if (value.includes("list")) return "list";
+      if (value.includes("signature")) return "signature";
       if (value.includes("figure") || value.includes("image")) return "figure";
       if (value.includes("form") || value.includes("field")) return "field";
       if (value.includes("checkbox") || value.includes("radio") || value.includes("control")) return "control";
@@ -3557,7 +3689,7 @@
       });
       const linked = pageOverlays().find(
         (region) => region.id === state.activeEvidenceId
-      );
+      ) || currentRegions().find((region) => region.id === state.activeEvidenceId);
       if (!linked) return;
       const box = linked.bounding_box;
       context.save();
@@ -3645,7 +3777,7 @@
       const key = region ? regionKey(region) : null;
       state.selectedRegionKey = toggle && key === state.selectedRegionKey ? null : key;
       updateInspector(selectedRegion());
-      renderRegionList(regions);
+      renderRegionList(currentOverlays());
       drawPage();
     }
 
@@ -3689,7 +3821,12 @@
         ? `${formatConfidence(confidence.value)} · Uncalibrated`
         : "Not available";
       byId("region-provider").textContent = region?.provider || "-";
-      byId("region-order").textContent = region?.reading_order ?? "-";
+      const detectorSequence = region?.text_provenance?.reading_order_method === "detector_sequence";
+      const spatialOrder = region?.structure?.presentation_order_method === "spatial_sort";
+      byId("region-order-label").textContent = detectorSequence ? "Detector sequence"
+        : spatialOrder ? "Spatial presentation order" : "Reading order";
+      byId("region-order").textContent = spatialOrder && !detectorSequence
+        ? region.structure.presentation_rank : region?.reading_order ?? "-";
       const box = region?.bounding_box;
       byId("region-box").textContent = box ? `${box.left}, ${box.top}, ${box.right}, ${box.bottom} px` : "-";
       byId("region-resolution").textContent = region?.resolution || "-";
@@ -3698,6 +3835,8 @@
       byId("region-raw-alternatives").textContent = region?.alternatives?.length ? JSON.stringify(region.alternatives) : "-";
       byId("region-structure").textContent = region?.structure ? JSON.stringify(region.structure) : "-";
       byId("region-text").textContent = region?.text || "Click an overlay to inspect its evidence.";
+      byId("download-crop").disabled = !region || !state.image;
+      cropCanvas.style.borderColor = region ? regionColor(region) : "";
       byId("inspector").querySelector(".technical-details").open = false;
       drawRegionCrop(region);
     }
@@ -3755,6 +3894,28 @@
       );
     }
 
+    byId("download-crop").addEventListener("click", handleDownloadCrop);
+
+    function handleDownloadCrop() {
+      const region = selectedRegion();
+      const box = normalizedBox(region?.bounding_box);
+      if (!state.image || !box) return;
+      const left = Math.max(0, Math.floor(box.left));
+      const top = Math.max(0, Math.floor(box.top));
+      const right = Math.min(state.image.naturalWidth, Math.ceil(box.right));
+      const bottom = Math.min(state.image.naturalHeight, Math.ceil(box.bottom));
+      if (right <= left || bottom <= top) return;
+      const crop = document.createElement("canvas");
+      crop.width = right - left;
+      crop.height = bottom - top;
+      crop.getContext("2d").drawImage(state.image, left, top, crop.width, crop.height,
+        0, 0, crop.width, crop.height);
+      const link = document.createElement("a");
+      link.download = `page-${state.pageIndex + 1}-${categoryKey(region)}-${region.id}.png`;
+      link.href = crop.toDataURL("image/png");
+      link.click();
+    }
+
     const tabs = Array.from(document.querySelectorAll(".tab"));
     tabs.forEach((tab) => {
       tab.addEventListener("click", () => activateTab(tab));
@@ -3790,6 +3951,7 @@
     }
 
     function resetResult() {
+      document.body.classList.remove("has-document");
       cancelRecovery();
       state.response = null;
       state.pageIndex = 0;
@@ -3811,6 +3973,8 @@
       byId("review-details").open = false;
       byId("region-categories").hidden = true;
       byId("layers-control").open = false;
+      byId("source-zoom").value = "100";
+      canvas.style.removeProperty("--source-zoom");
       canvas.classList.remove("visible");
       cropCanvas.hidden = true;
       byId("preview-empty").hidden = false;
@@ -3856,6 +4020,68 @@
       empty.append(heading, document.createTextNode(copy));
       panel.replaceChildren(empty);
     }
+    let checkingSession = false;
+    let unverifiedSession = null;
+    async function checkSession() {
+      const session = state.response?.session_id;
+      const busy = () => form.getAttribute("aria-busy") === "true" || state.rereadBusy;
+      if (!session || document.hidden || busy() || checkingSession) return;
+      checkingSession = true;
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(session)}`, {
+          method: "HEAD", cache: "no-store", signal: AbortSignal.timeout(10000)
+        });
+        if (state.response?.session_id !== session || busy()) return;
+        if (response.status === 404) {
+          state.resultRequest += 1;
+          resetResult();
+          resetClientTimer();
+          resetFeedback();
+          setBusy(false);
+          if (!hasSelection()) byId("file-name").textContent = "Choose one image, PDF, or TIFF";
+          const url = new URL(location.href);
+          url.searchParams.delete("session");
+          history.replaceState(null, "", url.pathname + url.search + url.hash);
+          setStatus("This temporary document session has expired. Please upload or parse it again.", true);
+        } else if (!response.ok) {
+          throw new Error("Session check failed");
+        } else if (unverifiedSession === session) {
+          setStatus("Document session is available again.", false);
+        }
+        unverifiedSession = null;
+      } catch {
+        if (state.response?.session_id === session && !busy()) {
+          unverifiedSession = session;
+          setStatus("Cannot verify the document session. Check the connection; your displayed work has been kept.", true);
+        }
+      } finally {
+        checkingSession = false;
+      }
+    }
+    window.setInterval(checkSession, 30000);
+    window.addEventListener("focus", checkSession);
+    document.addEventListener("visibilitychange", checkSession);
+
+    async function restoreSession() {
+      const session = new URLSearchParams(location.search).get("session");
+      if (!session) return;
+      setBusy(true, "Loading document...");
+      try {
+        const response = await fetch(`/api/sessions/${encodeURIComponent(session)}`);
+        if (!response.ok) throw new Error("This temporary document session has expired. Please upload it again.");
+        state.response = await response.json();
+        resetHiddenKinds();
+        renderResult();
+        byId("file-name").textContent = state.response.filename;
+        byId("clear-button").disabled = false;
+        setStatus("Document restored. Review flagged evidence before using the output.");
+      } catch (error) {
+        setStatus(error.message, true);
+      } finally {
+        setBusy(false);
+      }
+    }
+    document.addEventListener("DOMContentLoaded", restoreSession, { once: true });
   </script>
 </body>
 </html>

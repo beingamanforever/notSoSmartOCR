@@ -169,6 +169,12 @@ class TatrTableStage:
         page_number: int,
         regions: list[TextRegion],
     ) -> list[TextRegion]:
+        # A parsed grid already owns the table text. Without word geometry a second
+        # structure model cannot locate that text, and its crop rereads duplicate it.
+        if getattr(self.extractor, "layout_proposals_only", False) and not _word_tokens(
+            regions
+        ):
+            return regions
         tokens = _to_tokens(regions)
         layout_boxes = [
             region.bounding_box for region in regions if region.kind == "table"
@@ -806,6 +812,7 @@ class TatrTableExtractor:
         structure_revision: str = DEFAULT_STRUCTURE_REVISION,
         source_revision: str = DEFAULT_SOURCE_REVISION,
         enable_ruled_table_proposals: bool = False,
+        layout_proposals_only: bool = False,
         pipeline: object | None = None,
         proposal_detector: object | None = None,
         structure_fallback: object | None = None,
@@ -835,6 +842,7 @@ class TatrTableExtractor:
         self.structure_revision = structure_revision
         self.source_revision = source_revision
         self.enable_ruled_table_proposals = enable_ruled_table_proposals
+        self.layout_proposals_only = layout_proposals_only
         # A general layout detector proposes crops TATR's training distribution lacks
         # (full-page financial layouts); the structure fallback replaces a TATR grid
         # that came back empty or with invalid cell topology.
@@ -850,6 +858,8 @@ class TatrTableExtractor:
         layout_boxes: Sequence[BoundingBox] = (),
         word_boxes: Sequence[dict[str, Any]] = (),
     ) -> list[TablePrediction]:
+        if self.layout_proposals_only and not layout_boxes:
+            return []
         try:
             with Image.open(image_path) as source:
                 image = source.convert("RGB")
@@ -858,22 +868,24 @@ class TatrTableExtractor:
 
         with self._lock:
             pipeline = self._get_pipeline()
-            try:
-                detection = pipeline.detect(
-                    image,
-                    tokens=copy.deepcopy(tokens),
-                    out_objects=True,
-                    out_crops=True,
-                    crop_padding=self.crop_padding,
+            objects, crops = [], []
+            if not self.layout_proposals_only:
+                try:
+                    detection = pipeline.detect(
+                        image,
+                        tokens=copy.deepcopy(tokens),
+                        out_objects=True,
+                        out_crops=True,
+                        crop_padding=self.crop_padding,
+                    )
+                except Exception as error:
+                    raise ReaderError("table_detection_failed", str(error)) from error
+                objects, crops = self._detection_outputs(detection, pipeline)
+                objects, crops = _suppress_contained_detections(
+                    objects,
+                    crops,
+                    image.size,
                 )
-            except Exception as error:
-                raise ReaderError("table_detection_failed", str(error)) from error
-            objects, crops = self._detection_outputs(detection, pipeline)
-            objects, crops = _suppress_contained_detections(
-                objects,
-                crops,
-                image.size,
-            )
             recognition_inputs = [
                 (obj, crop, None, False)
                 for obj, crop in zip(objects, crops, strict=True)
@@ -889,10 +901,10 @@ class TatrTableExtractor:
             # Layout-first fallback: the page reader's layout model fires on tables the
             # table detector's training distribution lacks (a full-page financial
             # layout), so its table regions become crops when no detection covers them.
-            for box in _novel_layout_boxes(layout_boxes, recognition_inputs, image.size):
-                recognition_inputs.append(
-                    _layout_recognition_input(image, tokens, box)
-                )
+            for box in _novel_layout_boxes(
+                layout_boxes, recognition_inputs, image.size
+            ):
+                recognition_inputs.append(_layout_recognition_input(image, tokens, box))
             detector_boxes: list[BoundingBox] = []
             if self.proposal_detector is not None:
                 try:
@@ -1106,8 +1118,7 @@ class TatrTableExtractor:
         kept: list[BoundingBox] = []
         for box in sorted(contained, key=_box_area, reverse=True):
             if any(
-                _intersection_area(box, other) / _box_area(box) >= 0.6
-                for other in kept
+                _intersection_area(box, other) / _box_area(box) >= 0.6 for other in kept
             ):
                 continue
             kept.append(box)
@@ -2247,9 +2258,7 @@ def _novel_layout_boxes(
         area = _box_area(box)
         if area <= 0:
             continue
-        if any(
-            _intersection_area(box, other) / area >= 0.5 for other in existing
-        ):
+        if any(_intersection_area(box, other) / area >= 0.5 for other in existing):
             continue
         novel.append(box)
         existing.append(box)
@@ -3616,7 +3625,17 @@ def _text_grid_overlay(
         text = str(cell.get("text") or "").strip()
         if rows and columns and text:
             texts[(min(rows), min(columns))] = text
-    return _GridOverlay(region, texts, shape, shape == (row_count, column_count))
+    source_spans = {
+        (tuple(cell.get("row_nums", [])), tuple(cell.get("column_nums", [])))
+        for cell in structure["cells"]
+    }
+    target_spans = {(cell.row_nums, cell.column_nums) for cell in prediction.cells}
+    return _GridOverlay(
+        region,
+        texts,
+        shape,
+        shape == (row_count, column_count) and source_spans == target_spans,
+    )
 
 
 def _apply_grid_text(
@@ -3626,27 +3645,31 @@ def _apply_grid_text(
     primary_candidate: _Candidate,
     challenger_candidates: list[_Candidate],
 ) -> dict[str, Any]:
-    """Land the text grid's cell text in the geometry model's boxed cell.
-
-    The grid's reader parses characters better but carries no confidence of its own, so
-    the cell keeps the recognition confidence of the words that fell inside its box -
-    the same fusion the page-level fused reader performs.
-    """
+    """Join matching grid positions without transferring a different transcript's score."""
     text = overlay.texts.get((min(cell.row_nums), min(cell.column_nums)), "")
     if not _normalize(text):
         return resolved
     selected = resolved["selected"]
     if _normalize(selected.text) == _normalize(text):
         return resolved
+    native_cell = next(
+        (
+            item
+            for item in (overlay.region.structure or {}).get("cells", [])
+            if tuple(item.get("row_nums", [])) == cell.row_nums
+            and tuple(item.get("column_nums", [])) == cell.column_nums
+        ),
+        {},
+    )
     grid_candidate = _Candidate(
         text=text,
-        confidence=primary_candidate.confidence,
+        confidence=native_cell.get("confidence"),
         source=overlay.region.provider,
         evidence_ids=(overlay.region.id,),
         regions=(overlay.region,),
     )
     supporters = [grid_candidate]
-    if _normalize(primary_candidate.text):
+    if " ".join(primary_candidate.text.split()) == " ".join(text.split()):
         supporters.append(primary_candidate)
     return {
         "selected": grid_candidate,
@@ -4109,9 +4132,7 @@ def _conflict_free_cells(
     if not cells:
         return []
     resolved, _ = _resolve_cell_collisions(
-        TablePrediction(
-            bounding_box=box, cells=tuple(cells), confidence=None, model={}
-        )
+        TablePrediction(bounding_box=box, cells=tuple(cells), confidence=None, model={})
     )
     if _table_topology_conflicts(resolved.cells):
         return []
@@ -4128,9 +4149,7 @@ def _needs_structure_arbitration(
     """
     if not cells or not tokens:
         return False
-    if any(
-        len(cell.row_nums) >= 3 or len(cell.column_nums) >= 3 for cell in cells
-    ):
+    if any(len(cell.row_nums) >= 3 or len(cell.column_nums) >= 3 for cell in cells):
         return True
     filled, _ = _grid_fill(cells, tokens)
     return filled * 5 < len(tokens)

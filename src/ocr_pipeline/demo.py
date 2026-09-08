@@ -6,7 +6,6 @@ import copy
 import io
 import json
 import logging
-import os
 import secrets
 import re
 import shutil
@@ -28,8 +27,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .contracts import BoundingBox, PageResult, RegionStage, TextAlternative, TextRegion
 from .cross_page_tables import CrossPageTableStage
+from .evidence_layout import refresh_layout_owners
 from .falcon import is_verified_falcon_model_provenance
-from .markdown_polish import polish_markdown
 from .pipeline import (
     IMAGE_SUFFIXES,
     PipelineError,
@@ -63,7 +62,7 @@ except ImportError:  # pragma: no cover - exercised only without demo dependenci
 
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
-FEEDBACK_RETENTION = 500
+FEEDBACK_RETENTION = 1000
 FEEDBACK_REASONS = frozenset(
     {"missing_text", "wrong_text", "reading_order", "table", "handwriting", "other"}
 )
@@ -77,8 +76,7 @@ EXAMPLE_FILES = {
     "architecture": "artifacts/ocr-pipeline-architecture.pdf",
     "hard-case-routing": "artifacts/hard-case-routing.pdf",
     "handwriting": "artifacts/demo/handwriting_notes.png",
-    "contract-agreement": "artifacts/demo/contract_agreement.png",
-    "contract-amendment": "artifacts/demo/contract_amendment.png",
+    "gsoc": "artifacts/demo/gsoc.png",
     "academic-paper": "artifacts/demo/academic_paper.png",
     "code": "artifacts/demo/code_document.png",
     "financial-table": "artifacts/demo/financial_table.png",
@@ -502,6 +500,9 @@ def _katex_assets(root: Path | None) -> dict[str, Path]:
     if not javascript.is_file() or not stylesheet.is_file():
         raise ValueError("katex_asset_root must contain katex.js and katex.css")
     assets = {"katex.js": javascript, "katex.css": stylesheet}
+    auto_render = resolved_root / "auto-render.js"
+    if auto_render.is_file():
+        assets["auto-render.js"] = auto_render
     fonts = resolved_root / "fonts"
     if fonts.is_dir():
         for font in fonts.iterdir():
@@ -574,13 +575,16 @@ def create_app(
     temporary_root = tempfile.TemporaryDirectory(prefix="ocr-demo-")
     # created on first write so a session that is never reviewed leaves no directory
     feedback_dir = (
-        Path(feedback_root) if feedback_root else Path(temporary_root.name) / "feedback"
+        Path(feedback_root)
+        if feedback_root
+        else Path.home() / ".local/share/ocr/feedback"
     )
     session_root = Path(temporary_root.name)
     sessions = SessionStore(session_root)
     backend_version = _backend_version(active_reader)
     prepare_lock = threading.Lock()
     process_lock = threading.Lock()
+    state_lock = threading.Lock()
     recovery_lock = threading.Lock()
 
     @asynccontextmanager
@@ -596,6 +600,7 @@ def create_app(
     app.state.sessions = sessions
     app.state.prepare_lock = prepare_lock
     app.state.process_lock = process_lock
+    app.state.state_lock = state_lock
     app.state.recovery_lock = recovery_lock
     app.state.composition = active_composition
     app.state.service_started_at = composition_payload["service_started_at"]
@@ -620,6 +625,10 @@ def create_app(
                 '<link rel="stylesheet" href="/assets/katex/katex.css">\n'
                 '  <script defer src="/assets/katex/katex.js"></script>'
             )
+            if "auto-render.js" in katex_assets:
+                asset_tags += (
+                    '\n  <script defer src="/assets/katex/auto-render.js"></script>'
+                )
         return HTMLResponse(html.replace("__OCR_KATEX_ASSETS__", asset_tags))
 
     @app.get("/assets/katex/katex.css")
@@ -641,6 +650,10 @@ def create_app(
             f"fonts/{font_name}",
             "font/woff2" if font_name.endswith(".woff2") else "font/woff",
         )
+
+    @app.get("/assets/katex/auto-render.js")
+    def handle_katex_auto_render() -> Any:
+        return _katex_response(katex_assets, "auto-render.js", "text/javascript")
 
     @app.get("/api/composition")
     def handle_composition() -> Any:
@@ -751,6 +764,12 @@ def create_app(
                         )
                 elapsed_seconds = time.perf_counter() - started
                 coverage = _coverage_assessment(active_reader, len(document.pages))
+                reader_review = getattr(active_reader, "page_needs_review", None)
+                reader_review_pages = [
+                    page.page_number
+                    for page in document.pages
+                    if callable(reader_review) and reader_review(page.page_number)
+                ]
             result = _sanitize_result(document.to_dict(), session_root)
             result["document_id"] = Path(original_name).stem
             result["source"]["name"] = original_name
@@ -848,6 +867,7 @@ def create_app(
                     "pages": preview_paths,
                     "response": response,
                     "revision": 1,
+                    "reader_review_pages": reader_review_pages,
                 },
             )
             return JSONResponse(response)
@@ -865,6 +885,23 @@ def create_app(
             if file is not None:
                 file.file.close()
 
+    @app.head("/api/sessions/{session_id}")
+    def handle_session_status(session_id: str) -> Any:
+        with state_lock:
+            session = _get_session(sessions, session_id)
+            return Response(
+                headers={
+                    "Cache-Control": "no-store",
+                    "X-OCR-Revision": str(session["response"]["revision"]),
+                }
+            )
+
+    @app.get("/api/sessions/{session_id}")
+    def handle_session(session_id: str) -> Any:
+        with state_lock:
+            session = _get_session(sessions, session_id)
+            return JSONResponse(session["response"])
+
     @app.get("/api/sessions/{session_id}/pages/{page_number}")
     def handle_page(session_id: str, page_number: int) -> Any:
         session = _get_session(sessions, session_id)
@@ -875,16 +912,23 @@ def create_app(
 
     @app.get("/api/sessions/{session_id}/presentation")
     def handle_presentation(session_id: str) -> Any:
-        session = _get_session(sessions, session_id)
-        with process_lock:
+        with state_lock:
+            session = _get_session(sessions, session_id)
             payload = session["response"]["presentation"]
             if payload.get("status") != "pending":
                 return JSONResponse(payload)
+        with process_lock:
+            with state_lock:
+                session = _get_session(sessions, session_id)
+                payload = session["response"]["presentation"]
+                if payload.get("status") != "pending":
+                    return JSONResponse(payload)
+                snapshot = copy.deepcopy(session)
             started = time.perf_counter()
             stage_execution: list[dict[str, object]] = []
             presentations = _read_presentations(
-                session["document"].pages,
-                session["pages"],
+                snapshot["document"].pages,
+                snapshot["pages"],
                 presentation_reader,
                 max_pages=max_presentation_pages,
                 stage_execution=stage_execution,
@@ -902,13 +946,16 @@ def create_app(
                 },
                 session_root,
             )
-            session["response"]["presentation"] = payload
-            session["response"]["stage_execution"].extend(payload["stage_execution"])
-        return JSONResponse(payload)
+            with state_lock:
+                session = _get_session(sessions, session_id)
+                if session["revision"] == snapshot["revision"]:
+                    session["response"]["presentation"] = payload
+                    session["response"]["stage_execution"].extend(stage_execution)
+                return JSONResponse(session["response"]["presentation"])
 
     @app.get("/api/sessions/{session_id}/result.json")
     def handle_json_download(session_id: str, revision: int | None = None) -> Any:
-        with process_lock:
+        with state_lock:
             session = _get_session(sessions, session_id)
             if revision is not None and revision != session["revision"]:
                 raise HTTPException(409, "The requested revision is no longer current")
@@ -923,7 +970,7 @@ def create_app(
 
     @app.get("/api/sessions/{session_id}/result.md")
     def handle_markdown_download(session_id: str, revision: int | None = None) -> Any:
-        with process_lock:
+        with state_lock:
             session = _get_session(sessions, session_id)
             if revision is not None and revision != session["revision"]:
                 raise HTTPException(409, "The requested revision is no longer current")
@@ -942,8 +989,8 @@ def create_app(
         if active_handwriting_stage is None:
             raise HTTPException(409, "Handwriting rereading is not configured")
         page_number, region_id, base_revision, request_id = _revision_request(payload)
-        session = _get_session(sessions, session_id)
-        with process_lock:
+        with state_lock:
+            session = _get_session(sessions, session_id)
             if session["revision"] != base_revision:
                 return _stale_recovery_response(
                     request_id,
@@ -961,14 +1008,14 @@ def create_app(
 
         reread_started = time.perf_counter()
         try:
-            with recovery_lock:
+            with recovery_lock, process_lock:
                 reviewed = active_handwriting_stage.review_region(
                     image_path,
                     page_number,
                     copy.deepcopy(original_region),
                 )
         except ReaderError as error:
-            with process_lock:
+            with state_lock:
                 current_session = _get_session(sessions, session_id)
                 current_revision = current_session["revision"]
                 current_response = copy.deepcopy(current_session["response"])
@@ -999,7 +1046,7 @@ def create_app(
             )
         reread_seconds = time.perf_counter() - reread_started
 
-        with process_lock:
+        with state_lock:
             session = _get_session(sessions, session_id)
             if session["revision"] != base_revision:
                 return _stale_recovery_response(
@@ -1013,6 +1060,9 @@ def create_app(
             page, region_index = _session_page_region(session, page_number, region_id)
             changed = page.regions[region_index] != reviewed
             page.regions[region_index] = reviewed
+            owner_id = (original_region.structure or {}).get("layout_owner_id")
+            if isinstance(owner_id, str):
+                refresh_layout_owners(page.regions, {owner_id})
             page.text = render_evidence(page.regions)
             page.route = "review"
             if changed:
@@ -1054,6 +1104,7 @@ def create_app(
                 original_region,
                 reviewed,
                 presentation_reader,
+                defer_presentation=True,
             )
             attempt = (
                 reviewed.structure.get("handwriting_attempt")
@@ -1097,8 +1148,12 @@ def create_app(
                 "base_revision": base_revision,
                 "revision": session["revision"],
             }
-            response_payload = copy.deepcopy(response)
-        return JSONResponse(response_payload)
+            snapshot = copy.deepcopy(session)
+        return JSONResponse(
+            refresh_review_presentation(
+                session_id, snapshot, page_number, original_region, reviewed
+            )
+        )
 
     @app.post("/api/sessions/{session_id}/feedback")
     def handle_feedback(session_id: str, payload: dict[str, Any]) -> Any:
@@ -1116,37 +1171,61 @@ def create_app(
             raise HTTPException(
                 400, f"reason must be one of: {', '.join(sorted(FEEDBACK_REASONS))}"
             )
-        session = _get_session(sessions, session_id)
         page_number = payload.get("page_number")
         record = {
             "id": secrets.token_urlsafe(8),
             "session_id": session_id,
             "verdict": verdict,
             "reason": reason,
-            "revision": session["revision"],
             "page_number": page_number,
             "filename": payload.get("filename"),
             "note": str(payload.get("note") or "")[:500] or None,
         }
-        with process_lock:
-            record["stored"] = _store_feedback(feedback_dir, record, session)
-        LOGGER.warning("ocr_reviewer_feedback %s", json.dumps(record, sort_keys=True))
+        with state_lock:
+            session = _get_session(sessions, session_id)
+            if payload.get("revision", session["revision"]) != session["revision"]:
+                raise HTTPException(
+                    409, "The result changed; review the current revision"
+                )
+            pages = session.get("pages") or []
+            if page_number is None and len(pages) == 1:
+                page_number = 1
+            if type(page_number) is not int or not 1 <= page_number <= len(pages):
+                raise HTTPException(400, "page_number must identify the reviewed page")
+            record["page_number"] = page_number
+            record["created_at"] = datetime.now(UTC).isoformat()
+            record["revision"] = session["revision"]
+            try:
+                record["stored"] = _store_feedback(feedback_dir, record, session)
+            except OSError as error:
+                raise HTTPException(
+                    500, "Feedback could not be saved; please retry"
+                ) from error
         return {"status": "recorded", **record}
 
     @app.get("/api/feedback")
     def list_feedback(limit: int = 50) -> Any:
         """List stored reviewer feedback, newest first."""
-        if not feedback_dir.is_dir():
-            return {"feedback": []}
-        entries = []
-        for record_path in sorted(feedback_dir.glob("*/record.json"), reverse=True):
-            try:
-                entries.append(json.loads(record_path.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if len(entries) >= max(1, min(limit, 500)):
-                break
-        return {"feedback": entries}
+        with state_lock:
+            if not feedback_dir.is_dir():
+                return {"feedback": []}
+            entries = []
+            for record_path in sorted(
+                (
+                    path
+                    for path in feedback_dir.glob("*/record.json")
+                    if not path.parent.name.startswith(".pending-")
+                ),
+                key=lambda path: path.stat().st_mtime_ns,
+                reverse=True,
+            ):
+                try:
+                    entries.append(json.loads(record_path.read_text(encoding="utf-8")))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if len(entries) >= max(1, min(limit, FEEDBACK_RETENTION)):
+                    break
+            return {"feedback": entries}
 
     @app.get("/api/feedback/{feedback_id}/page")
     def feedback_page(feedback_id: str) -> Any:
@@ -1171,8 +1250,8 @@ def create_app(
         if action not in {"accept", "edit", "keep_unresolved"}:
             raise HTTPException(400, "action must be accept, edit, or keep_unresolved")
 
-        session = _get_session(sessions, session_id)
-        with process_lock:
+        with state_lock:
+            session = _get_session(sessions, session_id)
             if session["revision"] != base_revision:
                 return _stale_recovery_response(
                     request_id,
@@ -1189,8 +1268,19 @@ def create_app(
                 for alternative in original_region.alternatives
                 if alternative.decision_state == "pending"
             ]
-            if original_region.resolution == "resolved" and not pending_alternatives:
+            if (
+                original_region.resolution == "resolved"
+                and not pending_alternatives
+                and not (original_region.structure or {}).get("layout_owner_id")
+            ):
                 raise HTTPException(409, "Region has no pending alternatives")
+            if action != "keep_unresolved" and (original_region.structure or {}).get(
+                "cells"
+            ):
+                raise HTTPException(
+                    422,
+                    "Structured tables require cell edits; plain text cannot replace their cells",
+                )
             reviewed = copy.deepcopy(original_region)
             accepted_alternative: TextAlternative | None = None
             accepted_index: int | None = None
@@ -1250,7 +1340,10 @@ def create_app(
                 "human_review": review_record,
             }
             if action != "keep_unresolved":
-                for review_name in ("handwriting_review", "formula_review"):
+                for review_name in (
+                    "handwriting_review",
+                    "formula_review",
+                ):
                     review = reviewed_structure.get(review_name)
                     if isinstance(review, dict):
                         reviewed_structure[review_name] = {
@@ -1309,12 +1402,14 @@ def create_app(
                 }
 
             page.regions[region_index] = reviewed
+            owner_id = (original_region.structure or {}).get("layout_owner_id")
+            if isinstance(owner_id, str):
+                refresh_layout_owners(page.regions, {owner_id})
             page.text = render_evidence(page.regions)
-            reader_review = getattr(active_reader, "page_needs_review", None)
             page.route = (
                 "review"
                 if page.failure_ids
-                or bool(callable(reader_review) and reader_review(page.page_number))
+                or page.page_number in session["reader_review_pages"]
                 or any(_region_needs_review(region) for region in page.regions)
                 else "accept_local"
             )
@@ -1326,6 +1421,7 @@ def create_app(
                 original_region,
                 reviewed,
                 presentation_reader,
+                defer_presentation=True,
             )
             response = session["response"]
             response["recovery_outcome"] = {
@@ -1337,14 +1433,75 @@ def create_app(
                 "base_revision": base_revision,
                 "revision": session["revision"],
             }
-            response_payload = copy.deepcopy(response)
-        return JSONResponse(response_payload)
+            snapshot = copy.deepcopy(session)
+        return JSONResponse(
+            refresh_review_presentation(
+                session_id, snapshot, page_number, original_region, reviewed
+            )
+        )
 
     @app.delete("/api/sessions/{session_id}")
     def handle_clear(session_id: str) -> Any:
-        if not sessions.delete(session_id):
-            raise HTTPException(404, "Session not found")
+        with state_lock:
+            if not sessions.delete(session_id):
+                raise HTTPException(404, "Session not found")
         return Response(status_code=204)
+
+    def refresh_review_presentation(
+        session_id: str,
+        snapshot: dict[str, Any],
+        page_number: int,
+        original_region: TextRegion,
+        reviewed: TextRegion,
+    ) -> dict[str, Any]:
+        response = snapshot["response"]
+        if presentation_reader is None or _visible_literal(
+            original_region.text, original_region.resolution
+        ) == _visible_literal(reviewed.text, reviewed.resolution):
+            return response
+        page, _ = _session_page_region(snapshot, page_number, reviewed.id)
+        stage_count = len(response["stage_execution"])
+        with process_lock:
+            _refresh_session_response(
+                snapshot,
+                session_root,
+                page,
+                original_region,
+                reviewed,
+                presentation_reader,
+            )
+            with state_lock:
+                try:
+                    current = sessions.get(session_id)
+                except KeyError:
+                    return response
+                if current["revision"] != snapshot["revision"]:
+                    return response
+                presentation = copy.deepcopy(response["presentation"])
+                presentation["pages"] = sorted(
+                    [
+                        item
+                        for item in current["response"]["presentation"].get("pages", [])
+                        if item.get("page_number") != page_number
+                    ]
+                    + [
+                        item
+                        for item in presentation.get("pages", [])
+                        if item.get("page_number") == page_number
+                    ],
+                    key=lambda item: item["page_number"],
+                )
+                rendered_pages = {item["page_number"] for item in presentation["pages"]}
+                if any(
+                    item.route == "review" and item.page_number not in rendered_pages
+                    for item in current["document"].pages
+                ):
+                    presentation["status"] = "pending"
+                current["response"]["presentation"] = presentation
+                current["response"]["stage_execution"].extend(
+                    copy.deepcopy(response["stage_execution"][stage_count:])
+                )
+        return response
 
     return app
 
@@ -1361,7 +1518,11 @@ def _safe_child(root: Path, candidate: Path) -> bool:
 def _prune_feedback(feedback_dir: Path, keep: int) -> None:
     """Bound retention so reviewer feedback cannot fill the disk it lives on."""
     records = sorted(
-        (path for path in feedback_dir.glob("*/record.json")),
+        (
+            path
+            for path in feedback_dir.glob("*/record.json")
+            if not path.parent.name.startswith(".pending-")
+        ),
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
@@ -1376,29 +1537,24 @@ def _store_feedback(
     keep: int = FEEDBACK_RETENTION,
 ) -> dict[str, Any]:
     """Copy the judged page image and its output next to the verdict."""
-    stored: dict[str, Any] = {"page_image": False, "result": False}
+    stored = {"page_image": True, "result": True}
+    feedback_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = feedback_dir / str(record["id"])
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-        response = session.get("response")
-        if response is not None:
-            (target / "result.json").write_text(
-                json.dumps(response, indent=2, sort_keys=True, default=str),
-                encoding="utf-8",
-            )
-            stored["result"] = True
-        pages = session.get("pages") or []
-        index = record.get("page_number")
-        if isinstance(index, int) and 1 <= index <= len(pages):
-            shutil.copyfile(pages[index - 1], target / "page.png")
-            stored["page_image"] = True
-        (target / "record.json").write_text(
+    with tempfile.TemporaryDirectory(prefix=".pending-", dir=feedback_dir) as temporary:
+        pending = Path(temporary)
+        (pending / "result.json").write_text(
+            json.dumps(session["response"], indent=2, sort_keys=True, default=str),
+            encoding="utf-8",
+        )
+        shutil.copyfile(
+            session["pages"][record["page_number"] - 1], pending / "page.png"
+        )
+        (pending / "record.json").write_text(
             json.dumps({**record, "stored": stored}, indent=2, sort_keys=True),
             encoding="utf-8",
         )
-        _prune_feedback(feedback_dir, keep)
-    except OSError:
-        LOGGER.exception("Storing reviewer feedback failed")
+        pending.rename(target)
+    _prune_feedback(feedback_dir, keep)
     return stored
 
 
@@ -1489,6 +1645,8 @@ def _refresh_session_response(
     original_region: TextRegion,
     reviewed: TextRegion,
     presentation_reader: LocalReader | None,
+    *,
+    defer_presentation: bool = False,
 ) -> None:
     response = session["response"]
     result = _sanitize_result(session["document"].to_dict(), session_root)
@@ -1505,6 +1663,18 @@ def _refresh_session_response(
     ) == _visible_literal(reviewed.text, reviewed.resolution):
         return
     if presentation_reader is None or page.page_number > len(session["pages"]):
+        return
+
+    if defer_presentation:
+        response["presentation"] = {
+            "schema_version": 2,
+            "status": "pending",
+            "pages": [
+                item
+                for item in response.get("presentation", {}).get("pages", [])
+                if item.get("page_number") != page.page_number
+            ],
+        }
         return
 
     refreshed = _read_presentations(
@@ -1655,8 +1825,17 @@ def _render_previews(
         destination = preview_dir / f"preview-{page_number}.png"
         if page != destination:
             try:
-                with Image.open(page) as image:
-                    image.save(destination, format="PNG")
+                if page.parent == preview_dir and page.suffix.lower() == ".png":
+                    page.replace(destination)
+                elif page.suffix.lower() == ".png":
+                    with Image.open(page) as image:
+                        if getattr(image, "is_animated", False):
+                            image.save(destination, format="PNG")
+                        else:
+                            shutil.copyfile(page, destination)
+                else:
+                    with Image.open(page) as image:
+                        image.save(destination, format="PNG")
             except OSError:
                 return None, {
                     "stage": "image",
@@ -1944,7 +2123,8 @@ def _validate_presentation_source_alignment(
             )
     if (
         not failures
-        and (source.structure or {}).get("block_type") != "form_row"
+        and (source.structure or {}).get("block_type")
+        not in {"form_row", "spatial_row"}
         and not (source.structure or {}).get("layout_owner_id")
         and generated_tokens - Counter(_presentation_tokens(supported_text))
     ):
@@ -2484,7 +2664,7 @@ def _presentation_fallback_reason(
         return "control_evidence_is_authoritative"
     structure = source.structure if isinstance(source.structure, dict) else {}
     role = str(structure.get("role", ""))
-    if role in {"coverage_risk", "table_candidate", "table_source"}:
+    if role in {"coverage_risk", "table_candidate", "table_source", "figure_source"}:
         return "source_is_not_renderable"
     owner_id = structure.get("layout_owner_id")
     if isinstance(owner_id, str) and owner_id in {
@@ -2499,7 +2679,7 @@ def _presentation_fallback_reason(
         return "source_evidence_unresolved"
     category = block.get("category")
     source_kind = _region_semantic_kind(source)
-    if source_resolved and structure.get("block_type") == "form_row":
+    if source_resolved and structure.get("block_type") in {"form_row", "spatial_row"}:
         return "structured_source_is_authoritative"
     if (
         source_resolved
@@ -2922,7 +3102,7 @@ def _page_uncertainty(page: dict[str, Any]) -> dict[str, Any]:
             reason = handwriting_review.get("reason")
             if isinstance(reason, str) and reason:
                 risk_reasons.append(reason)
-        if structure.get("role") == "table_source":
+        if structure.get("role") in {"table_source", "figure_source"}:
             continue
 
         unresolved += region["resolution"] == "unreadable"
@@ -3214,10 +3394,6 @@ def _result_markdown(response: dict[str, Any]) -> str:
                 f"- `{failure['stage']}/{failure['code']}`{page}: {failure['message']}"
             )
     markdown = "\n".join(lines) + "\n"
-    if os.environ.get("OPENROUTER_API_KEY"):
-        markdown, provenance = polish_markdown(markdown)
-        if provenance["polished"]:
-            markdown += "<!-- formatting: qwen3.7-flash -->\n"
     return markdown
 
 
@@ -3335,7 +3511,12 @@ def _presentation_canonical_regions(page: dict[str, Any]) -> list[dict[str, Any]
             continue
         structure = region.get("structure")
         role = structure.get("role") if isinstance(structure, dict) else None
-        if role in {"table_source", "coverage_risk", "table_candidate"}:
+        if role in {
+            "table_source",
+            "figure_source",
+            "coverage_risk",
+            "table_candidate",
+        }:
             continue
         if region.get("kind") in {"coverage_risk", "table_candidate"}:
             continue

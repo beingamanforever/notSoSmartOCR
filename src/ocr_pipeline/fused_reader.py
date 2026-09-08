@@ -81,9 +81,20 @@ class FusedReader:
             words = self.geometry_reader.read_with_merge_level(
                 image_path, page_number, self.merge_level
             )
-        except ReaderError:
-            # Geometry enriches the read; losing it must not lose the text.
-            return regions
+        except ReaderError as error:
+            # Preserve the transcript while making unavailable recognition explicit.
+            return [
+                replace(
+                    region,
+                    confidence=region.confidence,
+                    text_provenance={
+                        **(region.text_provenance or {}),
+                        "geometry_status": "unavailable",
+                        "recognition_error": error.code,
+                    },
+                )
+                for region in regions
+            ]
         return fuse(regions, words, page_number)
 
 
@@ -94,6 +105,9 @@ def fuse(
     claimed: set[int] = set()
     fused = []
     for region in regions:
+        if region.kind in {"figure", "checkbox"}:
+            fused.append(region)
+            continue
         inside = [
             index
             for index, word in enumerate(words)
@@ -102,7 +116,7 @@ def fuse(
         ]
         claimed.update(inside)
         claimed_words = [words[index] for index in inside]
-        enriched = _with_geometry(region, claimed_words, _area_per_character(words))
+        enriched = _with_geometry(region, claimed_words)
         fused.append(enriched)
         fused.extend(_underread_children(enriched, claimed_words))
     fused.extend(
@@ -118,30 +132,30 @@ def fuse(
 def _with_geometry(
     region: TextRegion,
     words: list[TextRegion],
-    area_per_character: float | None = None,
 ) -> TextRegion:
     provenance = dict(region.text_provenance or {})
     if not words:
         provenance["geometry"] = "no recognised word fell inside this region"
-        capacity = _character_capacity(region.bounding_box, area_per_character)
-        if capacity is not None and len(region.text) > capacity:
-            # The word reader read the same pixels and found nothing, and the box is far
-            # too small to hold this many characters at the size text is printed on this
-            # page. The read is invented, not merely unread by the other model.
-            provenance["read_terminated"] = (
-                f"invented: {len(region.text)} characters in a box that holds about "
-                f"{int(capacity)} at this page's text size, and no word was recognised"
-            )
-            return replace(region, text_provenance=provenance, resolution="unreadable")
-        return replace(region, text_provenance=provenance)
+        provenance["geometry_status"] = "unavailable"
+        native = (provenance.get("generation") or {}).get("token_score")
+        if native is None:
+            provenance["recognition_status"] = "unavailable"
+        return replace(region, confidence=native, text_provenance=provenance)
 
     scores = [word.confidence for word in words if isinstance(word.confidence, float)]
+    # A recognizer's score belongs to its own transcript. Geometry alone cannot
+    # certify a different reader's characters, especially digits and punctuation.
+    recognition_text = " ".join(word.text for word in words)
+    agreement = " ".join(region.text.split()) == " ".join(recognition_text.split())
     provenance.update(
         {
             "geometry_provider": words[0].provider,
             "word_count": len(words),
             "confidence_meaning": "recognition, from the word reader",
             "recognition_confidence_min": min(scores) if scores else None,
+            "recognition_text": recognition_text,
+            "recognition_confidence_mean": fmean(scores) if scores else None,
+            "recognition_agreement": agreement,
         }
     )
     structure = dict(region.structure or {})
@@ -154,7 +168,11 @@ def _with_geometry(
     ]
     return replace(
         region,
-        confidence=fmean(scores) if scores else region.confidence,
+        confidence=(provenance.get("generation") or {}).get("token_score")
+        if (provenance.get("generation") or {}).get("token_score") is not None
+        else fmean(scores)
+        if scores and agreement
+        else None,
         text_provenance=provenance,
         structure=structure,
     )
@@ -270,7 +288,9 @@ def _fuzzy_match(token: str, available: Counter, consumed: Counter) -> str | Non
     return best_key
 
 
-def _underread_children(region: TextRegion, words: list[TextRegion]) -> list[TextRegion]:
+def _underread_children(
+    region: TextRegion, words: list[TextRegion]
+) -> list[TextRegion]:
     """Emit the region's claimed-but-absent words as child regions with real geometry.
 
     Safe precisely because these words carry their own boxes and confidences: an earlier
@@ -351,36 +371,6 @@ def _same_row(left: BoundingBox, right: BoundingBox) -> bool:
     overlap = min(left.bottom, right.bottom) - max(left.top, right.top)
     shorter = min(left.bottom - left.top, right.bottom - right.top)
     return shorter > 0 and overlap >= shorter / 2
-
-
-def _area_per_character(words: list[TextRegion]) -> float | None:
-    """Pixels per character in the most tightly packed text recognised on this page.
-
-    Calibrated per page rather than assumed, because a fax and a slide print text at
-    very different sizes. The tightest packing rather than the average, because a page
-    mixes sizes: a form's small-print instruction line is both the densest text on the
-    page and the most likely to go unrecognised, and an average would call it impossible.
-    """
-    packed = [
-        area / len(text)
-        for word in words
-        if len(text := word.text.strip()) >= 3
-        and (
-            area := max(0, word.bounding_box.right - word.bounding_box.left)
-            * max(0, word.bounding_box.bottom - word.bounding_box.top)
-        )
-    ]
-    return min(packed) if packed else None
-
-
-def _character_capacity(
-    box: BoundingBox, area_per_character: float | None
-) -> float | None:
-    """How many characters this box could hold at the page's own text size."""
-    if not area_per_character:
-        return None
-    area = max(0, box.right - box.left) * max(0, box.bottom - box.top)
-    return area / area_per_character
 
 
 def _centre_inside(word: BoundingBox, region: BoundingBox) -> bool:

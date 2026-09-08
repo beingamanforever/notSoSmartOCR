@@ -18,12 +18,37 @@ experiments/results/
 /internal-clinical-ocr-benchmark/
 /PIPELINE_MODEL_UPGRADE_NOTES.md
 
-# Research stays local; only the project README is published.
+# Research stays local; publish the README and requested pipeline walkthroughs.
 *.md
 !/README.md
+!/docs/walkthroughs/*.md
 
 # Generated evaluations and research previews stay local.
 /artifacts/benchmarks/
 /artifacts/architecture/
 /artifacts/research/
 /artifacts/screenshots/
+
+# New verification files and training corpora remain local.
+/tests/
+/training/data/
+
+# Unverified contract examples remain local.
+/artifacts/demo/contract_agreement.png
+/artifacts/demo/contract_amendment.png
+/artifacts/demo/clinical_table_result.png
+
+# Evaluation scripts stay local.
+/experiments/benchmark_docres_appearance.py
+/experiments/benchmark_falcon_pages.py
+/experiments/benchmark_handwriting_lines.py
+/experiments/build_challenge_set.py
+/experiments/challenge_pages.py
+/experiments/checkboxqa_benchmark.py
+/experiments/evaluate_challenge_set.py
+/experiments/heron_layout_export.py
+/experiments/mpdocbench_export.py
+/experiments/omnidocbench_export.py
+/experiments/omnidocbench_layout_benchmark.py
+/experiments/public_benchmark.py
+/experiments/run_challenge_set.py

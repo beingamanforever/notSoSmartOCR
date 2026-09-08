@@ -414,6 +414,8 @@ class FalconFormulaStage:
 
 def _category(region: TextRegion, handwriting_ids: set[str]) -> str | None:
     structure = region.structure if isinstance(region.structure, dict) else {}
+    if structure.get("formula_recognition") == "model":
+        return None
     provenance = (
         region.text_provenance if isinstance(region.text_provenance, dict) else {}
     )

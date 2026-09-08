@@ -39,7 +39,7 @@ BOXED_GLYPHS = {
     "tick": "☑",
     "cross": "☒",
     "empty": "☐",
-    "unknown": "☑",
+    "unknown": "?",
 }
 NULL_MARK_GLYPH = MARK_GLYPHS["slashed_loop"]
 # Shapes that annotate an answer area rather than select a listed option.

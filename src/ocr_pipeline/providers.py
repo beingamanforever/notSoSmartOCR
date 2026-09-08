@@ -1207,6 +1207,7 @@ class GraniteDoclingReader:
                     **inputs,
                     max_new_tokens=self.max_new_tokens,
                     do_sample=False,
+                    use_cache=True,
                 )
             except Exception as error:
                 raise ReaderError("granite_predict_failed", str(error)) from error
@@ -1326,8 +1327,7 @@ def _load_doctags_converter(
             [doctags],
             [image],
         )
-        document = DoclingDocument(name="Document")
-        document.load_from_doctags(tagged_document)
+        document = DoclingDocument.load_from_doctags(tagged_document)
         if output_format == "markdown":
             return document.export_to_markdown()
         return document.export_to_text()

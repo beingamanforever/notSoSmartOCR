@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from html import escape
 from typing import Any
@@ -30,7 +31,8 @@ def render_evidence(regions: list[TextRegion]) -> EvidenceText:
             region.resolution == "resolved"
             or region.kind in {"handwriting", "checkbox"}
         )
-        and (region.structure or {}).get("role") != "table_source"
+        and (region.structure or {}).get("role")
+        not in {"table_source", "figure_source"}
         and not (region.structure or {}).get("layout_owner_id")
     ]
     return EvidenceText(
@@ -41,6 +43,11 @@ def render_evidence(regions: list[TextRegion]) -> EvidenceText:
 
 def _plain_text(region: TextRegion) -> str:
     if region.kind == "checkbox":
+        if (region.text_provenance or {}).get("method") == "learned_checkbox_detection":
+            return _native_control_text(
+                region.text if region.resolution == "resolved" else "[unresolved text]",
+                region.structure or {},
+            )
         # Only the state symbol: the label is already its own evidence region.
         return next(
             (symbol for symbol in CONTROL_SYMBOLS if region.text.startswith(symbol)),
@@ -51,6 +58,11 @@ def _plain_text(region: TextRegion) -> str:
     if region.kind == "handwriting":
         return UNREADABLE_HANDWRITING
     return ""
+
+
+def _native_control_text(text: str, structure: dict[str, Any]) -> str:
+    marker = {"selected": "[x]", "unselected": "[ ]"}.get(structure.get("state"), "[?]")
+    return f"{marker} {text}".strip()
 
 
 def render_page_markdown(
@@ -123,6 +135,11 @@ def _same_inline_line(first: dict[str, Any], second: dict[str, Any]) -> bool:
 
 
 def _inline_text(region: dict[str, Any]) -> bool:
+    if (region.get("text_provenance") or {}).get(
+        "method"
+    ) == "learned_checkbox_detection":
+        # Learned control boxes can contain the option label as well as the mark.
+        return False
     kind = _kind(region).casefold()
     if kind in {"word", "token"} or kind.endswith(("_word", "_token")):
         return True
@@ -187,7 +204,7 @@ def _display_regions(
 def _renderable(region: dict[str, Any], evidence_ids: set[str]) -> bool:
     structure = _structure(region)
     role = str(structure.get("role", ""))
-    if role in {"table_source", "coverage_risk", "table_candidate"}:
+    if role in {"table_source", "figure_source", "coverage_risk", "table_candidate"}:
         return False
     if _kind(region) in {"coverage_risk", "table_candidate"}:
         return False
@@ -207,23 +224,54 @@ def _markdown_block(
     resolution = _resolution(region)
     if kind == "table":
         block = _markdown_table(region) or text
+    elif kind == "figure":
+        asset = _structure(region).get("image", {})
+        block = (
+            f"![Extracted image](data:image/png;base64,{asset['data']})"
+            if resolution == "resolved"
+            and asset.get("media_type") == "image/png"
+            and asset.get("data")
+            else text
+        )
     elif kind == "title":
         block = f"### {text}" if text else ""
     elif kind == "heading":
         block = f"#### {text}" if text else ""
+    elif kind == "code":
+        code = _canonical_layout_text(region, source_index)
+        fence = re.match(r"^ {0,3}(`{3,}|~{3,})[^\n]*\n", code)
+        closing = code.rstrip().rsplit("\n", 1)[-1].strip()
+        if not code or (
+            fence and len(closing) >= len(fence[1]) and set(closing) == {fence[1][0]}
+        ):
+            block = code
+        else:
+            delimiter = "`" * max(
+                3, 1 + max(map(len, re.findall(r"`+", code)), default=0)
+            )
+            ending = "" if code.endswith("\n") else "\n"
+            block = f"{delimiter}\n{code}{ending}{delimiter}"
     elif kind == "formula":
         if resolution != "resolved":
             block = "[unreadable formula]"
         elif not text:
             block = ""
         elif _formula_math_ready(region):
-            block = f"$$\n{text}\n$$"
+            block = (
+                text
+                if text.startswith("$$") and text.endswith("$$")
+                else f"$$\n{text}\n$$"
+            )
         else:
             block = text
     elif kind == "control":
         # Reached only when the control has no row to sit in: a control whose label
         # belongs to a layout block is drawn inside that row instead, where it was marked.
-        if resolution == "resolved":
+        if (region.get("text_provenance") or {}).get(
+            "method"
+        ) == "learned_checkbox_detection":
+            block = f"- {_display_text(region)}"
+        elif resolution == "resolved":
             block = f"- {text}" if text else ""
         else:
             label = str(_structure(region).get("label") or "").strip()
@@ -403,11 +451,14 @@ def _canonical_layout_text(
     structure = _structure(region)
     if structure.get("role") != "layout_block":
         return _display_text(region)
-    if structure.get("block_type") == "formula" and _resolution(region) == "resolved":
+    if (
+        structure.get("block_type") in {"formula", "code"}
+        and _resolution(region) == "resolved"
+    ):
         return _text(region)
     groups = (
         structure.get("fields", structure.get("segments"))
-        if structure.get("block_type") == "form_row"
+        if structure.get("block_type") in {"form_row", "spatial_row"}
         else structure.get("lines")
     )
     if not isinstance(groups, list):
@@ -437,7 +488,9 @@ def _canonical_layout_text(
                 if mark := _control_mark_text(control):
                     placed.append((_left_edge(control), mark))
         rendered_lines.append(" ".join(text for _, text in sorted(placed)))
-    separator = " | " if structure.get("block_type") == "form_row" else " "
+    separator = (
+        " | " if structure.get("block_type") in {"form_row", "spatial_row"} else " "
+    )
     return separator.join(rendered_lines)
 
 
@@ -451,7 +504,8 @@ def _markdown_row(values: Sequence[str]) -> str:
 
 
 def _escape_markdown_cell(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("|", "\\|").replace("\n", "<br>")
+    literal = re.sub(r"([\\`*_\[\]|~])", r"\\\1", escape(value, quote=False))
+    return literal.replace("\n", "<br>")
 
 
 def _id(region: dict[str, Any]) -> str:
@@ -467,6 +521,15 @@ def _text(region: dict[str, Any]) -> str:
 
 
 def _display_text(region: dict[str, Any]) -> str:
+    if (region.get("text_provenance") or {}).get(
+        "method"
+    ) == "learned_checkbox_detection":
+        return _native_control_text(
+            _text(region).strip()
+            if _resolution(region) == "resolved"
+            else "[unresolved text]",
+            _structure(region),
+        )
     if _resolution(region) == "resolved":
         return _text(region).strip()
     if _semantic_kind(region) == "handwriting":

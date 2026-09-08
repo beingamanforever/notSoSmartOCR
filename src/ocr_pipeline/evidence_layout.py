@@ -19,6 +19,7 @@ PROVIDER = "evidence-spatial-layout"
 _TEXT_KINDS = frozenset(
     {
         "caption",
+        "code",
         "equation",
         "field",
         "footnote",
@@ -41,6 +42,7 @@ _TEXT_KINDS = frozenset(
 )
 _ATOMIC_TYPES = {
     "caption": "caption",
+    "code": "code",
     "equation": "formula",
     "field": "field",
     "footnote": "footnote",
@@ -63,6 +65,7 @@ _EXCLUDED_ROLES = frozenset(
         "table_candidate",
         "table_cell",
         "table_source",
+        "figure_source",
     }
 )
 _PRESENTATION_KINDS = frozenset(
@@ -76,6 +79,7 @@ _PRESENTATION_EXCLUDED_ROLES = frozenset(
         "table_candidate",
         "table_cell",
         "table_source",
+        "figure_source",
     }
 )
 _SECTION_HEADINGS = frozenset(
@@ -186,20 +190,22 @@ def refresh_layout_owners(regions: list[TextRegion], owner_ids: set[str]) -> Non
             continue
         owner.text = _block_text(str(block_type), lines)
         owner.resolution = "resolved" if owner.text else "unreadable"
-        if block_type == "form_row":
-            segments = _line_segments(lines[0])
+        if block_type in {"form_row", "spatial_row"}:
+            segments = _line_segments(lines[0], shared_band=block_type == "spatial_row")
             structure["segments"] = [
                 {"evidence_ids": [region.id for region in segment]}
                 for segment in segments
             ]
-            structure["fields"] = [
-                _structured_form_field(owner.id, index, field)
-                for index, field in enumerate(_form_fields(segments), start=1)
-            ]
+            if block_type == "form_row":
+                structure["fields"] = [
+                    _structured_form_field(owner.id, index, field)
+                    for index, field in enumerate(_form_fields(segments), start=1)
+                ]
         owner.structure = structure
         provenance = (
             copy.deepcopy(owner.text_provenance) if owner.text_provenance else {}
         )
+        provenance["source_region_ids"] = _child_ids(owner)
         provenance["source_providers"] = list(
             dict.fromkeys(
                 source_index[evidence_id].provider
@@ -247,7 +253,9 @@ def _build_blocks(
     if paragraph:
         groups.append((_paragraph_type(paragraph), paragraph))
 
-    candidates: list[tuple[str, list[_Line]]] = groups + _atomic_candidates(atomic)
+    candidates: list[tuple[str, list[_Line]]] = groups + _atomic_candidates(
+        atomic, separators
+    )
     candidates = _pre_cut_order(
         candidates,
         separators,
@@ -289,7 +297,14 @@ def _build_blocks(
             "lines": line_metadata,
         }
         if block_type == "formula":
-            structure["formula_recognition"] = "heuristic"
+            structure["formula_recognition"] = (
+                "model"
+                if all(
+                    (region.text_provenance or {}).get("layout_category") == "formula"
+                    for region in child_regions
+                )
+                else "heuristic"
+            )
         if separators:
             structure["pre_cut_boundaries"] = [
                 {
@@ -299,16 +314,19 @@ def _build_blocks(
                 }
                 for separator in separators
             ]
-        if block_type == "form_row":
-            segments = _line_segments(ordered_lines[0])
+        if block_type in {"form_row", "spatial_row"}:
+            segments = _line_segments(
+                ordered_lines[0], shared_band=block_type == "spatial_row"
+            )
             structure["segments"] = [
                 {"evidence_ids": [region.id for region in segment]}
                 for segment in segments
             ]
-            structure["fields"] = [
-                _structured_form_field(block_id, index, field)
-                for index, field in enumerate(_form_fields(segments), start=1)
-            ]
+            if block_type == "form_row":
+                structure["fields"] = [
+                    _structured_form_field(block_id, index, field)
+                    for index, field in enumerate(_form_fields(segments), start=1)
+                ]
         blocks.append(
             TextRegion(
                 id=block_id,
@@ -344,14 +362,31 @@ def _assign_presentation_ranks(
         for region in regions
         if _top_level_presentation_item(region, excluded_ids)
     ]
-    ordered = _pre_cut_order(
-        top_level,
+    rows = []
+    for line in _spatial_lines(top_level, separators):
+        if _form_row(line) and all(
+            (item.structure or {}).get("block_type")
+            in {"paragraph", "line", "list", "field", "form_row"}
+            and "\n" not in item.text
+            for item in line.items
+        ):
+            rows.append(line)
+        else:
+            rows.extend(_Line([item]) for item in line.items)
+    lines = _pre_cut_order(
+        rows,
         separators,
-        lambda region: region.bounding_box,
+        lambda line: line.box,
     )
+    ordered = [
+        region
+        for line in lines
+        for region in sorted(line.items, key=lambda item: item.bounding_box.left)
+    ]
     for rank, region in enumerate(ordered, start=1):
         structure = copy.deepcopy(region.structure) if region.structure else {}
         structure["presentation_rank"] = rank
+        structure["presentation_order_method"] = "spatial_sort"
         region.structure = structure
         if region.provider == PROVIDER:
             region.reading_order = rank
@@ -363,6 +398,7 @@ def _assign_presentation_ranks(
                 continue
             label_structure = copy.deepcopy(label.structure) if label.structure else {}
             label_structure["presentation_rank"] = rank
+            label_structure["presentation_order_method"] = "spatial_sort"
             label.structure = label_structure
 
 
@@ -916,6 +952,14 @@ def _column_groups(
 def _semantic_block_types(
     candidates: list[tuple[str, list[_Line]]],
 ) -> list[tuple[str, list[_Line]]]:
+    # Learned layout already assigns semantic labels; box height is not font size.
+    if any(
+        (region.text_provenance or {}).get("layout_category")
+        for _, lines in candidates
+        for line in lines
+        for region in line.items
+    ):
+        return candidates
     heights = [
         _height(region.bounding_box)
         for block_type, lines in candidates
@@ -1113,11 +1157,24 @@ def _formula_continuation(lines: list[_Line]) -> bool:
     return first.startswith(("=", "+", "-", "−"))
 
 
-def _atomic_candidates(regions: list[TextRegion]) -> list[tuple[str, list[_Line]]]:
-    candidates = [
+def _atomic_candidates(
+    regions: list[TextRegion], separators: tuple[_Separator, ...]
+) -> list[tuple[str, list[_Line]]]:
+    row_items = [
+        region
+        for region in regions
+        if _source_type(region) == "paragraph"
+        and "\n" not in region.text
+        and not _is_orientation_residual(region)
+    ]
+    rows = [
+        line for line in _spatial_lines(row_items, separators) if len(line.items) > 1
+    ]
+    row_ids = {item.id for line in rows for item in line.items}
+    candidates = [("spatial_row", [line]) for line in rows] + [
         (_source_type(region), [_Line([region])])
         for region in regions
-        if not _is_orientation_residual(region)
+        if region.id not in row_ids and not _is_orientation_residual(region)
     ]
     residuals: dict[tuple[object, object, object], list[TextRegion]] = {}
     for region in regions:
@@ -1200,11 +1257,20 @@ def _looks_like_math(text: str, lines: list[_Line]) -> bool:
     return long_words <= 1 and short / len(words) >= 0.75 and operator_count > 0
 
 
-def _line_segments(items: list[TextRegion]) -> list[list[TextRegion]]:
+def _line_segments(
+    items: list[TextRegion], *, shared_band: bool = False
+) -> list[list[TextRegion]]:
     ordered = sorted(items, key=lambda item: item.bounding_box.left)
     if not ordered:
         return []
     typical_height = statistics.median(_height(item.bounding_box) for item in ordered)
+    if shared_band:
+        # Native paragraph boxes can span several lines; use their shared row band.
+        shared_height = min(item.bounding_box.bottom for item in ordered) - max(
+            item.bounding_box.top for item in ordered
+        )
+        if shared_height > 0:
+            typical_height = shared_height
     segments = [[ordered[0]]]
     for region in ordered[1:]:
         gap = region.bounding_box.left - segments[-1][-1].bounding_box.right
@@ -1216,6 +1282,15 @@ def _line_segments(items: list[TextRegion]) -> list[list[TextRegion]]:
 
 
 def _block_text(block_type: str, lines: list[list[TextRegion]]) -> str:
+    if len(lines) == 1 and len(lines[0]) == 1:
+        source = lines[0][0]
+        if (source.text_provenance or {}).get("layout_category"):
+            return _canonical_region_text(source)
+    if block_type == "spatial_row":
+        return " | ".join(
+            _resolved_text(segment)
+            for segment in _line_segments(lines[0], shared_band=True)
+        )
     if block_type == "form_row":
         return " | ".join(
             _resolved_text(field) for field in _form_fields(_line_segments(lines[0]))
@@ -1231,7 +1306,11 @@ def _resolved_text(regions: list[TextRegion]) -> str:
 
 def _canonical_region_text(region: TextRegion) -> str:
     if region.resolution == "resolved":
-        return region.text.strip()
+        return (
+            region.text
+            if (region.text_provenance or {}).get("layout_category")
+            else region.text.strip()
+        )
     if region.kind == "handwriting":
         return "[unreadable handwriting]"
     return ""
@@ -1394,6 +1473,13 @@ def _paragraph_type(lines: list[_Line]) -> str:
 
 
 def _source_type(region: TextRegion) -> str:
+    if region.kind == "code":
+        return "code"
+    category = (region.text_provenance or {}).get("layout_category")
+    if category == "text":
+        return "paragraph"
+    if category == "algorithm":
+        return "code"
     structure = region.structure if isinstance(region.structure, dict) else {}
     for value in (
         structure.get("semantic_class"),
@@ -1403,7 +1489,7 @@ def _source_type(region: TextRegion) -> str:
         label = _label(value)
         if label in _ATOMIC_TYPES:
             return _ATOMIC_TYPES[label]
-    return "text"
+    return "paragraph" if category else "text"
 
 
 def _is_orientation_residual(region: TextRegion) -> bool:
@@ -1462,6 +1548,7 @@ def _group_formula_blocks(
         block
         for block in blocks
         if (block.structure or {}).get("block_type") == "formula"
+        and (block.structure or {}).get("formula_recognition") == "heuristic"
     ]
     if not formulas or not image_path.is_file():
         return blocks
