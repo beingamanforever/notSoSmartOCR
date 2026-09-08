@@ -2,8 +2,6 @@
 
 Evidence-linked OCR for structured and clinical documents. Research software, not validated for unattended clinical use.
 
-![OCR evidence pipeline](artifacts/architecture/ocr-evidence-pipeline-preview.png)
-
 ## Pipeline
 
 Every stage reads and writes the same positioned evidence record. Specialists are asked only about eligible crops and return alternatives, never replacements, and no stage deletes a reading it did not create.
@@ -15,10 +13,6 @@ Every stage reads and writes the same positioned evidence record. Specialists ar
 - A specialist reading (TrOCR handwriting, Falcon formulas) stays an alternative until independent evidence or a human accepts it.
 - An accepted revision supersedes what it consumes, once. Source boxes, raw responses, alternatives, and review state stay attached.
 - Text, Markdown, Copy, and Download all render the same canonical revision. The Markdown lane passes through a formatting model that is structurally unable to add a number: any output containing a digit sequence the extraction did not produce is discarded and the raw markdown ships.
-
-## Demo
-
-![Example pages carried end to end](artifacts/architecture/ocr-evidence-demo.jpg)
 
 ## Run
 

@@ -1,5 +1,0 @@
-metric,value,denominator
-broad_control_safe_match,0.013807,21 / 1521 annotations
-table_presence_f1,0.862191,169 pages
-row_count_accuracy,0.017699,226 descriptors
-column_count_accuracy,0.049242,264 descriptors
