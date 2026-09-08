@@ -4,6 +4,7 @@ experiments/results/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+/.archive/
 /.codex/
 /AGENTS.md
 /CLAUDE.md
@@ -16,3 +17,13 @@ experiments/results/
 /HEALTH_SCORE_PAPER_REVIEW.md
 /internal-clinical-ocr-benchmark/
 /PIPELINE_MODEL_UPGRADE_NOTES.md
+
+# Research stays local; only the project README is published.
+*.md
+!/README.md
+
+# Generated evaluations and research previews stay local.
+/artifacts/benchmarks/
+/artifacts/architecture/
+/artifacts/research/
+/artifacts/screenshots/

@@ -1,6 +1,0 @@
-method,family,correct_cells,total_cells,source_run
-Tesseract raw,base,163,187,/private/tmp/notso-ocr-financial-fusion-r7.json
-Tesseract Sauvola,base,164,187,/private/tmp/notso-ocr-financial-fusion-r7.json
-Nemotron raw,base,182,187,/private/tmp/notso-ocr-financial-fusion-r7.json
-Tesseract fusion,fusion,186,187,/private/tmp/notso-ocr-financial-fusion-r7.json
-Tri-source fusion,fusion,187,187,/private/tmp/notso-ocr-financial-fusion-r7.json
