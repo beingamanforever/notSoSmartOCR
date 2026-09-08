@@ -26,6 +26,7 @@ Text · Tables · Handwriting · Formulas · Source-linked review
 | --- | --- | --- |
 | Paper | Attention Is All You Need | [Output](artifacts/demo/paper-ui.png) |
 | Handwriting and math | Physics notes | [Output](artifacts/demo/notes-ui.png) |
+| Printed math | Scanned calculus formulas | [Output](artifacts/demo/printed-math-ui.png) |
 | Tables | Public financial report | [Output](artifacts/demo/table-ui.png) |
 | Screenshot | GSoC Final Evaluation | [Output](artifacts/demo/gsoc-ui.png) |
 
@@ -34,6 +35,8 @@ Text · Tables · Handwriting · Formulas · Source-linked review
 | ![Academic paper with detected regions](artifacts/demo/paper-detection.png) | ![Handwritten notes and model output](artifacts/demo/notes-ui.png) |
 
 ![GSoC Final Evaluation with source-linked OCR output](artifacts/demo/gsoc-ui.png)
+
+![Scanned calculus formulas with detected regions and rendered math output](artifacts/demo/printed-math-ui.png)
 
 Screenshots show actual output, including errors. Overlapping regions can still produce duplicates; handwriting, numeric fields, and reading order remain imperfect. Model scores are uncalibrated. Private documents and datasets are excluded.
 
