@@ -193,3 +193,12 @@ Demonstrating that each source instance is assigned to an appropriate recognitio
 The [Falcon sampling code](https://github.com/tiiuae/Falcon-Perception/blob/main/falcon_perception/sampling.py) and [PR #34](https://github.com/tiiuae/Falcon-Perception/pull/34) explain the native probability and transfer paths. Locally, follow [generation evidence](../../experiments/serve_falcon_layout.py), [canonical regions](../../src/ocr_pipeline/contracts.py), [table parsing](../../src/ocr_pipeline/falcon_layout.py), [risk](../../src/ocr_pipeline/risk.py), [rendering](../../src/ocr_pipeline/rendering.py), and [feedback/session handling](../../src/ocr_pipeline/demo.py).
 
 These sources were inspected on 9 September 2026. No new model-quality benchmark was run for this documentation update. The distinction between model capability, local implementation, historical observations, and current limitations is part of the design.
+
+
+## Optional crop refinement and comparison exports
+
+[`refine_page`](../../src/ocr_pipeline/markdown_refinement.py) is an optional OpenRouter postprocessor used by the comparison runner. It sends one contact sheet per page, containing selected visual regions and form rows with their horizontal context. It keeps original region IDs and boxes, checks that every requested crop has a response, and stitches the returned Markdown into the local OCR output. No crop means no request. This does not change the default workbench pipeline.
+
+The caller supplies the model and `OPENROUTER_API_KEY`; zero-data retention remains enabled by default. Any retention exception must be explicitly authorized for the data being processed. Raw and refined outputs should be saved separately, including failed requests. Crop recognition can still misread handwriting, associate a note with the wrong row, or omit content.
+
+[`normalize_table_headers`](../../src/ocr_pipeline/markdown_export.py), using `markdown-it-py`, preserves cells beyond the declared header width by adding unnamed headers. The comparison uses it for HTML and Markdown downloads. It leaves source responses unchanged and does not invent column names or reconstruct missing cells. It handles top-level Markdown tables; nested tables and recognition errors remain outside its scope.

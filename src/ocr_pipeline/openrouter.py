@@ -154,6 +154,9 @@ def _call_openrouter(
     strict_schema: bool,
     transport: Transport,
     sleeper: Sleeper,
+    *,
+    zero_data_retention: bool = True,
+    reasoning_enabled: bool | None = None,
 ) -> OpenRouterResult:
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
@@ -172,12 +175,14 @@ def _call_openrouter(
         raise OpenRouterError("Provider slug must be a non-empty trimmed string")
     if timeout_seconds <= 0 or max_attempts < 1:
         raise OpenRouterError("Timeout and max attempts must be positive")
+    if not isinstance(zero_data_retention, bool):
+        raise OpenRouterError("zero_data_retention must be a boolean")
 
     provider: dict[str, Any] = {
         "allow_fallbacks": False,
         "require_parameters": True,
         "data_collection": "deny",
-        "zdr": True,
+        "zdr": zero_data_retention,
     }
     if provider_slug:
         provider["order"] = [provider_slug]
@@ -201,6 +206,10 @@ def _call_openrouter(
         ),
         "provider": provider,
     }
+    if reasoning_enabled is not None:
+        if not isinstance(reasoning_enabled, bool):
+            raise OpenRouterError("reasoning_enabled must be a boolean")
+        payload["reasoning"] = {"enabled": reasoning_enabled}
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     started = time.perf_counter()
 

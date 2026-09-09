@@ -52,3 +52,7 @@ experiments/results/
 /experiments/omnidocbench_layout_benchmark.py
 /experiments/public_benchmark.py
 /experiments/run_challenge_set.py
+
+# Local output and temporary files are not publication assets.
+/output/
+/tmp/
