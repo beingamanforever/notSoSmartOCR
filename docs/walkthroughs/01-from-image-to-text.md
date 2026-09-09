@@ -90,7 +90,7 @@ Our historical local investigations found that text detection and crop coverage 
 
 Falcon plus Heron gave us a more direct way to read complete formula, paragraph, and table regions and retain detected controls. That is the reason for the serving choice. It is **not** evidence that Nemotron is universally inferior. The old reports also recorded improvements over a Tesseract baseline; they were not a current paired Falcon-versus-Nemotron benchmark.
 
-Older internal notes described a particular Nemotron recognizer size and a 32-character limit. I am not carrying those statements forward as facts about today's release: the current model card has changed, and that exact constraint was not established for the currently published configuration. An architectural explanation should not turn an old experiment into a permanent verdict on a model family.
+The current model card distinguishes an English word-level configuration with a maximum recognition sequence length of 32 from a multilingual line-level configuration with a maximum of 128. A 32-character constraint should not be generalized across the family, and historical language flags alone do not establish which model files were loaded. The [technical companion](04-model-internals-and-hardware.md#77-how-does-nemotrons-recognition-approach-differ-from-falcons) explains the configurations and their different roles. [Current NVIDIA model card](https://huggingface.co/nvidia/nemotron-ocr-v2).
 
 ## 7. Why we restored region crops after the line experiment
 

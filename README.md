@@ -33,10 +33,8 @@ Text · Tables · Handwriting · Formulas · Source-linked review
 | Academic layout | Handwritten formulas |
 | --- | --- |
 | ![Academic paper with detected regions](artifacts/demo/paper-detection.png) | ![Handwritten notes and model output](artifacts/demo/notes-ui.png) |
-
-![GSoC Final Evaluation with source-linked OCR output](artifacts/demo/gsoc-ui.png)
-
-![Scanned calculus formulas with detected regions and rendered math output](artifacts/demo/printed-math-ui.png)
+| **Text and images** | **Printed mathematics** |
+| ![GSoC Final Evaluation with source-linked OCR output](artifacts/demo/gsoc-ui.png) | ![Scanned calculus formulas with detected regions and rendered math output](artifacts/demo/printed-math-ui.png) |
 
 Screenshots show actual output, including errors. Overlapping regions can still produce duplicates; handwriting, numeric fields, and reading order remain imperfect. Model scores are uncalibrated. Private documents and datasets are excluded.
 
@@ -56,11 +54,18 @@ DocTR and Tesseract OSD provide orientation evidence. Heron detects document reg
 
 ## Walkthroughs
 
-Three articles with 50 additional questions answered:
+Six walkthroughs, including 100 pipeline questions, grounded in the code and technical reports:
 
-1. [From pixels to text: the models and pipeline](docs/walkthroughs/01-from-image-to-text.md)
-2. [Layout, tables, and our Falcon contributions](docs/walkthroughs/02-layout-tables-and-crops.md)
-3. [Confidence, Markdown, and review](docs/walkthroughs/03-confidence-exports-and-review.md)
+| Read | Covers |
+| --- | --- |
+| [From pixels to text](docs/walkthroughs/01-from-image-to-text.md) | The running pipeline and model choices |
+| [Layout, tables, and Falcon contributions](docs/walkthroughs/02-layout-tables-and-crops.md) | Geometry, crops, duplicates, and upstream fixes |
+| [Confidence, Markdown, and review](docs/walkthroughs/03-confidence-exports-and-review.md) | Token scores, rendering, exports, and feedback |
+| [Model internals and hardware](docs/walkthroughs/04-model-internals-and-hardware.md) | DETR, orientation, table recognition, and VRAM |
+| [Inside Falcon-OCR](docs/walkthroughs/05-falcon-technical-report.md) | Early fusion, attention, training, and native serving |
+| [Document-parsing strategies](docs/walkthroughs/06-document-parsing-strategies.md) | Seven OCR systems and their architectural trade-offs |
+
+**Hardware:** exercised on a 24 GB-class NVIDIA A10G. Minimum VRAM is not established; see the [memory breakdown](docs/walkthroughs/04-model-internals-and-hardware.md#vram-and-performance).
 
 ## Acknowledgements
 
