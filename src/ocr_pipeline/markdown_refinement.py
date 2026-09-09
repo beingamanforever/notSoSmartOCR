@@ -109,7 +109,7 @@ def refine_page(
         "page_number": page["page_number"],
         "canonical_unchanged": True,
         "original_markdown": markdown,
-        "prompt_version": 9,
+        "prompt_version": 10,
         "input_mode": "crop_contact_sheet",
         "zero_data_retention": zero_data_retention,
         "reasoning_enabled": False,
@@ -167,21 +167,6 @@ def refine_page(
         "additionalProperties": False,
     }
     strict = model != QWEN_37_FLASH_MODEL
-    context = [
-        {
-            "region_id": g["region_id"],
-            "source_box": g["box"],
-            "regions": [
-                {
-                    "id": r["id"],
-                    "kind": r["kind"],
-                    "box": r["bounding_box"],
-                }
-                for r in g["regions"]
-            ],
-        }
-        for g in crops
-    ]
     messages = [
         {
             "role": "system",
@@ -191,7 +176,7 @@ def refine_page(
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": json.dumps(context)},
+                {"type": "text", "text": json.dumps([g["region_id"] for g in crops])},
                 _image_content(sheet),
             ],
         },
