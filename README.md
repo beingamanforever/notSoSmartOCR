@@ -54,7 +54,7 @@ DocTR and Tesseract OSD provide orientation evidence. Heron detects document reg
 
 ## Walkthroughs
 
-Six walkthroughs, including 100 pipeline questions, grounded in the code and technical reports:
+Seven walkthroughs, including 100 pipeline questions, grounded in the code and technical reports:
 
 | Read | Covers |
 | --- | --- |
@@ -64,6 +64,7 @@ Six walkthroughs, including 100 pipeline questions, grounded in the code and tec
 | [Model internals and hardware](docs/walkthroughs/04-model-internals-and-hardware.md) | DETR, orientation, table recognition, and VRAM |
 | [Inside Falcon-OCR](docs/walkthroughs/05-falcon-technical-report.md) | Early fusion, attention, training, and native serving |
 | [Document-parsing strategies](docs/walkthroughs/06-document-parsing-strategies.md) | Seven OCR systems and their architectural trade-offs |
+| [From research to implementation](docs/walkthroughs/07-research-to-implementation.md) | What we reused, what each paper taught us, and observed improvements |
 
 **Hardware:** exercised on a 24 GB-class NVIDIA A10G. Minimum VRAM is not established; see the [memory breakdown](docs/walkthroughs/04-model-internals-and-hardware.md#vram-and-performance).
 
