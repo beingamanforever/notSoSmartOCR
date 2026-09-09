@@ -157,6 +157,7 @@ def _call_openrouter(
     *,
     zero_data_retention: bool = True,
     reasoning_enabled: bool | None = None,
+    session_id: str | None = None,
 ) -> OpenRouterResult:
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
@@ -177,6 +178,15 @@ def _call_openrouter(
         raise OpenRouterError("Timeout and max attempts must be positive")
     if not isinstance(zero_data_retention, bool):
         raise OpenRouterError("zero_data_retention must be a boolean")
+    if session_id is not None and (
+        not isinstance(session_id, str)
+        or not session_id.strip()
+        or session_id != session_id.strip()
+        or len(session_id) > 256
+    ):
+        raise OpenRouterError(
+            "session_id must be a trimmed string of 1 to 256 characters"
+        )
 
     provider: dict[str, Any] = {
         "allow_fallbacks": False,
@@ -210,6 +220,8 @@ def _call_openrouter(
         if not isinstance(reasoning_enabled, bool):
             raise OpenRouterError("reasoning_enabled must be a boolean")
         payload["reasoning"] = {"enabled": reasoning_enabled}
+    if session_id is not None:
+        payload["session_id"] = session_id
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     started = time.perf_counter()
 
