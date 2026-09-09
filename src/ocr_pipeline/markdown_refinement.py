@@ -38,6 +38,11 @@ There is no whole-page image. Each numbered panel is a separate crop from the
 same page. Return one record for every crop ID, in any order. Do not transcribe
 the contact sheet labels. Transcribe ALL visible content within each panel.
 Read the pixels directly. No prior transcription is supplied.
+Panels may be rotated and repacked for reading; their positions do not describe
+positions on the original page. Output document content only, without added
+location descriptions or layout commentary. Represent spacing with Markdown
+whitespace, not written descriptions of line breaks. Preserve location words
+only when they are actually written in the document.
 
 Preserve text, headings, line breaks, blank fields, mathematical expressions,
 handwriting, signatures and marks. Use ✓ for a tick, ✗ for a cross, and ☐/☑/☒
@@ -104,7 +109,7 @@ def refine_page(
         "page_number": page["page_number"],
         "canonical_unchanged": True,
         "original_markdown": markdown,
-        "prompt_version": 8,
+        "prompt_version": 9,
         "input_mode": "crop_contact_sheet",
         "zero_data_retention": zero_data_retention,
         "reasoning_enabled": False,
