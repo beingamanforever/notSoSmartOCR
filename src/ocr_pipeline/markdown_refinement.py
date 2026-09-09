@@ -77,6 +77,7 @@ def refine_page(
     zero_data_retention: bool = True,
     model: str = QWEN_FLASH_MODEL,
     contact_sheet_path: str | Path | None = None,
+    rotation_degrees: int = 0,
 ) -> dict[str, Any]:
     """One crop-only call per page; no calls when there are no visual regions.
 
@@ -86,6 +87,8 @@ def refine_page(
     """
     if model not in {QWEN_FLASH_MODEL, QWEN_37_FLASH_MODEL}:
         raise ValueError("Only explicitly supported Qwen Flash models are allowed")
+    if isinstance(rotation_degrees, bool) or rotation_degrees not in {0, 90, 180, 270}:
+        raise ValueError("Crop rotation must be 0, 90, 180, or 270 degrees")
     if not isinstance(markdown, str) or not isinstance(page.get("regions"), list):
         raise ValueError("A page with regions and its original Markdown are required")
     width, height = page.get("width"), page.get("height")
@@ -105,6 +108,7 @@ def refine_page(
         "input_mode": "crop_contact_sheet",
         "zero_data_retention": zero_data_retention,
         "reasoning_enabled": False,
+        "rotation_degrees": rotation_degrees,
         "crops": [
             {k: v for k, v in g.items() if k not in {"regions", "selected"}}
             for g in crops
@@ -125,7 +129,9 @@ def refine_page(
             "strict_schema": False,
         }
     with Image.open(image_path) as image:
-        sheet = _contact_sheet(image.convert("RGB"), crops, width, height)
+        sheet = _contact_sheet(
+            image.convert("RGB"), crops, width, height, rotation_degrees
+        )
     metadata["crops"] = [
         {k: v for k, v in g.items() if k not in {"regions", "selected"}} for g in crops
     ]
@@ -290,7 +296,7 @@ def _crop_groups(regions, width, height):
     return groups
 
 
-def _contact_sheet(image, crops, width, height):
+def _contact_sheet(image, crops, width, height, rotation_degrees):
     panels = []
     label_height = 32
     for crop in crops:
@@ -301,20 +307,22 @@ def _contact_sheet(image, crops, width, height):
             image.width,
             math.ceil(box["bottom"] * image.height / height),
         )
-        panels.append(image.crop(bounds))
+        panels.append(image.crop(bounds).rotate(rotation_degrees, expand=True))
     sheet = Image.new(
-        "RGB", (image.width, sum(p.height + label_height for p in panels)), "white"
+        "RGB",
+        (max(p.width for p in panels), sum(p.height + label_height for p in panels)),
+        "white",
     )
     draw = ImageDraw.Draw(sheet)
     top = 0
     for crop, panel in zip(crops, panels, strict=True):
-        draw.rectangle((0, top, image.width, top + label_height), fill="#e5e7eb")
+        draw.rectangle((0, top, sheet.width, top + label_height), fill="#e5e7eb")
         draw.text((8, top + 8), crop["region_id"], fill="black", font_size=18)
         sheet.paste(panel, (0, top + label_height))
         crop["contact_box"] = {
             "left": 0,
             "top": top + label_height,
-            "right": image.width,
+            "right": panel.width,
             "bottom": top + label_height + panel.height,
         }
         top += label_height + panel.height
