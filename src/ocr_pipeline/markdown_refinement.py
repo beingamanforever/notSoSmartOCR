@@ -413,12 +413,86 @@ def refine_page(
             rejected.add(record["region_id"])
     answers = {r["region_id"]: r["markdown"] for r in records}
     pending_candidates = {}
+    table_replacements = {}
     for crop in crops:
-        if source_index[crop["source_ids"][0]]["kind"] != "table":
+        source_id = crop["source_ids"][0]
+        region = source_index[source_id]
+        if region["kind"] != "table":
             continue
-        if records_complete and answers.get(crop["region_id"], "").strip():
-            pending_candidates[crop["source_ids"][0]] = {
-                "text": answers[crop["region_id"]],
+        answer = answers.get(crop["region_id"], "")
+        if crop["region_id"] in structure_errors or not records_complete:
+            rejected.add(crop["region_id"])
+            if answer.strip():
+                pending_candidates[source_id] = {
+                    "text": answer,
+                    "confidence": None,
+                    "provider": model,
+                    "text_provenance": {
+                        "method": "qwen_crop_refinement",
+                        "source_crop_id": crop["region_id"],
+                        "physical_cell_alignment": "unresolved",
+                    },
+                    "decision_state": "pending",
+                }
+            continue
+        try:
+            markup = MARKDOWN.render(normalize_table_headers(answer))
+            actual = validate_table_topology(_table_structure(markup) or {})
+            predicted = validate_table_topology(table_grids[crop["region_id"]])
+            source = validate_table_topology(region.get("structure") or {})
+            actual_positions = {(c.rows, c.columns) for c in actual.cells}
+            if actual_positions != {(c.rows, c.columns) for c in predicted.cells}:
+                errors.append(
+                    f"{crop['region_id']} recognition disagrees with predicted table grid"
+                )
+            elif actual_positions != {(c.rows, c.columns) for c in source.cells}:
+                errors.append(
+                    f"{crop['region_id']} predicted grid disagrees with canonical table grid"
+                )
+            else:
+                values = {(c.rows, c.columns): c.value for c in actual.cells}
+                cells = [
+                    {
+                        **{
+                            key: value
+                            for key, value in cell.value.items()
+                            if key
+                            not in {
+                                "confidence",
+                                "confidence_kind",
+                                "decision",
+                                "resolution",
+                                "source",
+                                "supporters",
+                                "text",
+                                "text_provenance",
+                            }
+                        },
+                        "text": str(values[(cell.rows, cell.columns)].get("text", "")),
+                        "resolution": "resolved",
+                        "source": model,
+                        "text_provenance": {
+                            "method": "qwen_crop_refinement",
+                            "source_crop_id": crop["region_id"],
+                            "physical_cell_alignment": (
+                                "falcon_tableformer_qwen_consensus"
+                            ),
+                        },
+                    }
+                    for cell in source.cells
+                ]
+                table_replacements[source_id] = {
+                    "text": "\n".join(cell["text"] for cell in cells),
+                    "structure": {**(region.get("structure") or {}), "cells": cells},
+                    "crop_id": crop["region_id"],
+                }
+                continue
+        except ValueError:
+            errors.append(f"{crop['region_id']} did not return a renderable table")
+        rejected.add(crop["region_id"])
+        if answer.strip():
+            pending_candidates[source_id] = {
+                "text": answer,
                 "confidence": None,
                 "provider": model,
                 "text_provenance": {
@@ -428,27 +502,6 @@ def refine_page(
                 },
                 "decision_state": "pending",
             }
-        if crop["region_id"] in structure_errors or not records_complete:
-            continue
-        try:
-            markup = MARKDOWN.render(
-                normalize_table_headers(answers.get(crop["region_id"], ""))
-            )
-            actual = validate_table_topology(_table_structure(markup) or {})
-            predicted = validate_table_topology(table_grids[crop["region_id"]])
-            if {(c.rows, c.columns) for c in actual.cells} != {
-                (c.rows, c.columns) for c in predicted.cells
-            }:
-                errors.append(
-                    f"{crop['region_id']} recognition disagrees with predicted table grid"
-                )
-            else:
-                errors.append(
-                    f"{crop['region_id']} has no verified physical cell alignment"
-                )
-        except ValueError:
-            errors.append(f"{crop['region_id']} did not return a renderable table")
-        rejected.add(crop["region_id"])
     for crop in crops:
         region = source_index[crop["source_ids"][0]]
         if region["kind"] == "table":
@@ -491,8 +544,35 @@ def refine_page(
     }
     # Render a separate view through the existing ownership/order machinery.
     # Unowned table and form readings stay alternatives until physically aligned.
+    replacement_ids = replacements.keys() | table_replacements.keys()
     refined = [
         {
+            **region,
+            "text": table_replacements[region["id"]]["text"],
+            "confidence": None,
+            "provider": model,
+            "resolution": "resolved",
+            "text_provenance": {
+                "method": "qwen_crop_refinement",
+                "source_region_id": region["id"],
+                "source_crop_id": table_replacements[region["id"]]["crop_id"],
+                "physical_cell_alignment": "falcon_tableformer_qwen_consensus",
+                "source_provenance": region.get("text_provenance"),
+            },
+            "alternatives": [
+                *(region.get("alternatives") or []),
+                {
+                    "text": region["text"],
+                    "confidence": region.get("confidence"),
+                    "provider": region.get("provider", "original-reader"),
+                    "text_provenance": region.get("text_provenance"),
+                    "decision_state": "superseded",
+                },
+            ],
+            "structure": table_replacements[region["id"]]["structure"],
+        }
+        if region["id"] in table_replacements
+        else {
             **region,
             "kind": "text",
             "text": replacements[region["id"]],
@@ -539,20 +619,22 @@ def refine_page(
         {**r, "text": _canonical_layout_text(r, index)}
         if (r.get("structure") or {}).get("role") == "layout_block"
         and set((r.get("structure") or {}).get("child_evidence_ids", []))
-        & replacements.keys()
+        & replacement_ids
         else r
         for r in refined
     ]
     refined_markdown = (
         render_page_markdown(refined, [r["id"] for r in refined], fallback=markdown)
-        if replacements
+        if replacement_ids
         else markdown
     )
     return {
         **asdict(result),
         **metadata,
         "strict_schema": strict,
-        "status": ("partial" if replacements else "invalid") if errors else "generated",
+        "status": ("partial" if replacement_ids else "invalid")
+        if errors
+        else "generated",
         "validation_errors": errors,
         "accepted_crop_ids": [
             c["region_id"] for c in crops if c["region_id"] not in rejected
@@ -561,7 +643,7 @@ def refine_page(
             c["region_id"] for c in crops if c["region_id"] in rejected
         ],
         "crop_output": result.content,
-        "refined_regions": refined if replacements or pending_candidates else None,
+        "refined_regions": refined if replacement_ids or pending_candidates else None,
         "content": {
             "markdown": refined_markdown,
             "image_text": [],

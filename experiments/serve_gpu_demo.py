@@ -71,6 +71,7 @@ from ocr_pipeline.risk import EvidenceRiskStage
 from ocr_pipeline.markdown_refinement import refine_document
 from ocr_pipeline.openrouter import budgeted_transport
 from ocr_pipeline.heron_layout import HeronTableDetector
+from ocr_pipeline.pipeline import DEFAULT_PDF_DPI
 from ocr_pipeline.tables import TableChallenger, TatrTableExtractor, TatrTableStage
 from ocr_pipeline.tableformer_structure import TableFormerStructure
 
@@ -545,6 +546,8 @@ def create_verified_app(
         app_options["max_decoded_pixels"] = args.max_decoded_pixels
     if hasattr(args, "max_page_pixels"):
         app_options["max_page_pixels"] = args.max_page_pixels
+    if hasattr(args, "pdf_dpi"):
+        app_options["pdf_dpi"] = args.pdf_dpi
     katex_asset_root = getattr(args, "katex_asset_root", None)
     if katex_asset_root is not None:
         app_options["katex_asset_root"] = katex_asset_root
@@ -673,6 +676,12 @@ def _parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=MAX_PAGE_PIXELS,
         help="Maximum decoded pixels per page",
+    )
+    parser.add_argument(
+        "--pdf-dpi",
+        type=_positive_int,
+        default=DEFAULT_PDF_DPI,
+        help="PDF rendering resolution",
     )
     parser.add_argument("--nemotron-model-dir", type=Path)
     parser.add_argument(

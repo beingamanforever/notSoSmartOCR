@@ -30,7 +30,14 @@ from typing import Any, Protocol
 
 from PIL import Image, UnidentifiedImageError
 
-from ocr_pipeline.falcon import FALCON_MODEL_REVISION, FALCON_OCR_CATEGORIES
+from ocr_pipeline.falcon import (
+    FALCON_INFERENCE_REPOSITORY_REVISION,
+    FALCON_MAX_CONTEXT_TOKENS,
+    FALCON_MAX_IMAGE_SIZE,
+    FALCON_MAX_NEW_TOKENS,
+    FALCON_MODEL_REVISION,
+    FALCON_OCR_CATEGORIES,
+)
 
 # Detection and crop options the caller may override per request, so a coverage sweep
 # does not need a restart per combination.
@@ -211,7 +218,9 @@ def create_server(
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request"})
                 return
             want_page = bool(overrides.pop("page_text", False))
-            cap = int({**layout, **overrides}.get("max_new_tokens") or 4096)
+            cap = int(
+                {**layout, **overrides}.get("max_new_tokens") or FALCON_MAX_NEW_TOKENS
+            )
             try:
                 options = {**layout, **overrides}
                 if detect_layout is not None:
@@ -293,7 +302,7 @@ def create_server(
                             raise ValueError("image exceeded its pixel limit")
                         rgb = source.convert("RGB")
                         prepared = _prepare_falcon_crop(
-                            rgb, layout.get("max_image_size", 1024)
+                            rgb, layout.get("max_image_size", FALCON_MAX_IMAGE_SIZE)
                         )
                         if prepared.owned:
                             rgb.close()
@@ -307,7 +316,7 @@ def create_server(
             generation_seconds = 0.0
             cap = None
             try:
-                cap = int(layout.get("max_new_tokens", 16384))
+                cap = int(layout.get("max_new_tokens", FALCON_MAX_NEW_TOKENS))
                 with execute_engine():
                     scope = nullcontext()
                     if return_features:
@@ -428,7 +437,9 @@ def create_server(
                     "dtype": "float32",
                     "model": model,
                     "runtime": feature_config,
-                    "max_image_size": layout.get("max_image_size", 1024),
+                    "max_image_size": layout.get(
+                        "max_image_size", FALCON_MAX_IMAGE_SIZE
+                    ),
                     "max_new_tokens": cap,
                 },
                 "timings": {
@@ -621,7 +632,7 @@ def create_server(
             crop = image.crop(box)
             attempts = []
             try:
-                budget = min(32768, max(8192, cap * 2))
+                budget = FALCON_MAX_NEW_TOKENS
                 temperatures = (0.0, *RETRY_TEMPERATURES)
                 for temperature in temperatures:
                     text = engine.generate_plain(
@@ -630,7 +641,9 @@ def create_server(
                         temperature=temperature,
                         max_new_tokens=budget,
                         min_image_size=256,
-                        max_image_size=1024,
+                        max_image_size=int(
+                            layout.get("max_image_size", FALCON_MAX_IMAGE_SIZE)
+                        ),
                         use_tqdm=False,
                     )[0]
                     attempts.append(text)
@@ -674,6 +687,18 @@ def create_server(
                 for name in LAYOUT_OPTIONS
                 if name in payload
             }
+            if (
+                not 0
+                < overrides.get("max_new_tokens", FALCON_MAX_NEW_TOKENS)
+                <= FALCON_MAX_NEW_TOKENS
+            ):
+                raise ValueError("invalid max_new_tokens")
+            max_image_size = overrides.get("max_image_size", FALCON_MAX_IMAGE_SIZE)
+            if (
+                not 0 < max_image_size <= FALCON_MAX_IMAGE_SIZE
+                or max_image_size % 16 != 0
+            ):
+                raise ValueError("invalid max_image_size")
             data = base64.b64decode(encoded, validate=True)
             with Image.open(io.BytesIO(data)) as opened:
                 if opened.width * opened.height > max_image_pixels:
@@ -724,7 +749,14 @@ def _release_failed_generation(engine: LayoutEngine) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if args.max_new_tokens > FALCON_MAX_NEW_TOKENS:
+        parser.error(f"--max-new-tokens cannot exceed {FALCON_MAX_NEW_TOKENS}")
+    if args.max_image_size > FALCON_MAX_IMAGE_SIZE or args.max_image_size % 16 != 0:
+        parser.error(
+            f"--max-image-size must be a multiple of 16 up to {FALCON_MAX_IMAGE_SIZE}"
+        )
 
     from falcon_perception import (
         load_and_prepare_model,
@@ -743,10 +775,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "checkbox-selected": LAYOUT_TO_OCR_CATEGORY["text"],
         "checkbox-unselected": LAYOUT_TO_OCR_CATEGORY["text"],
     }
-    cycle_exempt_prompts = {
-        OCRInferenceEngine._make_ocr_prompt(category)
-        for category in ("table", "formula")
-    }
 
     class DocumentLayoutEngine(OCRInferenceEngine):
         """Keep the official decoder; use one learned layout pass for every modality."""
@@ -764,7 +792,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 monitor = getattr(
                     sequence,
                     "loop_monitor",
-                    sequence.text not in cycle_exempt_prompts,
+                    False,
                 )
                 if monitor:
                     state = _cycle_step(
@@ -825,7 +853,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             detections,
             *,
             min_image_size=64,
-            max_image_size=1024,
+            max_image_size=FALCON_MAX_IMAGE_SIZE,
             min_crop_dim=16,
         ):
             from falcon_perception.paged_inference import Sequence
@@ -881,7 +909,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         image,
                         page,
                         min_image_size=options.get("min_image_size", 64),
-                        max_image_size=options.get("max_image_size", 1024),
+                        max_image_size=options.get(
+                            "max_image_size", FALCON_MAX_IMAGE_SIZE
+                        ),
                     ):
                         sequence.request_idx = len(sequences)
                         sequences.append(sequence)
@@ -891,7 +921,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         self,
                         sequences,
                         sampling_params=SamplingParams(
-                            max_new_tokens=options.get("max_new_tokens", 16384),
+                            max_new_tokens=options.get(
+                                "max_new_tokens", FALCON_MAX_NEW_TOKENS
+                            ),
                             stop_token_ids=self._stop_token_ids(),
                         ),
                         temperature=options.get("temperature", 0.0),
@@ -974,6 +1006,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         n_pages=args.n_pages,
         capture_cudagraph=args.cudagraph,
     )
+    if model.args.max_seq_len != FALCON_MAX_CONTEXT_TOKENS:
+        raise ValueError(
+            "Falcon context length does not match the pinned v1.5 configuration"
+        )
     engine.layout_detector = HeronTableDetector(
         model_id=args.layout_model,
         device=args.layout_device,
@@ -1004,6 +1040,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         model={
             "id": args.model,
             "revision": args.model_revision,
+            "inference_repository_revision": FALCON_INFERENCE_REPOSITORY_REVISION,
             "engine": "falcon-perception ocr_layout",
             "layout_model": args.layout_model,
             "origin": "TII, UAE",
@@ -1043,12 +1080,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     # Retained for existing launch commands; learned proposal ownership is preserved.
     parser.add_argument("--layout-threshold", type=float, default=0.3)
-    parser.add_argument("--max-new-tokens", type=int, default=16384)
+    parser.add_argument(
+        "--max-new-tokens", type=_positive_int, default=FALCON_MAX_NEW_TOKENS
+    )
     parser.add_argument("--layout-model", default="ds4sd/docling-layout-heron-101")
     parser.add_argument("--layout-device", default="cpu")
-    # Officially 1024: a near-full-page crop is downscaled to that, which erases the
-    # smallest text on a dense page.
-    parser.add_argument("--max-image-size", type=int, default=1024)
+    parser.add_argument(
+        "--max-image-size", type=_positive_int, default=FALCON_MAX_IMAGE_SIZE
+    )
     parser.add_argument(
         "--max-image-pixels", type=_positive_int, default=MAX_IMAGE_PIXELS
     )

@@ -21,11 +21,11 @@ from .contracts import BoundingBox, TextRegion
 from .providers import ReaderError
 
 FALCON_MODEL_ID = "tiiuae/Falcon-OCR"
-FALCON_MODEL_REVISION = "42ec56b72a23984ac059e7c8a6d397a8529423fe"
+FALCON_MODEL_REVISION = "fe757d59ecd79d4d68760162306a70a015761ad9"
 FALCON_MODEL_ORIGIN = "TII, UAE"
 FALCON_MODEL_LICENSE = "Apache-2.0"
 FALCON_INFERENCE_REPOSITORY = "https://github.com/tiiuae/Falcon-Perception"
-FALCON_INFERENCE_REPOSITORY_REVISION = "59a845adfac23c684bc4beafd26b380cde5ddfc1"
+FALCON_INFERENCE_REPOSITORY_REVISION = "c457916c9974efbacfa91f0f6ecc2c49c6543e56"
 FALCON_OCR_CATEGORIES = (
     "plain",
     "text",
@@ -42,6 +42,9 @@ FALCON_OCR_CATEGORIES = (
 FALCON_SERVICE_MAX_BATCH_ITEMS = 24
 FALCON_SERVICE_MAX_RESPONSE_BYTES = 8_000_000
 FALCON_SPATIAL_PATCH_SIZE = 16
+FALCON_MAX_IMAGE_SIZE = 1536
+FALCON_MAX_NEW_TOKENS = 8192
+FALCON_MAX_CONTEXT_TOKENS = 16384
 FALCON_CATEGORY_TOKEN_LIMITS = {
     "plain": 1536,
     "text": 256,
@@ -59,9 +62,9 @@ FALCON_CATEGORY_TOKEN_LIMITS = {
 
 @dataclass(frozen=True)
 class FalconGenerationConfig:
-    max_new_tokens: int = 3072
+    max_new_tokens: int = FALCON_MAX_NEW_TOKENS
     temperature: float = 0.0
-    max_dimension: int = 1024
+    max_dimension: int = FALCON_MAX_IMAGE_SIZE
     compile: bool = False
 
 
@@ -79,9 +82,9 @@ class FalconOCRReader:
         category: str = "plain",
         device_map: str = "cuda:0",
         local_files_only: bool = True,
-        max_new_tokens: int = 3072,
+        max_new_tokens: int = FALCON_MAX_NEW_TOKENS,
         temperature: float = 0.0,
-        max_dimension: int = 1024,
+        max_dimension: int = FALCON_MAX_IMAGE_SIZE,
         compile: bool = False,
         model: object | None = None,
     ) -> None:
@@ -104,13 +107,20 @@ class FalconOCRReader:
             raise ValueError(f"Unsupported Falcon-OCR category: {category}")
         if not device_map.strip() or not device_map.startswith("cuda"):
             raise ValueError("Falcon-OCR device_map must select CUDA")
-        if max_new_tokens <= 0 or max_new_tokens > 3072:
-            raise ValueError("Falcon-OCR max_new_tokens must be from 1 to 3072")
+        if max_new_tokens <= 0 or max_new_tokens > FALCON_MAX_NEW_TOKENS:
+            raise ValueError(
+                f"Falcon-OCR max_new_tokens must be from 1 to {FALCON_MAX_NEW_TOKENS}"
+            )
         if temperature < 0 or not math.isfinite(temperature):
             raise ValueError("Falcon-OCR temperature must not be negative or infinite")
-        if max_dimension <= 0 or max_dimension % FALCON_SPATIAL_PATCH_SIZE != 0:
+        if (
+            max_dimension <= 0
+            or max_dimension > FALCON_MAX_IMAGE_SIZE
+            or max_dimension % FALCON_SPATIAL_PATCH_SIZE != 0
+        ):
             raise ValueError(
-                "Falcon-OCR max_dimension must be a positive multiple of 16"
+                "Falcon-OCR max_dimension must be a multiple of 16 up to "
+                f"{FALCON_MAX_IMAGE_SIZE}"
             )
 
         self.model_name_or_path = model_source
@@ -565,10 +575,10 @@ def _valid_service_generation_config(value: Any) -> bool:
     if not isinstance(max_dimension, int) or isinstance(max_dimension, bool):
         return False
     return (
-        0 < max_new_tokens <= 3072
+        0 < max_new_tokens <= FALCON_MAX_NEW_TOKENS
         and temperature >= 0
         and math.isfinite(temperature)
-        and max_dimension > 0
+        and 0 < max_dimension <= FALCON_MAX_IMAGE_SIZE
         and max_dimension % FALCON_SPATIAL_PATCH_SIZE == 0
         and isinstance(value["compile"], bool)
     )

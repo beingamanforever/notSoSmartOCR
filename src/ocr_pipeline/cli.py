@@ -11,10 +11,12 @@ from typing import Sequence
 from .falcon import (
     FALCON_MODEL_ID,
     FALCON_MODEL_REVISION,
+    FALCON_MAX_IMAGE_SIZE,
+    FALCON_MAX_NEW_TOKENS,
     FALCON_OCR_CATEGORIES,
     FalconOCRReader,
 )
-from .pipeline import process_document
+from .pipeline import DEFAULT_PDF_DPI, process_document
 from .pilot import PilotOCRReader
 from .providers import (
     GLMOCRDirectReader,
@@ -145,12 +147,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--falcon-max-new-tokens",
         type=_positive_int,
-        default=3072,
+        default=FALCON_MAX_NEW_TOKENS,
     )
     parser.add_argument(
         "--falcon-max-dimension",
         type=_positive_int,
-        default=1024,
+        default=FALCON_MAX_IMAGE_SIZE,
     )
     parser.add_argument(
         "--pilot-root",
@@ -164,7 +166,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         default="text",
         help="Granite Docling serialization format",
     )
-    parser.add_argument("--dpi", type=int, default=300, help="PDF render DPI")
+    parser.add_argument(
+        "--dpi", type=int, default=DEFAULT_PDF_DPI, help="PDF render DPI"
+    )
     args = parser.parse_args(argv)
 
     try:

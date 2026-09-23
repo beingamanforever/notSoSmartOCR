@@ -17,7 +17,12 @@ from typing import Any, Protocol
 
 from PIL import Image, UnidentifiedImageError
 
-from ocr_pipeline.falcon import FALCON_OCR_CATEGORIES
+from ocr_pipeline.falcon import (
+    FALCON_MAX_IMAGE_SIZE,
+    FALCON_MAX_NEW_TOKENS,
+    FALCON_MODEL_REVISION,
+    FALCON_OCR_CATEGORIES,
+)
 
 MAX_REQUEST_BYTES = 64_000_000
 MAX_IMAGE_PIXELS = 32_000_000
@@ -166,14 +171,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    from ocr_pipeline.falcon import FALCON_MODEL_REVISION
-
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", required=True)
     parser.add_argument("--local-model-path", type=Path)
     parser.add_argument("--model-revision", default=FALCON_MODEL_REVISION)
-    parser.add_argument("--max-new-tokens", type=int, default=1536)
-    parser.add_argument("--max-dimension", type=int, default=1536)
+    parser.add_argument("--max-new-tokens", type=int, default=FALCON_MAX_NEW_TOKENS)
+    parser.add_argument("--max-dimension", type=int, default=FALCON_MAX_IMAGE_SIZE)
     parser.add_argument("--device-map", default="cuda:0")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8085)

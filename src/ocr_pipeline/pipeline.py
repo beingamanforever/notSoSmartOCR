@@ -30,6 +30,7 @@ from .providers import LocalReader, ReaderError
 from .rendering import render_evidence
 
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+DEFAULT_PDF_DPI = 300
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,7 @@ def process_document(
     source: str | Path,
     reader: LocalReader,
     *,
-    pdf_dpi: int = 300,
+    pdf_dpi: int = DEFAULT_PDF_DPI,
     pdftoppm_executable: str = "pdftoppm",
     stages: Sequence[RegionStage] = (),
     cross_page_table_stage: CrossPageTableStage | None = None,

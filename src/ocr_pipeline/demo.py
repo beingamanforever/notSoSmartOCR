@@ -37,6 +37,7 @@ from .cross_page_tables import CrossPageTableStage
 from .evidence_layout import refresh_layout_owners
 from .falcon import is_verified_falcon_model_provenance
 from .pipeline import (
+    DEFAULT_PDF_DPI,
     IMAGE_SUFFIXES,
     PipelineError,
     _PreparedPages,
@@ -541,6 +542,7 @@ def create_app(
     max_pages: int = MAX_DOCUMENT_PAGES,
     max_page_pixels: int = MAX_PAGE_PIXELS,
     max_decoded_pixels: int = MAX_DECODED_PIXELS,
+    pdf_dpi: int = DEFAULT_PDF_DPI,
     max_presentation_pages: int = 4,
     katex_asset_root: Path | None = None,
     feedback_root: Path | None = None,
@@ -558,6 +560,8 @@ def create_app(
         raise ValueError("max_page_pixels must be positive")
     if max_decoded_pixels <= 0:
         raise ValueError("max_decoded_pixels must be positive")
+    if pdf_dpi <= 0:
+        raise ValueError("pdf_dpi must be positive")
     if max_presentation_pages <= 0:
         raise ValueError("max_presentation_pages must be positive")
     katex_assets = _katex_assets(katex_asset_root)
@@ -730,6 +734,7 @@ def create_app(
                 prepared_pages, preview_failure = _render_previews(
                     source,
                     session_dir,
+                    pdf_dpi=pdf_dpi,
                     max_pages=max_pages,
                     max_page_pixels=max_page_pixels,
                     max_pixels=max_decoded_pixels,
@@ -1834,6 +1839,7 @@ def _render_previews(
     source: Path,
     session_dir: Path,
     *,
+    pdf_dpi: int,
     max_pages: int,
     max_page_pixels: int,
     max_pixels: int,
@@ -1845,7 +1851,7 @@ def _render_previews(
             source,
             _source_kind(source),
             preview_dir,
-            300,
+            pdf_dpi,
             "pdftoppm",
             max_pages=max_pages,
             max_page_pixels=max_page_pixels,
