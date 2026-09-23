@@ -176,6 +176,10 @@ class FalconLayoutReader:
             )
             if category in {"checkbox-selected", "checkbox-unselected"}:
                 selected = category == "checkbox-selected"
+                raw_text = text
+                text = _checkbox_label(text)
+                if raw_text and not text:
+                    read_resolution = "unreadable"
                 regions.append(
                     TextRegion(
                         id=f"p{page_number}-falcon-{index}",
@@ -191,7 +195,7 @@ class FalconLayoutReader:
                             "model": model,
                             "layout_detection": detection,
                             "generation": element.get("generation") or {},
-                            "raw_text": text,
+                            "raw_text": raw_text,
                             **read_history,
                             "confidence_meaning": "decoder token likelihood, uncalibrated",
                         },
@@ -472,6 +476,20 @@ class _TableParser(HTMLParser):
         if self._row:
             self.rows.append(self._row)
         self._row = None
+
+
+def _checkbox_label(text: str) -> str:
+    if "<table" in text.casefold():
+        parser = _TableParser(text)
+        parser.feed(text)
+        parser.close()
+        text = " ".join(
+            cell_text
+            for row in parser.rows
+            for cell_text, *_ in row
+            if cell_text
+        )
+    return re.sub(r"^(?:\[[x ?]\]|[☑☐✓✔✗✘□])\s*", "", text, flags=re.I).strip()
 
 
 def _table_structure(

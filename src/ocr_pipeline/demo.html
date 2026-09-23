@@ -876,6 +876,7 @@
           <label class="source-zoom" for="source-zoom">Zoom
             <select id="source-zoom">
               <option value="100">Fit width</option>
+              <option value="actual">Actual pixels</option>
               <option value="150">1.5×</option>
               <option value="200">2×</option>
               <option value="300">3×</option>
@@ -1951,14 +1952,24 @@
     }
 
     function stageExecutionDetail(run) {
-      const changes = [
-        `${run.input_regions} → ${run.output_regions} regions`,
+      const details = [
+        Number.isFinite(run.input_regions) && Number.isFinite(run.output_regions)
+          ? `${run.input_regions} → ${run.output_regions} regions`
+          : "",
         run.added_regions ? `+${run.added_regions}` : "",
         run.removed_regions ? `-${run.removed_regions}` : "",
-        run.modified_regions ? `${run.modified_regions} modified` : ""
+        run.modified_regions ? `${run.modified_regions} modified` : "",
+        run.accepted_crop_ids?.length ? `${run.accepted_crop_ids.length} crops accepted` : "",
+        run.rejected_crop_ids?.length ? `${run.rejected_crop_ids.length} crops rejected` : "",
+        run.attempts ? `${run.attempts} attempt${run.attempts === 1 ? "" : "s"}` : "",
+        Number.isFinite(run.cost_usd) ? `$${run.cost_usd.toFixed(6)}` : ""
       ].filter(Boolean).join(" · ");
       const reason = run.failure_code || run.skip_reason;
-      return `${run.status}${reason ? ` · ${String(reason).replaceAll("_", " ")}` : ""} · ${changes}`;
+      return [
+        run.status,
+        reason ? String(reason).replaceAll("_", " ") : "",
+        details
+      ].filter(Boolean).join(" · ");
     }
 
     function renderRendered(pages, presentations) {
@@ -2311,7 +2322,9 @@
       const inspector = byId("confidence-inspector");
       const percent = target.dataset.confidencePercent;
       byId("confidence-inspector-score").textContent = percent === "Unknown"
-        ? "Confidence: Not available"
+        ? target.dataset.confidenceProvider.startsWith("qwen/")
+          ? "Qwen reread accepted · Calibrated confidence unavailable"
+          : "Confidence: Not available"
         : `${target.dataset.confidenceKind}: ${percent} · Uncalibrated`;
       byId("confidence-inspector-source").textContent = target.dataset.confidenceScope;
       renderedView.querySelector(".confidence-active")?.classList.remove("confidence-active");
@@ -3186,8 +3199,8 @@
         confidenceKind: "State score"
       });
       if (native) {
-        block.append(chip);
-        if (!appendEvidenceRun(block, [region]) && region.resolution !== "resolved") {
+        block.append(chip, document.createTextNode(controlLabel(region)));
+        if (!controlLabel(region) && region.resolution !== "resolved") {
           block.append(document.createTextNode("[unresolved text]"));
         }
         return block;
@@ -3208,7 +3221,7 @@
     function controlLabel(region) {
       const label = String(region.structure?.label || "").trim();
       if (label) return label;
-      return String(region.text || "").replace(/^\[[x ?]\]\s*/i, "").trim();
+      return String(region.text || "").replace(/^(?:\[[x ?]\]|[☑☐✓✔✗✘□])\s*/iu, "").trim();
     }
 
     function renderAuthor(region, sourceIndex) {
@@ -3431,7 +3444,8 @@
     byId("previous-page").addEventListener("click", () => changePage(-1));
     byId("next-page").addEventListener("click", () => changePage(1));
     byId("source-zoom").addEventListener("change", (event) => {
-      canvas.style.setProperty("--source-zoom", `${event.target.value}%`);
+      const width = event.target.value === "actual" ? `${canvas.width}px` : `${event.target.value}%`;
+      canvas.style.setProperty("--source-zoom", width);
       hideConfidenceInspector();
     });
     function changePage(offset) {

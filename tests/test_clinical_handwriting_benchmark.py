@@ -23,6 +23,107 @@ from experiments.benchmark_clinical_handwriting import (
 )
 
 
+def test_structured_adapters_do_not_copy_target_answers(monkeypatch):
+    monkeypatch.syspath_prepend(
+        str(Path(__file__).parents[1] / "internal-clinical-ocr-benchmark")
+    )
+    from experiments.evaluate_structured_handwritten import (
+        adapt_form,
+        adapt_tables,
+    )
+
+    form_page = {
+        "regions": [
+            {
+                "kind": "checkbox",
+                "text": "Consent",
+                "structure": {"label": "Consent", "state": "selected"},
+                "bounding_box": {"left": 0, "top": 0},
+            }
+        ]
+    }
+    form = {
+        "target": {
+            "controls": [
+                {"control_id": "control-1", "label": "Consent", "state": "checked"}
+            ]
+        }
+    }
+    changed_form = json.loads(json.dumps(form))
+    changed_form["target"]["controls"][0]["state"] = "unchecked"
+    assert adapt_form(form, form_page) == adapt_form(changed_form, form_page)
+
+    table_page = {
+        "regions": [
+            {
+                "kind": "table",
+                "bounding_box": {"left": 0, "top": 0, "right": 100, "bottom": 100},
+                "structure": {
+                    "cells": [
+                        {"row_nums": [0], "column_nums": [0], "text": "Name"},
+                        {"row_nums": [0], "column_nums": [1], "text": "Value"},
+                        {"row_nums": [1], "column_nums": [0], "text": "Alice"},
+                        {"row_nums": [1], "column_nums": [1], "text": "42"},
+                    ]
+                },
+            },
+            {
+                "kind": "table",
+                "bounding_box": {
+                    "left": 120,
+                    "top": 0,
+                    "right": 220,
+                    "bottom": 200,
+                },
+                "structure": {
+                    "cells": [
+                        {"row_nums": [0], "column_nums": [0], "text": "Name"},
+                        {"row_nums": [0], "column_nums": [1], "text": "Value"},
+                        {"row_nums": [1], "column_nums": [0], "text": "Bob"},
+                        {"row_nums": [1], "column_nums": [1], "text": "7"},
+                        {"row_nums": [2], "column_nums": [0], "text": "Extra"},
+                    ]
+                },
+            },
+        ]
+    }
+    table = {
+        "target": {
+            "tables": [
+                {
+                    "table_id": "table-1",
+                    "image_id": "image-1",
+                    "label": "Example",
+                    "rows": [
+                        {"row_id": "row-1", "label": "Name"},
+                        {"row_id": "row-2", "label": "Alice"},
+                        {"row_id": "row-3", "label": "Alice"},
+                    ],
+                    "columns": [
+                        {"column_id": "column-1", "label": "Name"},
+                        {"column_id": "column-2", "label": "Value"},
+                    ],
+                    "cells": [{"text": "target answer"}],
+                }
+            ]
+        }
+    }
+    changed_table = json.loads(json.dumps(table))
+    changed_table["target"]["tables"][0]["cells"][0]["text"] = "changed answer"
+    changed_table["target"]["tables"][0]["rows"].append(
+        {"row_id": "row-4", "label": "Not visible"}
+    )
+    changed_table["target"]["tables"][0]["columns"].append(
+        {"column_id": "column-3", "label": "Also missing"}
+    )
+    prediction = adapt_tables(table, table_page)
+    assert prediction == adapt_tables(changed_table, table_page)
+    assert [row["row_id"] for row in prediction["tables"][0]["rows"]] == [
+        "row-1",
+        "row-2",
+    ]
+
+
 def test_comparison_end_to_end():
     assert span_distance("dose 5 mg", "header dose 5 mg footer") == 0
     assert span_distance("dose 5 mg", "header dose 4 mg footer") == 1

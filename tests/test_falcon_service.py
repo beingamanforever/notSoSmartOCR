@@ -723,6 +723,55 @@ def test_upload_keeps_completed_retries_under_review(category):
         server.server_close()
 
 
+def test_upload_renders_checkbox_label_instead_of_decoder_table_markup():
+    from fastapi.testclient import TestClient
+    from ocr_pipeline.demo import create_app
+    from ocr_pipeline.falcon_layout import FalconLayoutReader
+
+    reading = serve_falcon_layout.DecodedText(
+        '<table><tr><td>☐</td><td>Please Comment</td></tr></table>',
+        {"stop_token_seen": True, "temperature": 0.0},
+    )
+    engine = FakeLayoutEngine(
+        [
+            {
+                "category": "checkbox-unselected",
+                "bbox": [0, 0, 40, 40],
+                "score": 0.9,
+                "text": reading,
+            }
+        ]
+    )
+    server = _start_layout_server(
+        engine, category_by_layout={"checkbox-unselected": "text"}
+    )
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 40), "white").save(buffer, format="PNG")
+    try:
+        reader = FalconLayoutReader(f"http://127.0.0.1:{server.server_port}")
+        with TestClient(create_app(reader)) as client:
+            response = client.post(
+                "/api/process",
+                files={"file": ("page.png", buffer.getvalue(), "image/png")},
+            )
+            assert response.status_code == 200
+            payload = response.json()
+            region = payload["result"]["pages"][0]["regions"][0]
+            assert region["text"] == "Please Comment"
+            assert region["text_provenance"]["raw_text"] == reading
+            markdown = client.get(
+                f"/api/sessions/{payload['session_id']}/result.md"
+            ).text
+            assert "[ ] Please Comment" in markdown
+            assert "<table" not in markdown
+            demo = client.get("/").text
+            assert "Actual pixels" in demo
+            assert "Qwen reread accepted · Calibrated confidence unavailable" in demo
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 @pytest.mark.parametrize(
     "text",
     [
