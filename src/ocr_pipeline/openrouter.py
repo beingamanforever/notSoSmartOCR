@@ -5,9 +5,12 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import math
 import os
+import sqlite3
 import time
 from dataclasses import dataclass
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError
@@ -140,6 +143,54 @@ def repair_image(
         transport or _default_transport,
         sleeper,
     )
+
+
+def budgeted_transport(
+    request: Request,
+    timeout: float,
+    *,
+    database: Path,
+    budget_usd: float,
+    reserve_usd: float = 0.25,
+    transport: Transport | None = None,
+) -> tuple[int, Mapping[str, str], bytes]:
+    """Persist reservations before sending; unknown charges retain their reserve."""
+    if not all(math.isfinite(v) and v > 0 for v in (budget_usd, reserve_usd)):
+        raise ValueError("Budget and reservation must be finite positive amounts")
+    database.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(database, timeout=30)) as ledger, ledger:
+        ledger.execute(
+            "CREATE TABLE IF NOT EXISTS charges (id INTEGER PRIMARY KEY, amount REAL NOT NULL, actual REAL)"
+        )
+        ledger.execute("BEGIN IMMEDIATE")
+        spent = ledger.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM charges"
+        ).fetchone()[0]
+        if spent + reserve_usd > budget_usd:
+            raise OpenRouterError(
+                "Hosted crop budget exhausted; local OCR retained",
+                code="budget_exhausted",
+                attempts=0,
+            )
+        row = ledger.execute(
+            "INSERT INTO charges(amount) VALUES (?)", (reserve_usd,)
+        ).lastrowid
+    response = (transport or _default_transport)(request, timeout)
+    try:
+        cost = json.loads(response[2]).get("usage", {}).get("cost")
+    except (ValueError, AttributeError):
+        cost = None
+    if (
+        not isinstance(cost, bool)
+        and isinstance(cost, (int, float))
+        and math.isfinite(cost)
+        and cost >= 0
+    ):
+        with closing(sqlite3.connect(database, timeout=30)) as ledger, ledger:
+            ledger.execute(
+                "UPDATE charges SET amount=?, actual=? WHERE id=?", (cost, cost, row)
+            )
+    return response
 
 
 def _call_openrouter(

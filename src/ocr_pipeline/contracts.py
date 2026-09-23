@@ -80,6 +80,7 @@ class PageResult:
     text: EvidenceText
     regions: list[TextRegion] = field(default_factory=list)
     failure_ids: list[str] = field(default_factory=list)
+    refinement: dict[str, Any] | None = None
 
 
 @dataclass

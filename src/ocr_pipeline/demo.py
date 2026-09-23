@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -25,7 +25,14 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .contracts import BoundingBox, PageResult, RegionStage, TextAlternative, TextRegion
+from .contracts import (
+    BoundingBox,
+    DocumentResult,
+    PageResult,
+    RegionStage,
+    TextAlternative,
+    TextRegion,
+)
 from .cross_page_tables import CrossPageTableStage
 from .evidence_layout import refresh_layout_owners
 from .falcon import is_verified_falcon_model_provenance
@@ -538,6 +545,7 @@ def create_app(
     katex_asset_root: Path | None = None,
     feedback_root: Path | None = None,
     warmup_completed: bool = False,
+    crop_refiner: Callable[[DocumentResult, list[Path]], None] | None = None,
 ) -> Any:
     """Create the local demo app with an injectable OCR reader."""
     if FastAPI is None:
@@ -748,6 +756,37 @@ def create_app(
                     max_page_pixels=max_page_pixels,
                     max_pixels=max_decoded_pixels,
                 )
+                if crop_refiner is not None and document.pages:
+                    refinement_started = time.perf_counter()
+                    crop_refiner(document, preview_paths)
+                    pipeline_timings["stage.qwen-crop-refinement"] = (
+                        time.perf_counter() - refinement_started
+                    )
+                    for page in document.pages:
+                        refinement = page.refinement or {}
+                        stage_execution.append(
+                            {
+                                "stage": "qwen-crop-refinement",
+                                "page_number": page.page_number,
+                                "status": (
+                                    "failed"
+                                    if refinement.get("status")
+                                    in {"failed", "partial", "invalid"}
+                                    else "productive"
+                                    if refinement.get("accepted_crop_ids")
+                                    else "fired"
+                                ),
+                                "elapsed_seconds": refinement.get("elapsed_seconds", 0),
+                                "cost_usd": refinement.get("cost"),
+                                "attempts": refinement.get("attempts"),
+                                "accepted_crop_ids": refinement.get(
+                                    "accepted_crop_ids", []
+                                ),
+                                "rejected_crop_ids": refinement.get(
+                                    "rejected_crop_ids", []
+                                ),
+                            }
+                        )
                 presentations = {}
                 if not defer_presentation:
                     presentation_started = time.perf_counter()
@@ -805,6 +844,7 @@ def create_app(
                 "composition": composition_payload,
                 "pipeline_stages": [
                     *(stage.name for stage in active_stages),
+                    *(["qwen-crop-refinement"] if crop_refiner is not None else []),
                     *(
                         [cross_page_table_stage.name]
                         if cross_page_table_stage is not None

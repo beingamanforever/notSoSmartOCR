@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import threading
+from functools import partial
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,8 @@ from ocr_pipeline.providers import (
 )
 from ocr_pipeline.restoration import DocResRestorer
 from ocr_pipeline.risk import EvidenceRiskStage
+from ocr_pipeline.markdown_refinement import refine_document
+from ocr_pipeline.openrouter import budgeted_transport
 from ocr_pipeline.heron_layout import HeronTableDetector
 from ocr_pipeline.tables import TableChallenger, TatrTableExtractor, TatrTableStage
 from ocr_pipeline.tableformer_structure import TableFormerStructure
@@ -468,6 +471,13 @@ def create_verified_app(
         stages.append(TiltFieldStage(engine, max_questions=args.tilt_max_questions))
     handwriting = "configured" if handwriting_stage is not None else "not configured"
     configured_stages = [item.name for item in stages]
+    qwen_crops = getattr(args, "qwen_crops", False)
+    if qwen_crops:
+        if falcon_layout_url is None:
+            raise ValueError("Qwen crop refinement requires the Falcon layout reader")
+        if not os.environ.get("OPENROUTER_API_KEY"):
+            raise ValueError("Qwen crop refinement requires OPENROUTER_API_KEY")
+        configured_stages.append("qwen-crop-refinement")
     if presentation_reader is not None:
         configured_stages.append("page-presentation")
     presentation_note = ""
@@ -519,6 +529,16 @@ def create_verified_app(
         "handwriting_stage": handwriting_stage,
         "composition": composition,
     }
+    if qwen_crops:
+        app_options["crop_refiner"] = partial(
+            refine_document,
+            zero_data_retention=not getattr(args, "qwen_allow_non_zdr", False),
+            transport=partial(
+                budgeted_transport,
+                database=args.qwen_spend_database,
+                budget_usd=args.qwen_budget_usd,
+            ),
+        )
     if hasattr(args, "max_document_pages"):
         app_options["max_pages"] = args.max_document_pages
     if hasattr(args, "max_decoded_pixels"):
@@ -655,6 +675,22 @@ def _parser() -> argparse.ArgumentParser:
         help="Maximum decoded pixels per page",
     )
     parser.add_argument("--nemotron-model-dir", type=Path)
+    parser.add_argument(
+        "--qwen-crops",
+        action="store_true",
+        help="Refine selected Falcon regions with the benchmark Qwen3.7 Flash crop reader",
+    )
+    parser.add_argument(
+        "--qwen-allow-non-zdr",
+        action="store_true",
+        help="Allow the explicitly authorized non-ZDR Qwen provider route",
+    )
+    parser.add_argument("--qwen-budget-usd", type=float, default=1.0)
+    parser.add_argument(
+        "--qwen-spend-database",
+        type=Path,
+        default=Path.home() / ".local/state/notsosmartocr/hosted-cost.sqlite",
+    )
     parser.add_argument(
         "--falcon-layout-url",
         help="Read pages with the Falcon-Perception layout OCR service instead of Nemotron",

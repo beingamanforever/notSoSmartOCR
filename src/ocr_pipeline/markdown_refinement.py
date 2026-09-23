@@ -14,16 +14,18 @@ from typing import Any
 
 from PIL import Image, ImageDraw
 
+from .contracts import BoundingBox, DocumentResult, Failure, TextAlternative, TextRegion
 from .falcon_layout import _table_structure
 from .markdown_export import MARKDOWN, normalize_table_headers
 from .openrouter import (
     QWEN_FLASH_MODEL,
     QWEN_37_FLASH_MODEL,
+    OpenRouterError,
     Transport,
     _call_openrouter,
     _default_transport,
 )
-from .rendering import _canonical_layout_text, render_page_markdown
+from .rendering import _canonical_layout_text, render_evidence, render_page_markdown
 from .table_topology import TableTopologyError, validate_table_topology
 from .tableformer_structure import TableFormerStructure
 from .providers import NemotronOCRV2Reader, ReaderError
@@ -75,6 +77,94 @@ Return Markdown directly in each record, not image placeholders. Keep visual
 objects with no readable text as [diagram] or [image]. Before returning, check
 the entire width of every panel and match every output row to its source row.
 """
+
+
+def refine_document(
+    document: DocumentResult,
+    image_paths: list[Path],
+    *,
+    zero_data_retention: bool = True,
+    transport: Transport | None = None,
+    table_reader: TableFormerStructure | None = None,
+) -> None:
+    """Apply the benchmark crop reader to canonical pages before UI and export."""
+    if len(document.pages) != len(image_paths):
+        raise ValueError("Refinement requires the source image for every page")
+    for page, image_path in zip(document.pages, image_paths, strict=True):
+        raw = asdict(page)
+        markdown = render_page_markdown(
+            raw["regions"], page.text.evidence_ids, fallback=page.text.value
+        )
+        started = time.perf_counter()
+        try:
+            result = refine_page(
+                image_path,
+                raw,
+                markdown,
+                model=QWEN_37_FLASH_MODEL,
+                zero_data_retention=zero_data_retention,
+                transport=transport,
+                table_reader=table_reader,
+            )
+            refined = result.pop("refined_regions", None)
+            if refined is not None:
+                page.regions = [
+                    TextRegion(
+                        **{
+                            k: v
+                            for k, v in region.items()
+                            if k not in {"bounding_box", "alternatives"}
+                        },
+                        bounding_box=BoundingBox(**region["bounding_box"]),
+                        alternatives=[
+                            TextAlternative(**item)
+                            for item in region.get("alternatives", [])
+                        ],
+                    )
+                    for region in refined
+                ]
+                page.text = render_evidence(page.regions)
+            page.refinement = {
+                k: v
+                for k, v in result.items()
+                if k not in {"original_markdown", "content", "canonical_unchanged"}
+            }
+            page.refinement["canonical_unchanged"] = not bool(
+                result.get("accepted_crop_ids")
+            )
+            errors = result.get("validation_errors", [])
+            if errors:
+                _refinement_failure(
+                    document, page, "crop_refinement_unresolved", "; ".join(errors)
+                )
+        except (OpenRouterError, ReaderError, ValueError, OSError) as error:
+            page.refinement = {
+                "model": QWEN_37_FLASH_MODEL,
+                "status": "failed",
+                "canonical_unchanged": True,
+                "attempts": getattr(error, "attempts", None),
+                "cost": None,
+                "error": str(error),
+            }
+            _refinement_failure(document, page, "crop_refinement_failed", str(error))
+        page.refinement["elapsed_seconds"] = time.perf_counter() - started
+    if document.failures:
+        document.status = (
+            "partial" if any(p.text.value.strip() for p in document.pages) else "failed"
+        )
+
+
+def _refinement_failure(document, page, code, message):
+    failure = Failure(
+        id=f"failure-{len(document.failures) + 1}",
+        stage="qwen-crop-refinement",
+        code=code,
+        message=message,
+        page_number=page.page_number,
+    )
+    document.failures.append(failure)
+    page.failure_ids.append(failure.id)
+    page.route = "review"
 
 
 def refine_page(
@@ -407,8 +497,23 @@ def refine_page(
             "kind": "text",
             "text": replacements[region["id"]],
             "confidence": None,
+            "provider": model,
             "resolution": "resolved",
-            "text_provenance": {"method": "qwen_crop_refinement"},
+            "text_provenance": {
+                "method": "qwen_crop_refinement",
+                "source_region_id": region["id"],
+                "source_provenance": region.get("text_provenance"),
+            },
+            "alternatives": [
+                *(region.get("alternatives") or []),
+                {
+                    "text": region["text"],
+                    "confidence": region.get("confidence"),
+                    "provider": region.get("provider", "original-reader"),
+                    "text_provenance": region.get("text_provenance"),
+                    "decision_state": "superseded",
+                },
+            ],
             "structure": {
                 k: v
                 for k, v in (region.get("structure") or {}).items()
