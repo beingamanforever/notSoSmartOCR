@@ -32,7 +32,7 @@ def render_evidence(regions: list[TextRegion]) -> EvidenceText:
             or region.kind in {"handwriting", "checkbox"}
         )
         and (region.structure or {}).get("role")
-        not in {"table_source", "figure_source"}
+        not in {"table_source", "figure_source", "form_source"}
         and not (region.structure or {}).get("layout_owner_id")
     ]
     return EvidenceText(
@@ -43,7 +43,10 @@ def render_evidence(regions: list[TextRegion]) -> EvidenceText:
 
 def _plain_text(region: TextRegion) -> str:
     if region.kind == "checkbox":
-        if (region.text_provenance or {}).get("method") == "learned_checkbox_detection":
+        if (region.text_provenance or {}).get("method") in {
+            "learned_checkbox_detection",
+            "qwen_form_option_extraction",
+        }:
             return _native_control_text(
                 region.text if region.resolution == "resolved" else "[unresolved text]",
                 region.structure or {},
@@ -135,9 +138,10 @@ def _same_inline_line(first: dict[str, Any], second: dict[str, Any]) -> bool:
 
 
 def _inline_text(region: dict[str, Any]) -> bool:
-    if (region.get("text_provenance") or {}).get(
-        "method"
-    ) == "learned_checkbox_detection":
+    if (region.get("text_provenance") or {}).get("method") in {
+        "learned_checkbox_detection",
+        "qwen_form_option_extraction",
+    }:
         # Learned control boxes can contain the option label as well as the mark.
         return False
     kind = _kind(region).casefold()
@@ -204,7 +208,13 @@ def _display_regions(
 def _renderable(region: dict[str, Any], evidence_ids: set[str]) -> bool:
     structure = _structure(region)
     role = str(structure.get("role", ""))
-    if role in {"table_source", "figure_source", "coverage_risk", "table_candidate"}:
+    if role in {
+        "table_source",
+        "figure_source",
+        "form_source",
+        "coverage_risk",
+        "table_candidate",
+    }:
         return False
     if _kind(region) in {"coverage_risk", "table_candidate"}:
         return False
@@ -267,9 +277,10 @@ def _markdown_block(
     elif kind == "control":
         # Reached only when the control has no row to sit in: a control whose label
         # belongs to a layout block is drawn inside that row instead, where it was marked.
-        if (region.get("text_provenance") or {}).get(
-            "method"
-        ) == "learned_checkbox_detection":
+        if (region.get("text_provenance") or {}).get("method") in {
+            "learned_checkbox_detection",
+            "qwen_form_option_extraction",
+        }:
             block = f"- {_display_text(region)}"
         elif resolution == "resolved":
             block = f"- {text}" if text else ""
@@ -534,9 +545,10 @@ def _text(region: dict[str, Any]) -> str:
 
 
 def _display_text(region: dict[str, Any]) -> str:
-    if (region.get("text_provenance") or {}).get(
-        "method"
-    ) == "learned_checkbox_detection":
+    if (region.get("text_provenance") or {}).get("method") in {
+        "learned_checkbox_detection",
+        "qwen_form_option_extraction",
+    }:
         return _native_control_text(
             _text(region).strip()
             if _resolution(region) == "resolved"

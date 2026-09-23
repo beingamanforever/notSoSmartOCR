@@ -313,7 +313,7 @@ def test_form_proposal_needs_unowned_source_pixels() -> None:
         {"label": "form", "box": [100, 0, 150, 50]},
     ]
 
-    assert serve_falcon_layout._exclusive_form_indices(proposals) == {1, 2, 3}
+    assert serve_falcon_layout._exclusive_form_indices(proposals) == {0, 1, 2, 3}
 
 
 class FakeLayoutEngine:
@@ -361,6 +361,460 @@ def _post_layout_read(server, image: Image.Image) -> dict[str, object]:
     )
     with urllib.request.urlopen(request, timeout=5) as reply:
         return json.loads(reply.read())
+
+
+def _route_model(action: str) -> dict[str, object]:
+    names = list(serve_falcon_layout.HERON_ROUTE_FEATURE_NAMES)
+    return {
+        "version": 1,
+        "id": "test-falcon-mode-router",
+        "status": "calibrated",
+        "training_actions": {
+            "layout": "layout_selective_qwen",
+            "plain": "plain_falcon",
+        },
+        "feature_names": names,
+        "coefficients": [0.0] * len(names),
+        "means": [0.0] * len(names),
+        "scales": [1.0] * len(names),
+        "intercept": 10.0 if action == "plain" else -10.0,
+        "threshold": 0.5,
+        "cost_tradeoff": 0.0,
+        "cost_head": {"coefficients": [0.0] * len(names), "intercept": 0.0},
+        "extractor": _route_extractor(),
+    }
+
+
+def _route_extractor() -> dict[str, object]:
+    return {
+        "version": serve_falcon_layout.ROUTE_EXTRACTOR_VERSION,
+        "heron_model_id": "ds4sd/docling-layout-heron-101",
+        "heron_model_revision": "2e4993cf6bb211112084a2f80938f26138008917",
+        "layout_score_threshold": 0.3,
+    }
+
+
+def test_route_model_loader_rejects_non_visual_features(tmp_path: Path) -> None:
+    path = tmp_path / "router.json"
+    path.write_text(json.dumps(_route_model("layout")))
+    assert serve_falcon_layout.load_route_model(path)["id"] == (
+        "test-falcon-mode-router"
+    )
+
+    model = _route_model("layout")
+    model["feature_names"] = ["document_id"]
+    path.write_text(json.dumps(model))
+    with pytest.raises(ValueError, match="schema"):
+        serve_falcon_layout.load_route_model(path)
+
+    model = _route_model("layout")
+    model["threshold"] = -0.25
+    path.write_text(json.dumps(model))
+    assert serve_falcon_layout.load_route_model(path)["threshold"] == -0.25
+
+
+def test_route_model_loader_rejects_development_artifact(tmp_path: Path) -> None:
+    path = tmp_path / "router.json"
+    model = _route_model("layout")
+    model["status"] = "development_only_optional_separate_calibration_required"
+    path.write_text(json.dumps(model))
+
+    with pytest.raises(ValueError, match="schema"):
+        serve_falcon_layout.load_route_model(path)
+
+
+def test_route_model_requires_matching_extractor_metadata() -> None:
+    model = _route_model("layout")
+    engine = FakeLayoutEngine([])
+
+    def detect(images):
+        return [{"raw": [], "layout": []}]
+
+    server = serve_falcon_layout.create_server(
+        engine,
+        "127.0.0.1",
+        0,
+        model={"id": "test"},
+        detect_route=detect,
+        route_model=model,
+        extractor_metadata=_route_extractor(),
+    )
+    server.server_close()
+
+    mismatched = {**_route_extractor(), "layout_score_threshold": 0.4}
+    with pytest.raises(ValueError, match="extractor does not match"):
+        serve_falcon_layout.create_server(
+            engine,
+            "127.0.0.1",
+            0,
+            model={"id": "test"},
+            detect_route=detect,
+            route_model=model,
+            extractor_metadata=mismatched,
+        )
+
+
+def test_route_features_match_measured_heron_schema() -> None:
+    import math
+
+    detections = [
+        {
+            "label": "text",
+            "box": [0, 0, 50, 20],
+            "score": 0.8,
+            "class_scores": {"text": 0.6, "table": 0.2},
+        },
+        {
+            "category": "table",
+            "bbox": [0, 0, 100, 100],
+            "score": 0.9,
+            "class_scores": {"text": 0.1, "table": 0.7},
+        },
+    ]
+    values = serve_falcon_layout.route_feature_values(100, 200, detections)
+    expected = [
+        math.log1p(100),
+        math.log1p(200),
+        0.5,
+        2.0,
+    ]
+    for label in serve_falcon_layout.HERON_ROUTE_CLASSES:
+        expected.extend(
+            {
+                "text": [0.5, 0.8, 0.05, 0.05],
+                "table": [0.5, 0.9, 0.5, 0.5],
+            }.get(label, [0.0, 0.0, 0.0, 0.0])
+        )
+    for label in serve_falcon_layout.HERON_ROUTE_CLASSES:
+        expected.extend(
+            {
+                "text": [0.35, 0.6],
+                "table": [0.45, 0.7],
+            }.get(label, [0.0, 0.0])
+        )
+
+    assert len(expected) == 106
+    assert list(values) == list(serve_falcon_layout.HERON_ROUTE_FEATURE_NAMES)
+    assert list(values.values()) == pytest.approx(expected)
+
+
+def test_route_detection_preserves_raw_form_and_key_value_proposals() -> None:
+    proposals = [
+        {"label": "key_value_region", "box": (0, 0, 10, 10), "score": 0.8},
+        {"label": "form", "box": (0, 0, 20, 20), "score": 0.9},
+    ]
+
+    detection = serve_falcon_layout._route_detection(proposals)
+
+    assert [item["label"] for item in detection["raw"]] == [
+        "key_value_region",
+        "form",
+    ]
+    assert [item["category"] for item in detection["layout"]] == ["form"]
+
+
+def test_router_threshold_uses_total_quality_before_page_win_count() -> None:
+    import numpy as np
+
+    from experiments.train_falcon_mode_router import _threshold, _totals
+
+    values = np.asarray([0.9, 0.8, 0.7, 0.6])
+    qualities = np.asarray(
+        [
+            [100.0, 0.0],
+            [1.0, 1.1],
+            [1.0, 1.1],
+            [1.0, 1.1],
+        ]
+    )
+    costs = np.zeros((4, 2))
+    threshold = _threshold(values, qualities, costs)
+    selected = values > threshold
+
+    assert selected.tolist() == [False, False, False, False]
+    assert _totals(selected, qualities, costs)["quality"] == 103.0
+
+
+def test_router_trainer_replays_named_cached_features() -> None:
+    import warnings
+
+    import numpy as np
+
+    from experiments.train_falcon_mode_router import _fit, _predict, _training_arrays
+
+    names = list(serve_falcon_layout.HERON_ROUTE_FEATURE_NAMES)
+    rows = []
+    for group, layout_quality, plain_quality in (
+        ("a", 2.0, 1.0),
+        ("b", 1.0, 2.0),
+    ):
+        rows.append(
+            {
+                "split": "development",
+                "source_group": group,
+                "feature_values": {name: 0.0 for name in names},
+                "layout_quality": layout_quality,
+                "plain_quality": plain_quality,
+                "layout_expert_cost": 0.1,
+                "plain_expert_cost": 0.0,
+            }
+        )
+    matrix, targets, groups, qualities, costs = _training_arrays(rows, names)
+
+    assert matrix.shape == (2, 106)
+    assert targets.tolist() == [-1.0, 1.0]
+    assert groups.tolist() == ["a", "b"]
+    assert np.array_equal(qualities, [[2.0, 1.0], [1.0, 2.0]])
+    assert np.array_equal(costs, [[0.1, 0.0], [0.1, 0.0]])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        scaler, estimator = _fit(matrix, targets)
+        replay = _predict(scaler.transform(matrix), estimator)
+    assert not caught
+    assert estimator.solver == "lsqr"
+    assert estimator.alpha == 100.0
+    assert np.isfinite(replay).all()
+
+    rows[0]["feature_values"].pop(names[-1])
+    with pytest.raises(ValueError, match="exact named"):
+        _training_arrays(rows, names)
+
+
+def test_cost_head_can_choose_lower_cost_quality_preserving_nonprefix_policy() -> None:
+    import numpy as np
+
+    from experiments.train_falcon_mode_router import _select_policy
+
+    quality_predictions = np.asarray([0.2, 0.1])
+    cost_predictions = np.asarray([0.0, 1.0])
+    qualities = np.asarray([[10.0, 0.0], [5.0, 5.0]])
+    costs = np.asarray([[0.0, 0.0], [1.0, 0.0]])
+
+    tradeoff, threshold = _select_policy(
+        quality_predictions, cost_predictions, qualities, costs
+    )
+
+    selected = quality_predictions + tradeoff * cost_predictions > threshold
+    assert selected.tolist() == [False, True]
+
+
+def test_nested_development_policy_does_not_tune_on_outer_group_labels() -> None:
+    import numpy as np
+
+    from experiments.train_falcon_mode_router import _nested_grouped_policy
+
+    matrix = np.zeros((6, len(serve_falcon_layout.HERON_ROUTE_FEATURE_NAMES)))
+    matrix[:, 0] = np.arange(6)
+    groups = np.asarray(["a", "a", "b", "b", "c", "c"])
+    qualities = np.asarray(
+        [[2.0, 1.0], [1.0, 2.0], [3.0, 1.0], [1.0, 3.0], [4.0, 1.0], [1.0, 4.0]]
+    )
+    costs = np.asarray([[1.0, 0.0]] * 6)
+    quality_targets = qualities[:, 1] - qualities[:, 0]
+    cost_targets = costs[:, 0] - costs[:, 1]
+
+    original = _nested_grouped_policy(
+        matrix, quality_targets, cost_targets, groups, qualities, costs
+    )
+    changed_qualities = qualities.copy()
+    changed_qualities[:2] = [[0.0, 1000.0], [1000.0, 0.0]]
+    changed_targets = changed_qualities[:, 1] - changed_qualities[:, 0]
+    changed = _nested_grouped_policy(
+        matrix, changed_targets, cost_targets, groups, changed_qualities, costs
+    )
+
+    assert changed[:2].tolist() == original[:2].tolist()
+
+
+def test_global_development_selection_can_be_optimistic() -> None:
+    import numpy as np
+
+    from experiments.train_falcon_mode_router import (
+        _grouped_predictions,
+        _nested_grouped_policy,
+        _select_policy,
+        _totals,
+    )
+
+    matrix = np.asarray([[-0.33], [-0.88], [-0.66], [-0.67], [0.38], [-0.11]])
+    groups = np.asarray(["a", "a", "b", "b", "c", "c"])
+    qualities = np.asarray(
+        [[5.0, 4.0], [4.0, 4.0], [8.0, 5.0], [3.0, 9.0], [8.0, 3.0], [2.0, 2.0]]
+    )
+    costs = np.asarray(
+        [[0.0, 2.0], [2.0, 2.0], [3.0, 3.0], [2.0, 2.0], [0.0, 1.0], [3.0, 3.0]]
+    )
+    quality_targets = qualities[:, 1] - qualities[:, 0]
+    cost_targets = costs[:, 0] - costs[:, 1]
+    quality_oof, cost_oof = _grouped_predictions(
+        matrix, quality_targets, cost_targets, groups
+    )
+    tradeoff, threshold = _select_policy(quality_oof, cost_oof, qualities, costs)
+    globally_selected = quality_oof + tradeoff * cost_oof > threshold
+    nested_selected = _nested_grouped_policy(
+        matrix, quality_targets, cost_targets, groups, qualities, costs
+    )
+
+    assert _totals(globally_selected, qualities, costs)["quality"] == 30.0
+    assert _totals(nested_selected, qualities, costs)["quality"] == 24.0
+
+
+@pytest.mark.parametrize("action", ["layout", "plain"])
+def test_learned_mode_router_runs_heron_once_and_exactly_one_decoder(
+    action: str,
+) -> None:
+    calls = {"detect": 0, "layout": 0, "plain": 0}
+
+    class Engine(FakeLayoutEngine):
+        def generate_with_layout(self, images, **options):
+            calls["layout"] += 1
+            assert len(options["detections"]) == 1
+            return super().generate_with_layout(images, **options)
+
+        def generate_plain(self, images, **options):
+            calls["plain"] += 1
+            return [
+                serve_falcon_layout.DecodedText(
+                    "full page", {"stop_token_seen": True, "temperature": 0.0}
+                )
+            ]
+
+    def detect(images):
+        calls["detect"] += 1
+        return [
+            {
+                "raw": [
+                    {
+                        "label": "text",
+                        "box": [1, 1, 39, 39],
+                        "score": 0.9,
+                        "query_id": 7,
+                        "class_scores": {"text": 0.9, "table": 0.1},
+                    }
+                ],
+                "layout": [
+                    {
+                        "category": "text",
+                        "bbox": [1, 1, 39, 39],
+                        "score": 0.9,
+                        "query_id": 7,
+                        "class_scores": {"text": 0.9, "table": 0.1},
+                    }
+                ],
+            }
+        ]
+
+    engine = Engine(
+        [{"category": "text", "bbox": [1, 1, 39, 39], "score": 0.9, "text": "crop"}]
+    )
+    server = _start_layout_server(
+        engine,
+        detect_route=detect,
+        route_model=_route_model(action),
+        extractor_metadata=_route_extractor(),
+    )
+    try:
+        body = _post_layout_read(server, Image.new("RGB", (40, 40), "white"))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert calls == {
+        "detect": 1,
+        "layout": int(action == "layout"),
+        "plain": int(action == "plain"),
+    }
+    assert body["routing"]["action"] == action
+    assert (
+        body["routing"]["training_action"]
+        == {
+            "layout": "layout_selective_qwen",
+            "plain": "plain_falcon",
+        }[action]
+    )
+    assert body["routing"]["model"] == {
+        "id": "test-falcon-mode-router",
+        "version": 1,
+    }
+    assert [element["category"] for element in body["elements"]] == [
+        "page_text" if action == "plain" else "text"
+    ]
+
+
+def test_plain_route_failure_is_visible_without_layout_fallback() -> None:
+    calls = {"detect": 0, "layout": 0, "plain": 0}
+
+    class Engine(FakeLayoutEngine):
+        def generate_with_layout(self, images, **options):
+            calls["layout"] += 1
+            return super().generate_with_layout(images, **options)
+
+        def generate_plain(self, images, **options):
+            calls["plain"] += 1
+            raise RuntimeError("plain decoder failed")
+
+    def detect(images):
+        calls["detect"] += 1
+        return [
+            {
+                "raw": [{"label": "text", "box": [0, 0, 40, 40], "score": 0.9}],
+                "layout": [{"category": "text", "bbox": [0, 0, 40, 40], "score": 0.9}],
+            }
+        ]
+
+    server = _start_layout_server(
+        Engine([]),
+        detect_route=detect,
+        route_model=_route_model("plain"),
+        extractor_metadata=_route_extractor(),
+    )
+    try:
+        with pytest.raises(urllib.error.HTTPError) as failure:
+            _post_layout_read(server, Image.new("RGB", (40, 40), "white"))
+        assert failure.value.code == 422
+        assert json.loads(failure.value.read()) == {"error": "falcon_layout_failed"}
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert calls == {"detect": 1, "layout": 0, "plain": 1}
+
+
+def test_plain_route_reader_returns_page_region_with_router_provenance(
+    tmp_path: Path,
+) -> None:
+    from ocr_pipeline.falcon_layout import FalconLayoutReader
+
+    engine = FakeLayoutEngine([])
+    engine.generate_plain = lambda **options: [
+        serve_falcon_layout.DecodedText(
+            "# Full page", {"stop_token_seen": True, "temperature": 0.0}
+        )
+    ]
+    server = _start_layout_server(
+        engine,
+        detect_route=lambda images: [{"raw": [], "layout": []}],
+        route_model=_route_model("plain"),
+        extractor_metadata=_route_extractor(),
+    )
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (40, 60), "white").save(image_path)
+    try:
+        regions = FalconLayoutReader(f"http://127.0.0.1:{server.server_port}").read(
+            image_path, 3
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert len(regions) == 1
+    assert regions[0].kind == "page_text"
+    assert regions[0].text == "Full page"
+    assert regions[0].bounding_box.right == 40
+    assert regions[0].bounding_box.bottom == 60
+    assert regions[0].text_provenance["method"] == "falcon_perception_plain_ocr"
+    assert regions[0].text_provenance["routing"]["model"]["id"] == (
+        "test-falcon-mode-router"
+    )
 
 
 def test_nonterminated_table_read_retries_and_retains_original_evidence() -> None:
@@ -497,7 +951,17 @@ def test_exclusive_form_is_visible_as_unresolved_source_crop(tmp_path: Path) -> 
     engine = FakeLayoutEngine(
         [{"category": "form", "bbox": [2, 2, 38, 38], "score": 0.8, "text": ""}]
     )
-    server = _start_layout_server(engine)
+    server = _start_layout_server(
+        engine,
+        detect_route=lambda images: [
+            {
+                "raw": [{"label": "form", "box": [2, 2, 38, 38], "score": 0.8}],
+                "layout": [{"category": "form", "bbox": [2, 2, 38, 38], "score": 0.8}],
+            }
+        ],
+        route_model=_route_model("layout"),
+        extractor_metadata=_route_extractor(),
+    )
     image = tmp_path / "form.png"
     Image.new("RGB", (40, 40), "white").save(image)
     try:
@@ -507,6 +971,7 @@ def test_exclusive_form_is_visible_as_unresolved_source_crop(tmp_path: Path) -> 
         assert region.kind == "figure"
         assert region.resolution == "unreadable"
         assert region.text_provenance["layout_category"] == "form"
+        assert region.text_provenance["routing"]["action"] == "layout"
         assert _crop_groups([asdict(region)], 40, 40)[0]["box"] == {
             "left": 2,
             "top": 2,
@@ -516,6 +981,56 @@ def test_exclusive_form_is_visible_as_unresolved_source_crop(tmp_path: Path) -> 
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_checkbox_region_keeps_router_provenance(tmp_path: Path) -> None:
+    from ocr_pipeline.falcon_layout import FalconLayoutReader
+
+    engine = FakeLayoutEngine(
+        [
+            {
+                "category": "checkbox-selected",
+                "bbox": [2, 2, 20, 20],
+                "score": 0.9,
+                "text": "Consent",
+            }
+        ]
+    )
+    server = _start_layout_server(
+        engine,
+        detect_route=lambda images: [
+            {
+                "raw": [
+                    {
+                        "label": "checkbox_selected",
+                        "box": [2, 2, 20, 20],
+                        "score": 0.9,
+                    }
+                ],
+                "layout": [
+                    {
+                        "category": "checkbox-selected",
+                        "bbox": [2, 2, 20, 20],
+                        "score": 0.9,
+                    }
+                ],
+            }
+        ],
+        route_model=_route_model("layout"),
+        extractor_metadata=_route_extractor(),
+    )
+    image = tmp_path / "checkbox.png"
+    Image.new("RGB", (40, 40), "white").save(image)
+    try:
+        region = FalconLayoutReader(f"http://127.0.0.1:{server.server_port}").read(
+            image, 1
+        )[0]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert region.kind == "checkbox"
+    assert region.text_provenance["routing"]["action"] == "layout"
 
 
 def test_form_only_upload_preserves_crop_and_reports_unresolved_page() -> None:
@@ -552,6 +1067,7 @@ def test_form_only_upload_preserves_crop_and_reports_unresolved_page() -> None:
             assert len(page["regions"]) == 1
             assert page["regions"][0]["resolution"] == "unreadable"
             assert page["regions"][0]["text_provenance"]["layout_category"] == "form"
+            assert page["regions"][0]["structure"]["role"] == "form_source"
             assert page["regions"][0]["structure"]["image"]["data"]
             markdown = client.get(
                 f"/api/sessions/{payload['session_id']}/result.md"
@@ -729,7 +1245,7 @@ def test_upload_renders_checkbox_label_instead_of_decoder_table_markup():
     from ocr_pipeline.falcon_layout import FalconLayoutReader
 
     reading = serve_falcon_layout.DecodedText(
-        '<table><tr><td>☐</td><td>Please Comment</td></tr></table>',
+        "<table><tr><td>☐</td><td>Please Comment</td></tr></table>",
         {"stop_token_seen": True, "temperature": 0.0},
     )
     engine = FakeLayoutEngine(
@@ -770,6 +1286,20 @@ def test_upload_renders_checkbox_label_instead_of_decoder_table_markup():
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("☐ Please Comment", "Please Comment"),
+        ("Pale □", "Pale"),
+        ("■ Glucose Test Strips", "Glucose Test Strips"),
+    ],
+)
+def test_checkbox_label_removes_presentation_marks(value: str, expected: str) -> None:
+    from ocr_pipeline.falcon_layout import _checkbox_label
+
+    assert _checkbox_label(value) == expected
 
 
 @pytest.mark.parametrize(
@@ -875,10 +1405,10 @@ def test_layout_http_preserves_overlapping_modalities_and_tiny_text(
         "transformers",
         SimpleNamespace(
             AutoImageProcessor=SimpleNamespace(
-                from_pretrained=lambda name: LayoutProcessor()
+                from_pretrained=lambda name, **options: LayoutProcessor()
             ),
             AutoModelForObjectDetection=SimpleNamespace(
-                from_pretrained=lambda name: LayoutModel()
+                from_pretrained=lambda name, **options: LayoutModel()
             ),
         ),
     )

@@ -2,28 +2,276 @@
 
 import copy
 import json
+from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 from PIL import Image
 
-from ocr_pipeline.contracts import BoundingBox
+from ocr_pipeline.contracts import BoundingBox, EvidenceText, PageResult, TextRegion
+from ocr_pipeline.cross_page_tables import (
+    CrossPageTableStage,
+    TableContinuationPrediction,
+)
+from ocr_pipeline.demo import create_app
 from ocr_pipeline.markdown_refinement import refine_page
 from ocr_pipeline.rendering import render_page_markdown
-from ocr_pipeline.tableformer_structure import TableFormerStructure
-from ocr_pipeline.tables import TableCell
 
 
-@pytest.mark.parametrize(
-    "malformed_response",
-    [
-        {"bbox": {"l": 0, "t": 0, "r": 300, "b": 200}, "start_row_offset_idx": "oops"},
-        {"bbox": {"l": 0, "t": 0, "r": float("inf"), "b": 200}},
-    ],
-    ids=["malformed-row-offset", "infinite-bounding-box"],
-)
-def test_one_invalid_crop_does_not_discard_valid_recognition(
-    tmp_path, monkeypatch, malformed_response
+def test_cross_page_tables_use_refined_cells_once(tmp_path):
+    source = tmp_path / "pages.tiff"
+    pages = [Image.new("RGB", (100, 100), "white") for _ in range(2)]
+    pages[0].save(source, save_all=True, append_images=pages[1:], format="TIFF")
+
+    def table(page_number, value):
+        values = ("Medication", "Dose", value, "10 mg")
+        cells = [
+            {
+                "id": f"p{page_number}-cell-{index + 1}",
+                "row_nums": [index // 2],
+                "column_nums": [index % 2],
+                "text": text,
+                "resolution": "resolved",
+                "column_header": index < 2,
+            }
+            for index, text in enumerate(values)
+        ]
+        return TextRegion(
+            id=f"p{page_number}-table",
+            kind="table",
+            text="\n".join(values),
+            confidence=0.99,
+            bounding_box=BoundingBox(5, 5, 95, 95),
+            reading_order=1,
+            provider="fixture",
+            structure={
+                "role": "table",
+                "row_count": 2,
+                "column_count": 2,
+                "cells": cells,
+            },
+        )
+
+    class Reader:
+        name = "table-fixture"
+
+        def read(self, image_path: Path, page_number: int):
+            return [table(page_number, ("Aspirin", "Metformin")[page_number - 1])]
+
+    class Classifier:
+        name = "table-continuation-fixture"
+        calls = 0
+
+        def classify(self, *args):
+            self.calls += 1
+            return TableContinuationPrediction(0.93, {"checkpoint": "fixture"})
+
+    def refine(document, page_paths):
+        assert len(page_paths) == 2
+        document.pages[1].regions[0].structure["cells"][2]["text"] = "Refined Metformin"
+
+    classifier = Classifier()
+    app = create_app(
+        Reader(),
+        crop_refiner=refine,
+        cross_page_table_stage=CrossPageTableStage(classifier, minimum_score=0.8),
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/process",
+            files={"file": ("pages.tiff", source.read_bytes(), "image/tiff")},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert classifier.calls == 1
+    assert [run["stage"] for run in payload["stage_execution"]] == [
+        "qwen-crop-refinement",
+        "qwen-crop-refinement",
+        "cross-page-tables",
+    ]
+    assert "Refined Metformin" in [
+        cell["text"] for cell in payload["result"]["table_continuations"][0]["cells"]
+    ]
+
+
+def test_form_source_adds_physically_owned_controls_without_replacing_text(
+    tmp_path, monkeypatch
 ):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    image = tmp_path / "form.png"
+    Image.new("RGB", (200, 100), "white").save(image)
+    page = {
+        "page_number": 1,
+        "width": 200,
+        "height": 100,
+        "regions": [
+            {
+                "id": "form",
+                "kind": "figure",
+                "text": "",
+                "resolution": "unreadable",
+                "bounding_box": {"left": 20, "top": 10, "right": 180, "bottom": 90},
+                "structure": {"role": "form_source"},
+            },
+            {
+                "id": "existing",
+                "kind": "checkbox",
+                "text": "Existing option",
+                "resolution": "resolved",
+                "bounding_box": {"left": 28, "top": 18, "right": 92, "bottom": 34},
+                "structure": {"label": "Existing option", "state": "unselected"},
+            },
+        ],
+    }
+
+    duplicate_crop = False
+
+    def transport(request, timeout):
+        payload = json.loads(request.data)
+        assert "form_source" in json.dumps(payload["messages"][1])
+        answer = {
+            "crops": [
+                {
+                    "region_id": "crop-1",
+                    "markdown": "[form options extracted]",
+                    "controls": [
+                        {
+                            "label": "Existing option",
+                            "group_label": "Choices",
+                            "state": "unselected",
+                            "bbox_2d": [50, 100, 450, 300],
+                        },
+                        {
+                            "label": "Recovered option",
+                            "group_label": "Choices",
+                            "state": "selected",
+                            "bbox_2d": [50, 500, 700, 725],
+                        },
+                    ],
+                }
+            ]
+        }
+        if duplicate_crop:
+            answer["crops"].append(copy.deepcopy(answer["crops"][0]))
+        return (
+            200,
+            {},
+            json.dumps(
+                {
+                    "model": payload["model"],
+                    "choices": [
+                        {
+                            "message": {"content": json.dumps(answer)},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 30,
+                        "cost": 0.001,
+                    },
+                }
+            ).encode(),
+        )
+
+    result = refine_page(image, page, "base output", transport=transport)
+
+    recovered = [
+        region
+        for region in result["refined_regions"]
+        if (region.get("text_provenance") or {}).get("method")
+        == "qwen_form_option_extraction"
+    ]
+    assert result["status"] == "generated"
+    assert result["accepted_crop_ids"] == []
+    assert result["accepted_control_crop_ids"] == ["crop-1"]
+    assert result["form_controls_added"] == 1
+    assert len(recovered) == 1
+    assert recovered[0]["text"] == "Recovered option"
+    assert recovered[0]["structure"]["state"] == "selected"
+    assert recovered[0]["bounding_box"] == {
+        "left": 28,
+        "top": 50,
+        "right": 132,
+        "bottom": 68,
+    }
+    assert "[x] Recovered option" in result["content"]["markdown"]
+    assert "[form options extracted]" not in result["content"]["markdown"]
+
+    duplicate_crop = True
+    malformed = refine_page(image, page, "base output", transport=transport)
+    assert malformed["status"] == "invalid"
+    assert malformed["form_controls_added"] == 0
+    assert malformed["accepted_control_crop_ids"] == []
+    assert malformed["refined_regions"] is None
+
+
+def test_form_source_without_structured_controls_stays_unresolved(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    image = tmp_path / "form.png"
+    Image.new("RGB", (100, 100), "white").save(image)
+    page = {
+        "page_number": 1,
+        "width": 100,
+        "height": 100,
+        "regions": [
+            {
+                "id": "form",
+                "kind": "figure",
+                "text": "",
+                "resolution": "unreadable",
+                "bounding_box": {"left": 0, "top": 0, "right": 100, "bottom": 100},
+                "structure": {"role": "form_source"},
+            }
+        ],
+    }
+
+    def transport(request, timeout):
+        payload = json.loads(request.data)
+        content = {
+            "crops": [
+                {
+                    "region_id": "crop-1",
+                    "markdown": "[form options extracted]",
+                    "controls": [],
+                }
+            ]
+        }
+        return (
+            200,
+            {},
+            json.dumps(
+                {
+                    "model": payload["model"],
+                    "choices": [
+                        {
+                            "message": {"content": json.dumps(content)},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 20,
+                        "completion_tokens": 5,
+                        "cost": 0.0,
+                    },
+                }
+            ).encode(),
+        )
+
+    result = refine_page(image, page, "base output", transport=transport)
+
+    assert result["status"] == "invalid"
+    assert result["form_controls_added"] == 0
+    assert result["accepted_control_crop_ids"] == []
+    assert result["refined_regions"] is None
+    assert "no structured form controls" in result["validation_errors"][0]
+
+
+def test_invalid_falcon_table_does_not_discard_valid_recognition(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
     image = tmp_path / "page.png"
     Image.new("RGB", (300, 300), "white").save(image)
@@ -45,42 +293,35 @@ def test_one_invalid_crop_does_not_discard_valid_recognition(
                 "text": "original table",
                 "resolution": "unreadable",
                 "bounding_box": {"left": 0, "top": 100, "right": 300, "bottom": 300},
+                "structure": {
+                    "role": "table",
+                    "row_count": 1,
+                    "column_count": 2,
+                    "cells": [
+                        {
+                            "id": "cell-1",
+                            "row_nums": [0],
+                            "column_nums": [0],
+                            "text": "original table",
+                        }
+                    ],
+                },
             },
         ],
     }
     original = copy.deepcopy(page)
 
-    broken = False
-
-    class Structure:
-        def predict(self, panel):
-            if broken:
-                return [TableCell(BoundingBox(150, 0, 300, 200), (0,), (1,))]
-            return [
-                TableCell(BoundingBox(0, 0, 150, 200), (0,), (0,)),
-                TableCell(BoundingBox(150, 0, 300, 200), (0,), (1,)),
-            ]
-
-        def model_provenance(self):
-            return {"id": "fixture"}
-
-    duplicate = False
-
     def transport(request, timeout):
         payload = json.loads(request.data)
         assert "crop-1" in json.dumps(payload)
         assert payload["messages"][0]["role"] == "system"
-        if not broken:
-            assert (
-                "even when it differs from these predictions"
-                in payload["messages"][1]["content"][0]["text"]
-            )
         content = {
             "crops": [
                 {"region_id": "crop-1", "markdown": "dose 5 mg"},
                 {
-                    "region_id": "crop-1" if duplicate else "crop-2",
-                    "markdown": "<table><tr><td>wrong grid</td></tr></table>",
+                    "region_id": "crop-2",
+                    "markdown": "[table cells extracted]",
+                    "table_cells": [{"cell_id": "r1c1", "text": "wrong grid"}],
                 },
             ]
         }
@@ -105,9 +346,7 @@ def test_one_invalid_crop_does_not_discard_valid_recognition(
             ).encode(),
         )
 
-    result = refine_page(
-        image, page, "base output", transport=transport, table_reader=Structure()
-    )
+    result = refine_page(image, page, "base output", transport=transport)
     assert result["status"] == "partial"
     assert "dose 5 mg" in result["content"]["markdown"]
     assert "wrong grid" not in result["content"]["markdown"]
@@ -115,47 +354,14 @@ def test_one_invalid_crop_does_not_discard_valid_recognition(
     assert result["rejected_crop_ids"] == ["crop-2"]
     assert result["validation_errors"]
     assert result["cost"] == 0.001
-    assert page == original
-
-    duplicate = True
-    rejected = refine_page(
-        image, page, "base output", transport=transport, table_reader=Structure()
-    )
-    assert rejected["status"] == "invalid"
-    assert rejected["accepted_crop_ids"] == []
-    assert rejected["content"]["markdown"] == "base output"
-
-    duplicate = False
-    broken = True
-    partial = refine_page(
-        image, page, "base output", transport=transport, table_reader=Structure()
-    )
-    assert partial["status"] == "partial"
-    assert partial["accepted_crop_ids"] == ["crop-1"]
-    assert "dose 5 mg" in partial["content"]["markdown"]
-    assert "crop-2" in partial["table_structure_errors"]
-    assert "crop-2" in partial["invalid_table_grids"]
-
-    malformed = refine_page(
-        image,
-        page,
-        "base output",
-        transport=transport,
-        table_reader=TableFormerStructure(predictor=lambda panel: [malformed_response]),
-    )
-    assert malformed["status"] == "partial"
-    assert malformed["accepted_crop_ids"] == ["crop-1"]
-    assert malformed["rejected_crop_ids"] == ["crop-2"]
-    assert "dose 5 mg" in malformed["content"]["markdown"]
-    assert "original table" in malformed["content"]["markdown"]
-    assert "wrong grid" not in malformed["content"]["markdown"]
-    assert "crop-2" in malformed["table_structure_errors"]
+    assert "crop-2" in result["table_structure_errors"]
+    assert "crop-2" in result["invalid_table_grids"]
+    assert result["table_grids"] == {}
     assert any(
-        "crop-2 structure prediction failed" in error
-        for error in malformed["validation_errors"]
+        "crop-2 canonical table structure is invalid" in error
+        for error in result["validation_errors"]
     )
-    assert malformed["table_grids"] == {}
-    assert malformed["canonical_unchanged"] is True
+    assert result["canonical_unchanged"] is True
     assert page == original
 
 
@@ -181,8 +387,20 @@ def test_matching_table_grid_replaces_text_in_canonical_physical_cells(
             "decision": "falcon_agreement",
             "evidence_ids": [f"falcon-word-{index}"],
         }
-        for index, value in enumerate(("old A", "old B", "old C", "old D"))
+        for index, value in enumerate(("", "old B", "old C", "old D"))
     ]
+    cells[0].update(
+        {
+            "source": "fixture-layout",
+            "confidence": 0.42,
+            "confidence_kind": "decoder_token",
+            "decision": "source_reader",
+            "supporters": ["layout-proposal-1"],
+            "text_provenance": {"method": "source_table_cell"},
+        }
+    )
+    cells[1]["source"] = "falcon"
+    cells[1]["text_provenance"] = {"method": "falcon_table_cell"}
     page = {
         "page_number": 1,
         "width": 200,
@@ -191,7 +409,8 @@ def test_matching_table_grid_replaces_text_in_canonical_physical_cells(
             {
                 "id": "table",
                 "kind": "table",
-                "text": "old A old B old C old D",
+                "text": "old B old C old D",
+                "provider": "fixture-layout",
                 "resolution": "unreadable",
                 "bounding_box": {"left": 0, "top": 0, "right": 200, "bottom": 200},
                 "structure": {
@@ -205,29 +424,23 @@ def test_matching_table_grid_replaces_text_in_canonical_physical_cells(
         ],
     }
 
-    class Structure:
-        def predict(self, panel):
-            return (
-                TableCell(BoundingBox(0, 0, 100, 100), (0,), (0,)),
-                TableCell(BoundingBox(100, 0, 200, 100), (0,), (1,)),
-                TableCell(BoundingBox(0, 100, 100, 200), (1,), (0,)),
-                TableCell(BoundingBox(100, 100, 200, 200), (1,), (1,)),
-            )
-
-        def model_provenance(self):
-            return {"id": "fixture"}
-
     def transport(request, timeout):
         payload = json.loads(request.data)
+        prompt = payload["messages"][1]["content"][0]["text"]
+        assert "source reader's canonical table topology" in prompt
+        assert "Falcon" not in prompt
+        assert "TableFormer" not in prompt
         answer = {
             "crops": [
                 {
                     "region_id": "crop-1",
-                    "markdown": (
-                        "<table><tr><th>old C</th><th>old D</th></tr>"
-                        "<tr><td>old A</td><td>old B</td></tr></table>"
-                        "\nhandwritten note"
-                    ),
+                    "markdown": "[table cells extracted]",
+                    "table_cells": [
+                        {"cell_id": "r1c1", "text": ""},
+                        {"cell_id": "r1c2", "text": "new B"},
+                        {"cell_id": "r2c1", "text": "new C"},
+                        {"cell_id": "r2c2", "text": "new D"},
+                    ],
                 }
             ]
         }
@@ -252,51 +465,275 @@ def test_matching_table_grid_replaces_text_in_canonical_physical_cells(
             ).encode(),
         )
 
-    result = refine_page(
-        image, page, "original", transport=transport, table_reader=Structure()
-    )
+    result = refine_page(image, page, "original", transport=transport)
     assert result["status"] == "generated"
     assert result["accepted_crop_ids"] == ["crop-1"]
-    assert "old C" in result["content"]["markdown"]
-    assert "handwritten note" not in result["content"]["markdown"]
+    assert result["table_structure_source"] == "canonical_table_topology"
+    assert result["table_grids"]["crop-1"]["topology_provenance"] == {
+        "method": "canonical_table_topology",
+        "provider": "fixture-layout",
+    }
+    assert "new A" not in result["content"]["markdown"]
+    assert "[table cells extracted]" not in result["content"]["markdown"]
     refined = result["refined_regions"][0]
     assert refined["kind"] == "table"
     assert [cell["text"] for cell in refined["structure"]["cells"]] == [
-        "old C",
-        "old D",
-        "old A",
-        "old B",
+        "",
+        "new B",
+        "new C",
+        "new D",
     ]
     assert all(
         "confidence" not in cell
         and "confidence_kind" not in cell
         and "decision" not in cell
         and cell["evidence_ids"] == [f"falcon-word-{index}"]
-        for cell in refined["structure"]["cells"]
+        for cell in refined["structure"]["cells"][1:]
         for index in [int(cell["id"].split("-")[-1])]
     )
+    fallback = refined["structure"]["cells"][0]
+    assert all(fallback[key] == value for key, value in cells[0].items())
+    assert fallback["cell_id"] == "r1c1"
+    assert refined["resolution"] == "unreadable"
     assert refined["alternatives"][0]["decision_state"] == "superseded"
     assert refined["structure"]["header_row_count"] == 0
+    assert [cell["cell_id"] for cell in refined["structure"]["cells"]] == [
+        "r1c1",
+        "r1c2",
+        "r2c1",
+        "r2c2",
+    ]
     assert (
-        refined["text_provenance"]["physical_cell_alignment"]
-        == "falcon_tableformer_qwen_consensus"
+        refined["text_provenance"]["table_cell_alignment"]
+        == "canonical_row_column_topology"
     )
+    assert refined["text_provenance"]["topology_provider"] == "fixture-layout"
+    assert refined["structure"]["cells"][0]["source"] == "fixture-layout"
+    assert refined["structure"]["cells"][0]["text_provenance"] == {
+        "method": "source_table_cell"
+    }
+    assert refined["structure"]["cells"][1]["alternatives"][-1] == {
+        "text": "old B",
+        "confidence": None,
+        "provider": "falcon",
+        "text_provenance": {"method": "falcon_table_cell"},
+        "decision_state": "superseded",
+    }
+    assert refined["structure"]["cells"][2]["alternatives"][-1]["provider"] == (
+        "fixture-layout"
+    )
+    assert refined["structure"]["cells"][1]["text_provenance"]["source_provenance"] == {
+        "method": "falcon_table_cell"
+    }
+    assert (
+        refined["structure"]["cells"][1]["text_provenance"]["table_cell_alignment"]
+        == "canonical_row_column_topology"
+    )
+    assert (
+        refined["structure"]["cells"][1]["text_provenance"]["topology_provider"]
+        == "fixture-layout"
+    )
+    assert refined["structure"]["cells"][0]["bounding_box"] == {
+        "left": 0,
+        "top": 0,
+        "right": 100,
+        "bottom": 100,
+    }
     assert (
         json.loads(json.dumps(result["refined_regions"])) == result["refined_regions"]
     )
     assert page["regions"][0]["structure"]["cells"] == cells
 
-    ambiguous = copy.deepcopy(page)
-    ambiguous["regions"][0]["structure"]["cells"].pop()
+    class Classifier:
+        name = "must-not-run"
+        calls = 0
+
+        def classify(self, *args):
+            self.calls += 1
+            return TableContinuationPrediction(1.0, {})
+
+    unresolved_table = TextRegion(
+        id="first-table",
+        kind="table",
+        text=refined["text"],
+        confidence=None,
+        bounding_box=BoundingBox(0, 0, 200, 200),
+        reading_order=1,
+        provider="fixture-layout",
+        resolution=refined["resolution"],
+        structure=refined["structure"],
+    )
+    resolved_table = copy.deepcopy(unresolved_table)
+    resolved_table.id = "second-table"
+    resolved_table.resolution = "resolved"
+    pages = [
+        PageResult(
+            page_number=page_number,
+            width=200,
+            height=200,
+            reader="fixture-layout",
+            route="fixture",
+            text=EvidenceText("", []),
+            regions=[table],
+        )
+        for page_number, table in enumerate((unresolved_table, resolved_table), start=1)
+    ]
+    classifier = Classifier()
+    assert CrossPageTableStage(classifier).apply([image, image], pages) == []
+    assert classifier.calls == 0
+
+    incomplete_cells = [
+        {"cell_id": "r1c1", "text": "new A"},
+        {"cell_id": "r1c2", "text": "new B"},
+        {"cell_id": "r2c1", "text": "new C"},
+    ]
+
+    def incomplete_transport(request, timeout):
+        payload = json.loads(request.data)
+        answer = {
+            "crops": [
+                {
+                    "region_id": "crop-1",
+                    "markdown": "[table cells extracted]",
+                    "table_cells": incomplete_cells,
+                }
+            ]
+        }
+        return (
+            200,
+            {},
+            json.dumps(
+                {
+                    "model": payload["model"],
+                    "choices": [
+                        {
+                            "message": {"content": json.dumps(answer)},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                }
+            ).encode(),
+        )
+
     rejected = refine_page(
-        image, ambiguous, "original", transport=transport, table_reader=Structure()
+        image,
+        page,
+        "original",
+        transport=incomplete_transport,
     )
     assert rejected["status"] == "invalid"
     assert rejected["content"]["markdown"] == "original"
-    assert (
-        rejected["refined_regions"][0]["structure"]["cells"]
-        == ambiguous["regions"][0]["structure"]["cells"]
+    assert "missing IDs r2c2" in rejected["validation_errors"][0]
+
+    incomplete_cells[:] = [
+        {"cell_id": "r1c1", "text": "first"},
+        {"cell_id": "r1c1", "text": "second"},
+        {"cell_id": "r1c2", "text": "new B"},
+        {"cell_id": "r2c1", "text": "new C"},
+        {"cell_id": "r2c2", "text": "new D"},
+    ]
+    duplicate = refine_page(
+        image,
+        page,
+        "original",
+        transport=incomplete_transport,
     )
+    assert duplicate["status"] == "invalid"
+    assert duplicate["content"]["markdown"] == "original"
+    assert "duplicate table cell ID r1c1" in duplicate["validation_errors"][0]
+
+
+def test_table_cell_ids_preserve_merged_spans(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    image = tmp_path / "merged-table.png"
+    Image.new("RGB", (200, 200), "white").save(image)
+    page = {
+        "page_number": 1,
+        "width": 200,
+        "height": 200,
+        "regions": [
+            {
+                "id": "table",
+                "kind": "table",
+                "text": "old table",
+                "resolution": "unreadable",
+                "bounding_box": {"left": 0, "top": 0, "right": 200, "bottom": 200},
+                "structure": {
+                    "role": "table",
+                    "row_count": 2,
+                    "column_count": 2,
+                    "header_row_count": 0,
+                    "cells": [
+                        {
+                            "id": "merged-heading",
+                            "row_nums": [0],
+                            "column_nums": [0, 1],
+                            "text": "old heading",
+                            "column_header": True,
+                        },
+                        {
+                            "id": "left",
+                            "row_nums": [1],
+                            "column_nums": [0],
+                            "text": "old left",
+                        },
+                        {
+                            "id": "right",
+                            "row_nums": [1],
+                            "column_nums": [1],
+                            "text": "old right",
+                        },
+                    ],
+                },
+            }
+        ],
+    }
+
+    def transport(request, timeout):
+        payload = json.loads(request.data)
+        prompt = payload["messages"][1]["content"][0]["text"]
+        assert '"cell_id": "r1c1"' in prompt
+        assert '"columns": [0, 1]' in prompt
+        answer = {
+            "crops": [
+                {
+                    "region_id": "crop-1",
+                    "markdown": "[table cells extracted]",
+                    "table_cells": [
+                        {"cell_id": "r1c1", "text": "Merged heading"},
+                        {"cell_id": "r2c1", "text": "Left"},
+                        {"cell_id": "r2c2", "text": "Right"},
+                    ],
+                }
+            ]
+        }
+        return (
+            200,
+            {},
+            json.dumps(
+                {
+                    "model": payload["model"],
+                    "choices": [
+                        {
+                            "message": {"content": json.dumps(answer)},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+                }
+            ).encode(),
+        )
+
+    result = refine_page(image, page, "original", transport=transport)
+
+    assert result["status"] == "generated"
+    structure = result["refined_regions"][0]["structure"]
+    assert structure["row_count"] == 2
+    assert structure["column_count"] == 2
+    assert structure["cells"][0]["column_nums"] == [0, 1]
+    assert 'colspan="2"' in result["content"]["markdown"]
+    assert result["content"]["markdown"].count("Merged heading") == 1
 
 
 @pytest.mark.parametrize(

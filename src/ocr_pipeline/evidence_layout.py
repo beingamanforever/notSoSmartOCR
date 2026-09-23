@@ -66,6 +66,7 @@ _EXCLUDED_ROLES = frozenset(
         "table_cell",
         "table_source",
         "figure_source",
+        "form_source",
     }
 )
 _PRESENTATION_KINDS = frozenset(
@@ -80,6 +81,7 @@ _PRESENTATION_EXCLUDED_ROLES = frozenset(
         "table_cell",
         "table_source",
         "figure_source",
+        "form_source",
     }
 )
 _SECTION_HEADINGS = frozenset(

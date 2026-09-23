@@ -52,6 +52,7 @@ EMPHASIS = re.compile(r"\*\*(.+?)\*\*")
 EMPTY_CATEGORIES = frozenset({"image", "picture", "figure", "chart", "seal", "form"})
 # Layout categories mapped onto the kinds the rest of the pipeline already understands.
 KIND_BY_CATEGORY = {
+    "page_text": "page_text",
     "table": "table",
     "formula": "formula",
     "doc_title": "title",
@@ -137,6 +138,13 @@ class FalconLayoutReader:
         if not isinstance(elements, list):
             raise ReaderError("falcon_layout_failed", "malformed element payload")
         model = dict(body.get("model") or self._model)
+        routing = body.get("routing")
+        if routing is not None and (
+            not isinstance(routing, dict)
+            or routing.get("action") not in {"layout", "plain"}
+            or not isinstance(routing.get("model"), dict)
+        ):
+            raise ReaderError("falcon_layout_failed", "malformed routing payload")
 
         regions = []
         for index, element in enumerate(elements, start=1):
@@ -198,6 +206,7 @@ class FalconLayoutReader:
                             "raw_text": raw_text,
                             **read_history,
                             "confidence_meaning": "decoder token likelihood, uncalibrated",
+                            **({"routing": routing} if routing is not None else {}),
                         },
                         resolution=read_resolution,
                         structure={
@@ -246,11 +255,15 @@ class FalconLayoutReader:
                             "layout_category": category,
                             "layout_detection_score": element.get("score"),
                             "model": model,
+                            **({"routing": routing} if routing is not None else {}),
                         },
                         resolution="unreadable"
                         if category == "form"
                         else read_resolution,
-                        structure={"image": asset},
+                        structure={
+                            "image": asset,
+                            **({"role": "form_source"} if category == "form" else {}),
+                        },
                     )
                 )
                 continue
@@ -276,8 +289,12 @@ class FalconLayoutReader:
                     reading_order=index,
                     provider=PROVIDER,
                     text_provenance={
-                        "method": "falcon_perception_layout_ocr",
-                        "reading_order_method": "detector_sequence",
+                        "method": "falcon_perception_plain_ocr"
+                        if category == "page_text"
+                        else "falcon_perception_layout_ocr",
+                        "reading_order_method": "page_decoder"
+                        if category == "page_text"
+                        else "detector_sequence",
                         "layout_detection": detection,
                         "generation": element.get("generation") or {},
                         "raw_text": element.get("text") or "",
@@ -295,6 +312,7 @@ class FalconLayoutReader:
                         is not None
                         else "recognition unavailable",
                         "model": model,
+                        **({"routing": routing} if routing is not None else {}),
                     },
                     resolution="unreadable" if structure_error else read_resolution,
                     structure=structure or {},
@@ -370,7 +388,11 @@ def _assign_image_owners(regions: list[TextRegion]) -> None:
         if parent is None:
             parents.append(region)
             continue
-        region.structure.update(role="figure_source", parent_region_id=parent.id)
+        role = (region.structure or {}).get("role")
+        region.structure.update(
+            role="form_source" if role == "form_source" else "figure_source",
+            parent_region_id=parent.id,
+        )
         children = parent.structure.setdefault("child_evidence_ids", [])
         if region.id not in children:
             children.append(region.id)
@@ -484,12 +506,11 @@ def _checkbox_label(text: str) -> str:
         parser.feed(text)
         parser.close()
         text = " ".join(
-            cell_text
-            for row in parser.rows
-            for cell_text, *_ in row
-            if cell_text
+            cell_text for row in parser.rows for cell_text, *_ in row if cell_text
         )
-    return re.sub(r"^(?:\[[x ?]\]|[☑☐✓✔✗✘□])\s*", "", text, flags=re.I).strip()
+    mark = r"(?:\[[x ?]\]|[☑☐✓✔✗✘□■])"
+    text = re.sub(rf"^{mark}\s*", "", text, flags=re.I)
+    return re.sub(rf"\s*{mark}$", "", text, flags=re.I).strip()
 
 
 def _table_structure(

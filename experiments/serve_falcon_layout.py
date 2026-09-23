@@ -38,6 +38,7 @@ from ocr_pipeline.falcon import (
     FALCON_MODEL_REVISION,
     FALCON_OCR_CATEGORIES,
 )
+from ocr_pipeline.heron_layout import DEFAULT_MODEL_ID, DEFAULT_MODEL_REVISION
 
 # Detection and crop options the caller may override per request, so a coverage sweep
 # does not need a restart per combination.
@@ -50,6 +51,51 @@ LAYOUT_OPTIONS = {
     # Not a detection option: asks for the full-page read alongside the region reads.
     "page_text": bool,
 }
+ROUTE_TRAINING_ACTIONS = {
+    "layout": "layout_selective_qwen",
+    "plain": "plain_falcon",
+}
+ROUTE_EXTRACTOR_VERSION = 1
+HERON_ROUTE_CLASSES = (
+    "caption",
+    "footnote",
+    "formula",
+    "list_item",
+    "page_footer",
+    "page_header",
+    "picture",
+    "section_header",
+    "table",
+    "text",
+    "title",
+    "document_index",
+    "code",
+    "checkbox_selected",
+    "checkbox_unselected",
+    "form",
+    "key_value_region",
+)
+HERON_ROUTE_FEATURE_NAMES = (
+    "image_log1p_width",
+    "image_log1p_height",
+    "image_aspect_ratio",
+    "detections_per_megapixel",
+    *(
+        f"{label}.{suffix}"
+        for label in HERON_ROUTE_CLASSES
+        for suffix in (
+            "count_fraction",
+            "max_score",
+            "area_ratio_sum",
+            "area_ratio_max",
+        )
+    ),
+    *(
+        f"{label}.{suffix}"
+        for label in HERON_ROUTE_CLASSES
+        for suffix in ("class_score_mean", "class_score_max")
+    ),
+)
 MAX_REQUEST_BYTES = 64_000_000
 MAX_IMAGE_PIXELS = 32_000_000
 LOGGER = logging.getLogger(__name__)
@@ -110,6 +156,195 @@ class LayoutEngine(Protocol):
     def generate_plain(self, images: list[Any], **options: Any) -> list[str]: ...
 
 
+def load_route_model(path: os.PathLike[str] | str) -> dict[str, Any]:
+    """Load the dependency-free binary router exported by the offline trainer."""
+    try:
+        with open(path, encoding="utf-8") as source:
+            model = json.load(source)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError(f"Invalid Falcon route model: {error}") from error
+    if not isinstance(model, dict):
+        raise ValueError("Falcon route model must be a JSON object")
+    feature_names = model.get("feature_names")
+    coefficients = model.get("coefficients")
+    means = model.get("means")
+    scales = model.get("scales")
+    cost_head = model.get("cost_head")
+    extractor = model.get("extractor")
+    if (
+        model.get("version") != 1
+        or not isinstance(model.get("id"), str)
+        or not model["id"].strip()
+        or model.get("status") != "calibrated"
+        or model.get("training_actions") != ROUTE_TRAINING_ACTIONS
+        or not isinstance(feature_names, list)
+        or feature_names != list(HERON_ROUTE_FEATURE_NAMES)
+        or not all(isinstance(values, list) for values in (coefficients, means, scales))
+        or any(
+            len(values) != len(feature_names)
+            for values in (coefficients, means, scales)
+        )
+        or not isinstance(cost_head, dict)
+        or not isinstance(cost_head.get("coefficients"), list)
+        or len(cost_head["coefficients"]) != len(feature_names)
+        or not _valid_extractor(extractor)
+    ):
+        raise ValueError("Invalid Falcon route model schema")
+    numbers = [
+        *coefficients,
+        *means,
+        *scales,
+        model.get("intercept"),
+        model.get("threshold"),
+        model.get("cost_tradeoff"),
+        *cost_head["coefficients"],
+        cost_head.get("intercept"),
+    ]
+    if any(
+        type(value) not in (int, float) or not math.isfinite(value) for value in numbers
+    ):
+        raise ValueError("Falcon route model values must be finite numbers")
+    if any(scale <= 0 for scale in scales):
+        raise ValueError("Falcon route model scales must be positive")
+    if model["cost_tradeoff"] < 0:
+        raise ValueError("Falcon route model cost tradeoff must be nonnegative")
+    return model
+
+
+def _valid_extractor(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("version") == ROUTE_EXTRACTOR_VERSION
+        and isinstance(value.get("heron_model_id"), str)
+        and bool(value["heron_model_id"])
+        and isinstance(value.get("heron_model_revision"), str)
+        and bool(re.fullmatch(r"[0-9a-f]{40}", value["heron_model_revision"]))
+        and type(value.get("layout_score_threshold")) in (int, float)
+        and math.isfinite(value["layout_score_threshold"])
+        and 0 <= value["layout_score_threshold"] <= 1
+    )
+
+
+def _route_page(
+    model: dict[str, Any], image: Image.Image, detections: list[dict[str, Any]]
+) -> dict[str, Any]:
+    features = route_features(*image.size, detections, model["feature_names"])
+    quality_delta = float(model["intercept"]) + sum(
+        float(coefficient) * (feature - float(mean)) / float(scale)
+        for coefficient, feature, mean, scale in zip(
+            model["coefficients"],
+            features,
+            model["means"],
+            model["scales"],
+            strict=True,
+        )
+    )
+    cost_saving = float(model["cost_head"]["intercept"]) + sum(
+        float(coefficient) * (feature - float(mean)) / float(scale)
+        for coefficient, feature, mean, scale in zip(
+            model["cost_head"]["coefficients"],
+            features,
+            model["means"],
+            model["scales"],
+            strict=True,
+        )
+    )
+    value = quality_delta + float(model["cost_tradeoff"]) * cost_saving
+    action = "plain" if value > model["threshold"] else "layout"
+    return {
+        "action": action,
+        "training_action": model["training_actions"][action],
+        "plain_quality_delta": quality_delta,
+        "plain_cost_saving": cost_saving,
+        "plain_value": value,
+        "cost_tradeoff": float(model["cost_tradeoff"]),
+        "threshold": float(model["threshold"]),
+        "model": {"id": model["id"], "version": model["version"]},
+    }
+
+
+def route_feature_values(
+    width: int,
+    height: int,
+    detections: list[dict[str, Any]],
+) -> dict[str, float]:
+    if width <= 0 or height <= 0:
+        raise ValueError("Route image dimensions must be positive")
+    page_area = width * height
+    normalized = []
+    for detection in detections:
+        category = str(detection.get("label") or detection.get("category") or "")
+        category = "code" if category == "algorithm" else category.replace("-", "_")
+        bbox = detection.get("box") or detection.get("bbox")
+        score = detection.get("score")
+        if (
+            not category
+            or not isinstance(bbox, (list, tuple))
+            or len(bbox) != 4
+            or type(score) not in (int, float)
+            or not math.isfinite(score)
+        ):
+            raise ValueError("Route proposals must contain category, bbox, and score")
+        try:
+            left, top, right, bottom = (float(value) for value in bbox)
+        except (TypeError, ValueError) as error:
+            raise ValueError("Route proposal bbox must be numeric") from error
+        if not all(math.isfinite(value) for value in (left, top, right, bottom)):
+            raise ValueError("Route proposal bbox must be finite")
+        raw_class_scores = detection.get("class_scores") or {}
+        if not isinstance(raw_class_scores, dict):
+            raise ValueError("Route proposal class_scores must be an object")
+        clean_class_scores = {}
+        for label, value in raw_class_scores.items():
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError("Route proposal class scores must be finite numbers")
+            clean_class_scores[str(label).replace("-", "_")] = float(value)
+        normalized.append(
+            {
+                "label": category,
+                "score": float(score),
+                "area_ratio": max(0.0, right - left)
+                * max(0.0, bottom - top)
+                / page_area,
+                "class_scores": clean_class_scores,
+            }
+        )
+    count = max(1, len(normalized))
+    values = {
+        "image_log1p_width": math.log1p(width),
+        "image_log1p_height": math.log1p(height),
+        "image_aspect_ratio": width / height,
+        "detections_per_megapixel": len(normalized) / max(1.0, page_area / 1_000_000),
+    }
+    for label in HERON_ROUTE_CLASSES:
+        selected = [item for item in normalized if item["label"] == label]
+        scores = [item["score"] for item in selected]
+        areas = [item["area_ratio"] for item in selected]
+        values[f"{label}.count_fraction"] = len(selected) / count
+        values[f"{label}.max_score"] = max(scores, default=0.0)
+        values[f"{label}.area_ratio_sum"] = sum(areas)
+        values[f"{label}.area_ratio_max"] = max(areas, default=0.0)
+    for label in HERON_ROUTE_CLASSES:
+        scores = [item["class_scores"].get(label, 0.0) for item in normalized]
+        values[f"{label}.class_score_mean"] = (
+            sum(scores) / len(scores) if scores else 0.0
+        )
+        values[f"{label}.class_score_max"] = max(scores, default=0.0)
+    return values
+
+
+def route_features(
+    width: int,
+    height: int,
+    detections: list[dict[str, Any]],
+    names: list[str],
+) -> list[float]:
+    if names != list(HERON_ROUTE_FEATURE_NAMES):
+        raise ValueError("Route feature names do not match the measured schema")
+    values = route_feature_values(width, height, detections)
+    return [values[name] for name in names]
+
+
 def _clamp_box(
     bbox: Sequence[float], width: int, height: int
 ) -> tuple[int, int, int, int] | None:
@@ -123,30 +358,38 @@ def _clamp_box(
 
 
 def _exclusive_form_indices(items: list[dict[str, Any]]) -> set[int]:
-    """Keep only form crops with no already-owned source pixels."""
-    kept = {
+    """Keep learned form crops as source evidence for structured refinement."""
+    return {
         index
         for index, item in enumerate(items)
-        if item["label"] not in {"form", "key_value_region", "document_index"}
+        if item["label"] not in {"key_value_region", "document_index"}
     }
-    occupied = [items[index]["box"] for index in kept]
-    forms = sorted(
-        (index for index, item in enumerate(items) if item["label"] == "form"),
-        key=lambda index: (
-            (items[index]["box"][2] - items[index]["box"][0])
-            * (items[index]["box"][3] - items[index]["box"][1])
-        ),
-    )
-    for index in forms:
-        left, top, right, bottom = items[index]["box"]
-        if any(
-            left < box[2] and box[0] < right and top < box[3] and box[1] < bottom
-            for box in occupied
-        ):
-            continue
-        kept.add(index)
-        occupied.append(items[index]["box"])
-    return kept
+
+
+def _route_detection(proposals: list[dict[str, Any]]) -> dict[str, Any]:
+    kept = _exclusive_form_indices(proposals)
+    raw = [
+        {
+            "label": item["label"],
+            "box": list(item["box"]),
+            "score": item["score"],
+            **{key: item[key] for key in ("query_id", "class_scores") if key in item},
+        }
+        for item in proposals
+    ]
+    layout = [
+        {
+            "category": "algorithm"
+            if item["label"] == "code"
+            else item["label"].replace("_", "-"),
+            "bbox": list(item["box"]),
+            "score": item["score"],
+            **{key: item[key] for key in ("query_id", "class_scores") if key in item},
+        }
+        for index, item in enumerate(proposals)
+        if index in kept
+    ]
+    return {"raw": raw, "layout": layout}
 
 
 def create_server(
@@ -158,11 +401,14 @@ def create_server(
     tokenizer: Any = None,
     detect_layout: Callable[[list[Image.Image]], list[list[dict[str, Any]]]]
     | None = None,
+    detect_route: Callable[[list[Image.Image]], list[dict[str, Any]]] | None = None,
     layout: dict[str, Any] | None = None,
     category_by_layout: dict[str, str] | None = None,
     max_request_bytes: int = MAX_REQUEST_BYTES,
     max_image_pixels: int = MAX_IMAGE_PIXELS,
     feature_config: dict[str, Any] | None = None,
+    route_model: dict[str, Any] | None = None,
+    extractor_metadata: dict[str, Any] | None = None,
 ) -> ThreadingHTTPServer:
     layout = dict(layout or {})
     category_by_layout = dict(category_by_layout or {})
@@ -170,6 +416,10 @@ def create_server(
     unavailable = threading.Event()
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("Falcon layout service must bind to loopback")
+    if route_model is not None and detect_route is None:
+        raise ValueError("A Falcon route model requires one-pass Heron route detection")
+    if route_model is not None and route_model["extractor"] != extractor_metadata:
+        raise ValueError("Falcon route model extractor does not match the service")
 
     @contextmanager
     def execute_engine():
@@ -201,6 +451,16 @@ def create_server(
                     "status": "unavailable" if unavailable.is_set() else "ready",
                     "pid": os.getpid(),
                     "model": model,
+                    **(
+                        {
+                            "routing_model": {
+                                "id": route_model["id"],
+                                "version": route_model["version"],
+                            }
+                        }
+                        if route_model is not None
+                        else {}
+                    ),
                 },
             )
 
@@ -218,32 +478,87 @@ def create_server(
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request"})
                 return
             want_page = bool(overrides.pop("page_text", False))
+            if route_model is not None and want_page:
+                image.close()
+                self._write_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "page_text_not_available_with_learned_routing"},
+                )
+                return
             cap = int(
                 {**layout, **overrides}.get("max_new_tokens") or FALCON_MAX_NEW_TOKENS
             )
             try:
                 options = {**layout, **overrides}
-                if detect_layout is not None:
-                    options["detections"] = detect_layout([image])
-                with execute_engine():
-                    elements = engine.generate_with_layout(
-                        images=[image], use_tqdm=False, **options
-                    )[0]
-                    # The same official model reading the whole page, used as the
-                    # completeness oracle: whatever the layout detector never proposed
-                    # as a region still shows up here.
-                    page_text = (
-                        engine.generate_plain(images=[image], use_tqdm=False)[0]
-                        if want_page
-                        else ""
-                    )
-                    # Retries re-read a crop of the still-open request image, so they
-                    # must run inside this block, ahead of the `finally` that closes it.
-                    built = [
-                        self._build_element(element, image, cap)
-                        for element in elements
-                        if element.get("bbox")
-                    ]
+                routing = None
+                if route_model is not None:
+                    with execute_engine():
+                        detections = detect_route([image])
+                        if not isinstance(detections, list) or len(detections) != 1:
+                            raise ValueError(
+                                "Heron must return one proposal list per page"
+                            )
+                        detection = detections[0]
+                        if (
+                            not isinstance(detection, dict)
+                            or not isinstance(detection.get("raw"), list)
+                            or not isinstance(detection.get("layout"), list)
+                        ):
+                            raise ValueError("Heron route detection is malformed")
+                        routing = _route_page(route_model, image, detection["raw"])
+                        if routing["action"] == "plain":
+                            reading = engine.generate_plain(
+                                images=[image], use_tqdm=False
+                            )[0]
+                            if not isinstance(reading, str) or not reading.strip():
+                                raise ValueError(
+                                    "Falcon plain decoder returned no text"
+                                )
+                            page_text = ""
+                            built = [
+                                {
+                                    "category": "page_text",
+                                    "bbox": [
+                                        0.0,
+                                        0.0,
+                                        float(image.width),
+                                        float(image.height),
+                                    ],
+                                    "text": reading,
+                                    "truncated": self._truncated(reading),
+                                    "looped": self._looped(reading, "text"),
+                                    "generation": getattr(reading, "generation", {}),
+                                }
+                            ]
+                        else:
+                            options["detections"] = [detection["layout"]]
+                            elements = engine.generate_with_layout(
+                                images=[image], use_tqdm=False, **options
+                            )[0]
+                            page_text = ""
+                            built = [
+                                self._build_element(element, image, cap)
+                                for element in elements
+                                if element.get("bbox")
+                            ]
+                else:
+                    if detect_layout is not None:
+                        options["detections"] = detect_layout([image])
+                    with execute_engine():
+                        elements = engine.generate_with_layout(
+                            images=[image], use_tqdm=False, **options
+                        )[0]
+                        # Optional comparison path retained for existing callers.
+                        page_text = (
+                            engine.generate_plain(images=[image], use_tqdm=False)[0]
+                            if want_page
+                            else ""
+                        )
+                        built = [
+                            self._build_element(element, image, cap)
+                            for element in elements
+                            if element.get("bbox")
+                        ]
             except Exception:
                 LOGGER.exception("Falcon layout read failed")
                 self._write_json(
@@ -261,7 +576,12 @@ def create_server(
                 image.close()
             self._write_json(
                 HTTPStatus.OK,
-                {"elements": built, "page_text": page_text, "model": model},
+                {
+                    "elements": built,
+                    "page_text": page_text,
+                    "model": model,
+                    **({"routing": routing} if routing is not None else {}),
+                },
             )
 
         def _generate_crops(self) -> None:
@@ -757,6 +1077,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(
             f"--max-image-size must be a multiple of 16 up to {FALCON_MAX_IMAGE_SIZE}"
         )
+    route_model = load_route_model(args.route_model) if args.route_model else None
 
     from falcon_perception import (
         load_and_prepare_model,
@@ -824,28 +1145,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return
 
         def run_layout_detection(self, images, threshold=0.5):
-            batches = []
-            for image in images:
-                proposals = self.layout_detector.detect_elements(image)
-                kept = _exclusive_form_indices(proposals)
-                detections = [
-                    {
-                        "category": "algorithm"
-                        if item["label"] == "code"
-                        else item["label"].replace("_", "-"),
-                        "bbox": list(item["box"]),
-                        "score": item["score"],
-                        **{
-                            key: item[key]
-                            for key in ("query_id", "class_scores")
-                            if key in item
-                        },
-                    }
-                    for index, item in enumerate(proposals)
-                    if index in kept
-                ]
-                batches.append(detections)
-            return batches
+            return [item["layout"] for item in self.run_route_detection(images)]
+
+        def run_route_detection(self, images):
+            return [
+                _route_detection(self.layout_detector.detect_elements(image))
+                for image in images
+            ]
 
         @staticmethod
         def build_crop_sequences(
@@ -1012,6 +1318,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     engine.layout_detector = HeronTableDetector(
         model_id=args.layout_model,
+        revision=args.layout_model_revision,
         device=args.layout_device,
         score_threshold=args.layout_threshold,
     )
@@ -1023,6 +1330,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         detect_layout=engine.run_layout_detection
         if args.layout_device == "cpu"
         else None,
+        detect_route=engine.run_route_detection if route_model is not None else None,
         layout={
             "layout_threshold": args.layout_threshold,
             "max_new_tokens": args.max_new_tokens,
@@ -1043,11 +1351,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             "inference_repository_revision": FALCON_INFERENCE_REPOSITORY_REVISION,
             "engine": "falcon-perception ocr_layout",
             "layout_model": args.layout_model,
+            "layout_model_revision": args.layout_model_revision,
             "origin": "TII, UAE",
             "license": "Apache-2.0",
             "dtype": args.dtype,
             "score_meaning": "layout detection confidence; decoder probabilities in generation",
         },
+        route_model=route_model,
+        extractor_metadata={
+            "version": ROUTE_EXTRACTOR_VERSION,
+            "heron_model_id": args.layout_model,
+            "heron_model_revision": args.layout_model_revision,
+            "layout_score_threshold": args.layout_threshold,
+        }
+        if route_model is not None
+        else None,
     )
     try:
         server.serve_forever(poll_interval=0.5)
@@ -1083,8 +1401,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-new-tokens", type=_positive_int, default=FALCON_MAX_NEW_TOKENS
     )
-    parser.add_argument("--layout-model", default="ds4sd/docling-layout-heron-101")
+    parser.add_argument("--layout-model", default=DEFAULT_MODEL_ID)
+    parser.add_argument(
+        "--layout-model-revision",
+        type=_model_revision,
+        default=DEFAULT_MODEL_REVISION,
+    )
     parser.add_argument("--layout-device", default="cpu")
+    parser.add_argument(
+        "--route-model",
+        type=os.fspath,
+        help="Validated linear JSON router for layout versus native full-page Falcon",
+    )
     parser.add_argument(
         "--max-image-size", type=_positive_int, default=FALCON_MAX_IMAGE_SIZE
     )

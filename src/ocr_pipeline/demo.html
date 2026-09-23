@@ -2973,7 +2973,7 @@
       );
       const included = orderedRegions(page.regions).filter((region) => {
         const role = region.structure?.role;
-        if (["table_source", "figure_source", "coverage_risk", "table_candidate"].includes(role)) return false;
+        if (["table_source", "figure_source", "form_source", "coverage_risk", "table_candidate"].includes(role)) return false;
         if (["coverage_risk", "table_candidate"].includes(region.kind)) return false;
         return evidenceIds.has(region.id)
           || semanticKind(region) === "control"
@@ -3583,7 +3583,7 @@
       const role = region.structure?.role;
       // Layout blocks group other regions; drawing them boxed every line twice.
       if (role === "layout_block") return false;
-      if (["table_source", "figure_source", "table_candidate", "coverage_risk", "presentation_challenger"].includes(role)) return false;
+      if (["table_source", "figure_source", "form_source", "table_candidate", "coverage_risk", "presentation_challenger"].includes(role)) return false;
       if (["table_candidate", "coverage_risk", "layout_block"].includes(region.kind)) return false;
       if (semanticKind(region) === "table") {
         return Array.isArray(region.structure?.cells) && region.structure.cells.length > 0;

@@ -28,6 +28,7 @@ from PIL import Image, ImageDraw, ImageFont
 from .contracts import (
     BoundingBox,
     DocumentResult,
+    Failure,
     PageResult,
     RegionStage,
     TextAlternative,
@@ -530,6 +531,52 @@ def _katex_response(assets: dict[str, Path], asset_name: str, media_type: str) -
     return FileResponse(asset, media_type=media_type)
 
 
+def _apply_cross_page_tables(
+    document: DocumentResult,
+    page_paths: list[Path],
+    stage: CrossPageTableStage,
+) -> tuple[dict[str, object], float]:
+    started = time.perf_counter()
+    execution: dict[str, object] = {
+        "page_number": None,
+        "stage": stage.name,
+        "status": "fired",
+        "input_regions": sum(len(page.regions) for page in document.pages),
+        "output_regions": sum(len(page.regions) for page in document.pages),
+        "added_regions": 0,
+        "removed_regions": 0,
+        "modified_regions": 0,
+        "added_artifacts": 0,
+    }
+    try:
+        document.table_continuations = stage.apply(page_paths, document.pages)
+        execution["added_artifacts"] = len(document.table_continuations)
+        if document.table_continuations:
+            execution["status"] = "productive"
+    except ReaderError as error:
+        document.table_continuations = []
+        execution["status"] = "failed"
+        execution["failure_code"] = error.code
+        document.failures.append(
+            Failure(
+                id=f"failure-{len(document.failures) + 1}",
+                stage=stage.name,
+                code=error.code,
+                message=str(error),
+            )
+        )
+        for page in document.pages:
+            page.route = "review"
+        document.status = (
+            "partial"
+            if any(page.text.value.strip() for page in document.pages)
+            else "failed"
+        )
+    elapsed = time.perf_counter() - started
+    execution["elapsed_seconds"] = elapsed
+    return execution, elapsed
+
+
 def create_app(
     reader: LocalReader | None = None,
     *,
@@ -752,7 +799,9 @@ def create_app(
                     source,
                     active_reader,
                     stages=active_stages,
-                    cross_page_table_stage=cross_page_table_stage,
+                    cross_page_table_stage=(
+                        None if crop_refiner is not None else cross_page_table_stage
+                    ),
                     timings=pipeline_timings,
                     stage_execution=stage_execution,
                     page_execution=page_execution,
@@ -792,6 +841,16 @@ def create_app(
                                 ),
                             }
                         )
+                if crop_refiner is not None and cross_page_table_stage is not None:
+                    execution, continuation_seconds = _apply_cross_page_tables(
+                        document,
+                        preview_paths,
+                        cross_page_table_stage,
+                    )
+                    stage_execution.append(execution)
+                    pipeline_timings[f"stage.{cross_page_table_stage.name}"] = (
+                        continuation_seconds
+                    )
                 presentations = {}
                 if not defer_presentation:
                     presentation_started = time.perf_counter()
@@ -2710,7 +2769,13 @@ def _presentation_fallback_reason(
         return "control_evidence_is_authoritative"
     structure = source.structure if isinstance(source.structure, dict) else {}
     role = str(structure.get("role", ""))
-    if role in {"coverage_risk", "table_candidate", "table_source", "figure_source"}:
+    if role in {
+        "coverage_risk",
+        "table_candidate",
+        "table_source",
+        "figure_source",
+        "form_source",
+    }:
         return "source_is_not_renderable"
     owner_id = structure.get("layout_owner_id")
     if isinstance(owner_id, str) and owner_id in {
@@ -3148,7 +3213,7 @@ def _page_uncertainty(page: dict[str, Any]) -> dict[str, Any]:
             reason = handwriting_review.get("reason")
             if isinstance(reason, str) and reason:
                 risk_reasons.append(reason)
-        if structure.get("role") in {"table_source", "figure_source"}:
+        if structure.get("role") in {"table_source", "figure_source", "form_source"}:
             continue
 
         unresolved += region["resolution"] == "unreadable"
@@ -3560,6 +3625,7 @@ def _presentation_canonical_regions(page: dict[str, Any]) -> list[dict[str, Any]
         if role in {
             "table_source",
             "figure_source",
+            "form_source",
             "coverage_risk",
             "table_candidate",
         }:

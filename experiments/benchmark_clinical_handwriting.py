@@ -26,7 +26,7 @@ from markdown_it import MarkdownIt
 from PIL import Image
 import requests
 
-from ocr_pipeline.markdown_refinement import refine_page, _table_reader
+from ocr_pipeline.markdown_refinement import refine_page
 from ocr_pipeline.openrouter import (
     QWEN_37_FLASH_MODEL,
     _call_openrouter,
@@ -114,7 +114,6 @@ def run(
                     if not labeled_pages_only or (source.stem, i + 1) in labeled_pages
                 )
         report["expected_pages"] = len(jobs)
-        table_reader = _table_reader()
 
         # Complete the first real page before submitting the rest of the dataset.
         def save(record):
@@ -134,7 +133,6 @@ def run(
             output,
             pipeline_url,
             transport,
-            table_reader,
             zero_data_retention,
             dpi=dpi,
             arms=arms,
@@ -159,7 +157,6 @@ def run(
                     output,
                     pipeline_url,
                     transport,
-                    table_reader,
                     zero_data_retention,
                     dpi=dpi,
                     arms=arms,
@@ -191,7 +188,6 @@ def recover_failed_pipeline(sources, output, recovery, pipeline_url):
     ]
     annotations = json.loads((output / "annotations.json").read_text())
     recovery.mkdir()
-    table_reader = _table_reader()
 
     def recover(page):
         return run_page(
@@ -202,7 +198,6 @@ def recover_failed_pipeline(sources, output, recovery, pipeline_url):
             recovery,
             pipeline_url,
             _default_transport,
-            table_reader,
             False,
             arms=("pipeline",),
         )
@@ -245,9 +240,6 @@ def recover_failed_pipeline(sources, output, recovery, pipeline_url):
 
 def replay_saved_refinements(source, destination):
     """Replay identical saved requests/responses to isolate validation changes."""
-    from ocr_pipeline.contracts import BoundingBox
-    from ocr_pipeline.tables import TableCell
-
     report = json.loads((source / "report.json").read_text())
     if report["status"] != "complete":
         raise ValueError("Finish the baseline before replaying it")
@@ -259,25 +251,6 @@ def replay_saved_refinements(source, destination):
         if not saved.exists() or not (directory / "pipeline-response.json").exists():
             continue
         old = json.loads(saved.read_text())
-        grids = iter(old.get("table_grids", {}).values())
-
-        class SavedStructure:
-            def predict(self, panel):
-                grid = next(grids)
-                assert (panel.width, panel.height) == (grid["width"], grid["height"])
-                return [
-                    TableCell(
-                        BoundingBox(**c["bounding_box"]),
-                        tuple(c["row_nums"]),
-                        tuple(c["column_nums"]),
-                        c.get("column_header", False),
-                        c.get("projected_row_header", False),
-                    )
-                    for c in grid["cells"]
-                ]
-
-            def model_provenance(self):
-                return old.get("table_structure_model", {})
 
         def transport(request, timeout):
             expected = json.loads((directory / "pipeline-request.json").read_text())
@@ -311,7 +284,6 @@ def replay_saved_refinements(source, destination):
             (directory / "base.md").read_text(),
             model=QWEN_37_FLASH_MODEL,
             zero_data_retention=old.get("zero_data_retention", True),
-            table_reader=SavedStructure(),
             transport=transport,
         )
         write_json(directory / "repaired-refinement.json", result)
@@ -407,7 +379,6 @@ def run_page(
     output,
     pipeline_url,
     transport,
-    table_reader,
     zero_data_retention=True,
     *,
     arms=("pipeline", "full-page"),

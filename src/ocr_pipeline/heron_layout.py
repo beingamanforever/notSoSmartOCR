@@ -19,6 +19,7 @@ from .contracts import BoundingBox
 from .providers import ReaderError
 
 DEFAULT_MODEL_ID = "ds4sd/docling-layout-heron-101"
+DEFAULT_MODEL_REVISION = "2e4993cf6bb211112084a2f80938f26138008917"
 MODEL_ARCHITECTURE = "RTDetrV2ForObjectDetection"
 MODEL_LICENSE = "apache-2.0"
 MODEL_ORIGIN = "IBM Research"
@@ -40,6 +41,7 @@ class HeronTableDetector:
         self,
         model_id: str = DEFAULT_MODEL_ID,
         *,
+        revision: str | None = DEFAULT_MODEL_REVISION,
         device: str = "cuda",
         score_threshold: float = 0.5,
         detector: Detector | None = None,
@@ -47,6 +49,7 @@ class HeronTableDetector:
         if not 0 <= score_threshold <= 1:
             raise ValueError("score_threshold must be from 0 to 1")
         self.model_id = model_id
+        self.revision = revision
         self.device = device
         self.score_threshold = score_threshold
         self._detector = detector
@@ -92,6 +95,7 @@ class HeronTableDetector:
     def model_provenance(self) -> dict[str, Any]:
         return {
             "id": self.model_id,
+            "revision": self.revision,
             "architecture": MODEL_ARCHITECTURE,
             "license": MODEL_LICENSE,
             "origin": MODEL_ORIGIN,
@@ -105,8 +109,12 @@ class HeronTableDetector:
             import torch
             from transformers import AutoImageProcessor, AutoModelForObjectDetection
 
-            processor = AutoImageProcessor.from_pretrained(self.model_id)
-            model = AutoModelForObjectDetection.from_pretrained(self.model_id)
+            processor = AutoImageProcessor.from_pretrained(
+                self.model_id, revision=self.revision
+            )
+            model = AutoModelForObjectDetection.from_pretrained(
+                self.model_id, revision=self.revision
+            )
             model.to(self.device)
             model.eval()
             id2label = model.config.id2label
