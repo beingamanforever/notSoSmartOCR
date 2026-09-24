@@ -14,6 +14,7 @@ from typing import Any
 from PIL import Image, ImageDraw
 
 from .contracts import BoundingBox, DocumentResult, Failure, TextAlternative, TextRegion
+from .falcon_layout import _checkbox_label
 from .openrouter import (
     QWEN_FLASH_MODEL,
     QWEN_37_FLASH_MODEL,
@@ -649,8 +650,12 @@ def refine_page(
         if region["id"] in table_replacements
         else {
             **region,
-            "kind": "text",
-            "text": replacements[region["id"]],
+            "kind": "checkbox" if region["kind"] == "checkbox" else "text",
+            "text": (
+                _checkbox_label(replacements[region["id"]])
+                if region["kind"] == "checkbox"
+                else replacements[region["id"]]
+            ),
             "confidence": None,
             "provider": model,
             "resolution": "resolved",
@@ -669,12 +674,23 @@ def refine_page(
                     "decision_state": "superseded",
                 },
             ],
-            "structure": {
-                k: v
-                for k, v in (region.get("structure") or {}).items()
-                if k
-                in {"layout_owner_id", "presentation_rank", "presentation_order_method"}
-            },
+            "structure": (
+                {
+                    **(region.get("structure") or {}),
+                    "label": _checkbox_label(replacements[region["id"]]),
+                }
+                if region["kind"] == "checkbox"
+                else {
+                    k: v
+                    for k, v in (region.get("structure") or {}).items()
+                    if k
+                    in {
+                        "layout_owner_id",
+                        "presentation_rank",
+                        "presentation_order_method",
+                    }
+                }
+            ),
         }
         if region["id"] in replacements
         else {

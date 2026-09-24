@@ -14,6 +14,11 @@ INLINE_MAX_GAP_HEIGHTS = 3
 UNREADABLE_HANDWRITING = "[unreadable handwriting]"
 MARK_GLYPHS = ("✓", "✗", "∅", "◯")
 CONTROL_SYMBOLS = ("[x]", "[ ]", "[?]", *MARK_GLYPHS)
+NATIVE_CONTROL_METHODS = {
+    "learned_checkbox_detection",
+    "qwen_crop_refinement",
+    "qwen_form_option_extraction",
+}
 
 
 def render_evidence(regions: list[TextRegion]) -> EvidenceText:
@@ -43,10 +48,7 @@ def render_evidence(regions: list[TextRegion]) -> EvidenceText:
 
 def _plain_text(region: TextRegion) -> str:
     if region.kind == "checkbox":
-        if (region.text_provenance or {}).get("method") in {
-            "learned_checkbox_detection",
-            "qwen_form_option_extraction",
-        }:
+        if (region.text_provenance or {}).get("method") in NATIVE_CONTROL_METHODS:
             return _native_control_text(
                 region.text if region.resolution == "resolved" else "[unresolved text]",
                 region.structure or {},
@@ -138,10 +140,7 @@ def _same_inline_line(first: dict[str, Any], second: dict[str, Any]) -> bool:
 
 
 def _inline_text(region: dict[str, Any]) -> bool:
-    if (region.get("text_provenance") or {}).get("method") in {
-        "learned_checkbox_detection",
-        "qwen_form_option_extraction",
-    }:
+    if _native_control(region):
         # Learned control boxes can contain the option label as well as the mark.
         return False
     kind = _kind(region).casefold()
@@ -274,13 +273,12 @@ def _markdown_block(
             )
         else:
             block = text
+    elif _structure(region).get("role") == "layout_block":
+        block = text
     elif kind == "control":
         # Reached only when the control has no row to sit in: a control whose label
         # belongs to a layout block is drawn inside that row instead, where it was marked.
-        if (region.get("text_provenance") or {}).get("method") in {
-            "learned_checkbox_detection",
-            "qwen_form_option_extraction",
-        }:
+        if _native_control(region):
             block = f"- {_display_text(region)}"
         elif resolution == "resolved":
             block = f"- {text}" if text else ""
@@ -461,6 +459,14 @@ def _semantic_kind(region: dict[str, Any]) -> str:
     return "text"
 
 
+def _native_control(region: dict[str, Any]) -> bool:
+    return (
+        _semantic_kind(region) == "control"
+        and (region.get("text_provenance") or {}).get("method")
+        in NATIVE_CONTROL_METHODS
+    )
+
+
 def _formula_math_ready(region: dict[str, Any]) -> bool:
     return _structure(region).get("formula_recognition") not in {
         "heuristic",
@@ -503,11 +509,25 @@ def _canonical_layout_text(
             if source is None:
                 continue
             left = _left_edge(source)
+            linked_controls = [
+                control
+                for control in controls.get(evidence_id, [])
+                if _id(control) not in seen
+            ]
+            if any(_native_control(control) for control in linked_controls):
+                for control in linked_controls:
+                    seen.add(_id(control))
+                    value = (
+                        _display_text(control)
+                        if _native_control(control)
+                        else _control_mark_text(control)
+                    )
+                    if value:
+                        placed.append((_left_edge(control), value))
+                continue
             if value := _display_text(source):
                 placed.append((left, value))
-            for control in controls.get(evidence_id, []):
-                if _id(control) in seen:
-                    continue
+            for control in linked_controls:
                 seen.add(_id(control))
                 if mark := _control_mark_text(control):
                     placed.append((_left_edge(control), mark))
@@ -545,10 +565,7 @@ def _text(region: dict[str, Any]) -> str:
 
 
 def _display_text(region: dict[str, Any]) -> str:
-    if (region.get("text_provenance") or {}).get("method") in {
-        "learned_checkbox_detection",
-        "qwen_form_option_extraction",
-    }:
+    if _native_control(region):
         return _native_control_text(
             _text(region).strip()
             if _resolution(region) == "resolved"

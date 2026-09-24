@@ -271,6 +271,119 @@ def test_form_source_without_structured_controls_stays_unresolved(
     assert "no structured form controls" in result["validation_errors"][0]
 
 
+def test_checkbox_label_refinement_preserves_control_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    image = tmp_path / "checkbox.png"
+    Image.new("RGB", (200, 100), "white").save(image)
+    page = {
+        "page_number": 1,
+        "width": 200,
+        "height": 100,
+        "regions": [
+            {
+                "id": "reply",
+                "kind": "checkbox",
+                "text": "",
+                "resolution": "unreadable",
+                "bounding_box": {"left": 20, "top": 20, "right": 180, "bottom": 80},
+                "structure": {"label": "", "state": "unselected"},
+            }
+        ],
+    }
+
+    def transport(request, timeout):
+        payload = json.loads(request.data)
+        content = {"crops": [{"region_id": "crop-1", "markdown": "☐ Please Reply"}]}
+        return (
+            200,
+            {},
+            json.dumps(
+                {
+                    "model": payload["model"],
+                    "choices": [
+                        {
+                            "message": {"content": json.dumps(content)},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 20, "completion_tokens": 5},
+                }
+            ).encode(),
+        )
+
+    result = refine_page(image, page, "", transport=transport)
+    refined = result["refined_regions"][0]
+
+    assert refined["kind"] == "checkbox"
+    assert refined["text"] == "Please Reply"
+    assert refined["structure"] == {
+        "label": "Please Reply",
+        "state": "unselected",
+    }
+    assert "[ ] Please Reply" in result["content"]["markdown"]
+
+
+def test_qwen_text_refinement_does_not_render_as_a_control():
+    region = {
+        "id": "note",
+        "kind": "handwriting",
+        "text": "Recovered note",
+        "reading_order": 1,
+        "resolution": "resolved",
+        "text_provenance": {"method": "qwen_crop_refinement"},
+    }
+
+    assert render_page_markdown([region], ["note"]) == "Recovered note"
+
+
+@pytest.mark.parametrize("block_type", ["form_row", "spatial_row"])
+@pytest.mark.parametrize(
+    ("state", "marker"),
+    [("selected", "[x]"), ("unselected", "[ ]")],
+)
+def test_refined_control_replaces_its_stale_owned_label(block_type, state, marker):
+    row = {
+        "id": "row",
+        "kind": "layout_block",
+        "text": "Old label",
+        "reading_order": 1,
+        "resolution": "resolved",
+        "structure": {
+            "role": "layout_block",
+            "block_type": block_type,
+            "fields": [{"evidence_ids": ["label"]}],
+        },
+    }
+    label = {
+        "id": "label",
+        "kind": "text",
+        "text": "Old label",
+        "reading_order": 2,
+        "resolution": "resolved",
+        "bounding_box": {"left": 20, "top": 20, "right": 100, "bottom": 40},
+        "structure": {"layout_owner_id": "row"},
+    }
+    control = {
+        "id": "control",
+        "kind": "checkbox",
+        "text": "Corrected label",
+        "reading_order": 3,
+        "resolution": "resolved",
+        "bounding_box": {"left": 5, "top": 20, "right": 15, "bottom": 40},
+        "text_provenance": {"method": "qwen_crop_refinement"},
+        "structure": {
+            "state": state,
+            "label": "Corrected label",
+            "label_evidence_ids": ["label"],
+        },
+    }
+
+    assert (
+        render_page_markdown([row, label, control], ["row", "label"])
+        == f"{marker} Corrected label"
+    )
+
+
 def test_invalid_falcon_table_does_not_discard_valid_recognition(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
     image = tmp_path / "page.png"
@@ -349,6 +462,7 @@ def test_invalid_falcon_table_does_not_discard_valid_recognition(tmp_path, monke
     result = refine_page(image, page, "base output", transport=transport)
     assert result["status"] == "partial"
     assert "dose 5 mg" in result["content"]["markdown"]
+    assert "[?] dose 5 mg" not in result["content"]["markdown"]
     assert "wrong grid" not in result["content"]["markdown"]
     assert result["accepted_crop_ids"] == ["crop-1"]
     assert result["rejected_crop_ids"] == ["crop-2"]

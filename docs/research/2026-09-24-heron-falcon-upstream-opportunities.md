@@ -58,6 +58,35 @@ Heron is a 17-class RT-DETRv2-R101 detector with selected-checkbox, unselected-c
 
 Sources: [Heron report](https://arxiv.org/abs/2509.11720), [Heron-101 model card](https://huggingface.co/docling-project/docling-layout-heron-101), [fine-tuning issue 3016](https://github.com/docling-project/docling/issues/3016).
 
+### 5. Downstream-quality routing and owned correction
+
+Three routing papers sharpen the target for the next phase:
+
+| Stage | Source and inspected implementation | Transfer to this pipeline |
+|---|---|---|
+| Pre-routing | [VL-RouterBench](https://arxiv.org/abs/2512.23562), commit `f5a41ce8`, `tools/build_matrices.py`, `routers/linear/train_and_eval.py`, and `routers/utils/fusion.py` | Build the paired quality and cost matrix first, keep the oracle as a ceiling, then train the smallest source-grouped visual router. The current dual Ridge experiment follows this structure but lacks enough independent groups for activation. |
+| Post-routing | [ViLU](https://arxiv.org/abs/2507.07620), commit `e4bf5723`, `vilu/models/vilu_attn.py`, `vilu/engine/trainer.py`, and `vilu/losses/bce.py` | Predict actual OCR failure from visual evidence and emitted text together. Raw decoder confidence is only one feature. Train against corrected and uncorrected outcomes, then calibrate on separate source groups. |
+| Crop selection | [CropVLM](https://arxiv.org/abs/2511.19820), commit `9c9cb913`, `grpo.py` and `trainer.py` | Optimize the crop for downstream reader improvement. The paper reports that box IoU can be a poor proxy for final task quality, so this pipeline should label crops by the change in unique page reconstruction instead of overlap alone. |
+
+These are proposed transfers, not local gains. The production candidate does not add the repositories or their model stacks. It reuses Falcon and Heron evidence and trains compact heads only after paired outcomes exist.
+
+## Structured form ownership result
+
+The current selected eight-form run improves substantially over the older Falcon adapter, while remaining below the historical GPT output:
+
+| Saved output | Case-macro state accuracy | Missing controls |
+|---|---:|---:|
+| Structured selective Qwen, saved evaluation | 66.74% | 286 |
+| Historical full-page Qwen | 67.78% | 238 |
+| Historical GPT-5.4-mini | 71.77% | 192 |
+| Older Falcon adapter | 38.05% | 475 |
+
+The current adapter replay is 66.53% with 285 missing controls because two ambiguous duplicate-label assignments differ from the saved evaluation. The eight pages were used during development, so neither number is an untouched estimate. Historical SmartOCR has no submitted predictions for these eight cases; its zero is missing baseline coverage and is not a quality comparison.
+
+Manual review found a shared production bug: a valid Qwen correction to an existing checkbox label converted the region into plain text and discarded the physical control state. The repair preserves checkbox kind, state, structure, provenance, and Markdown rendering. It fixes canonical output integrity but does not change the saved aggregate because a second form extraction already recovered that label.
+
+An offline conflict-policy ablation compared keeping Falcon state, promoting every spatially aligned Qwen state, promoting only same-label states, and marking conflicts unresolved. Promotion improved case macro by only 0.12 percentage points on these eight development forms. It also included one spatial collision between different labels. That evidence is too weak to replace the conservative policy. A learned post-router needs more source-grouped conflict outcomes.
+
 ## Rejected defaults
 
 - Always-full-page Falcon: 33/146 with three failures, below the 35/146 layout route.
@@ -72,4 +101,4 @@ Adopt a change only when a source-grouped, failure-inclusive comparison shows a 
 
 ## Tool record
 
-Jina Reader was used to inspect the official issue and pull-request pages above. Jev was attempted for a bounded public-evidence choice, but its MCP process did not have `OPENROUTER_API_KEY`, so it returned no decision and did not influence the ranking.
+Jina Reader was used to inspect the official papers, issue, and pull-request pages above. The canonical routing repositories were inspected at the pinned commits listed in the transfer table. Search stopped at depth 2 because the next sources repeated the same three decisions: paired quality-cost labels, visual-plus-text failure prediction, and downstream-quality crop rewards. Jev was attempted for a bounded public-evidence choice, but its MCP process did not have `OPENROUTER_API_KEY`, so it returned no decision and did not influence the ranking.
