@@ -2169,7 +2169,7 @@
             id: entry ? `${region.id}-word-${entry.index + 1}` : region.id,
             provider: nativeScores ? region.provider : entry ? region.text_provenance?.geometry_provider : region.provider,
             scope: entry ? "word" : nativeScores ? "word score; region location" : confidenceScope(region),
-            confidenceKind: nativeScores ? "Decoder token score" : confidenceKind(region)
+            confidenceKind: nativeScores ? "Decoder token score" : entry ? "Geometry recognition score" : confidenceKind(region)
           });
           parent.append(marker);
         });
@@ -2216,7 +2216,7 @@
 
     function confidenceKind(region) {
       if (region?.text_provenance?.generation?.token_score !== undefined) return "Decoder token score";
-      if (region?.text_provenance?.method === "learned_checkbox_detection") return "Recognition score";
+      if (["learned_checkbox_detection", "decoded_ballot_glyph_promotion"].includes(region?.text_provenance?.method)) return "Recognition score";
       const role = region?.structure?.role;
       if (role === "table" && validConfidence(region?.structure?.detection_confidence)) {
         return "Detection score";
@@ -3179,7 +3179,7 @@
       block.dataset.resolution = region.resolution || "resolved";
       block.tabIndex = 0;
       block.setAttribute("aria-describedby", "confidence-inspector");
-      const native = region.text_provenance?.method === "learned_checkbox_detection";
+      const native = ["learned_checkbox_detection", "decoded_ballot_glyph_promotion"].includes(region.text_provenance?.method);
       const state = region.structure?.state || "ambiguous";
       const chip = document.createElement("span");
       chip.className = "control-state";

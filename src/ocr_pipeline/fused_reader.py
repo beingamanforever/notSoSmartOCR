@@ -105,7 +105,12 @@ def fuse(
     claimed: set[int] = set()
     fused = []
     for region in regions:
-        if region.kind in {"figure", "checkbox"}:
+        promoted_control = (region.text_provenance or {}).get(
+            "method"
+        ) == "decoded_ballot_glyph_promotion"
+        if region.kind == "figure" or (
+            region.kind == "checkbox" and not promoted_control
+        ):
             fused.append(region)
             continue
         inside = [
@@ -118,7 +123,8 @@ def fuse(
         claimed_words = [words[index] for index in inside]
         enriched = _with_geometry(region, claimed_words)
         fused.append(enriched)
-        fused.extend(_underread_children(enriched, claimed_words))
+        if not promoted_control:
+            fused.extend(_underread_children(enriched, claimed_words))
     fused.extend(
         _uncovered_regions(
             [word for index, word in enumerate(words) if index not in claimed],
@@ -147,11 +153,25 @@ def _with_geometry(
     # certify a different reader's characters, especially digits and punctuation.
     recognition_text = " ".join(word.text for word in words)
     agreement = " ".join(region.text.split()) == " ".join(recognition_text.split())
+    native = (provenance.get("generation") or {}).get("token_score")
+    confidence = (
+        native
+        if native is not None
+        else fmean(scores)
+        if scores and agreement
+        else None
+    )
     provenance.update(
         {
             "geometry_provider": words[0].provider,
             "word_count": len(words),
-            "confidence_meaning": "recognition, from the word reader",
+            "confidence_meaning": (
+                "decoder token score, from the text reader"
+                if native is not None
+                else "recognition, from the word reader"
+                if confidence is not None
+                else "unavailable for the region text"
+            ),
             "recognition_confidence_min": min(scores) if scores else None,
             "recognition_text": recognition_text,
             "recognition_confidence_mean": fmean(scores) if scores else None,
@@ -168,11 +188,7 @@ def _with_geometry(
     ]
     return replace(
         region,
-        confidence=(provenance.get("generation") or {}).get("token_score")
-        if (provenance.get("generation") or {}).get("token_score") is not None
-        else fmean(scores)
-        if scores and agreement
-        else None,
+        confidence=confidence,
         text_provenance=provenance,
         structure=structure,
     )

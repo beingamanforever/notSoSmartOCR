@@ -15,6 +15,7 @@ UNREADABLE_HANDWRITING = "[unreadable handwriting]"
 MARK_GLYPHS = ("✓", "✗", "∅", "◯")
 CONTROL_SYMBOLS = ("[x]", "[ ]", "[?]", *MARK_GLYPHS)
 NATIVE_CONTROL_METHODS = {
+    "decoded_ballot_glyph_promotion",
     "learned_checkbox_detection",
     "qwen_crop_refinement",
     "qwen_form_option_extraction",

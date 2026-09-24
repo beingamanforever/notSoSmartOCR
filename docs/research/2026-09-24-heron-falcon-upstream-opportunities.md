@@ -101,6 +101,25 @@ Manual review found a shared production bug: a valid Qwen correction to an exist
 
 An offline conflict-policy ablation compared keeping Falcon state, promoting every spatially aligned Qwen state, promoting only same-label states, and marking conflicts unresolved. Promotion improved case macro by only 0.12 percentage points on these eight development forms. It also included one spatial collision between different labels. That evidence is too weak to replace the conservative policy. A learned post-router needs more source-grouped conflict outcomes.
 
+### Decoded ballot controls
+
+Falcon already decoded many form rows with an explicit leading ballot glyph, but the adapter kept those rows as plain text. This discarded known control state before fusion and made Qwen recover it again. The repair promotes only a row with exactly one leading ballot glyph and a nonempty label. Rows containing several controls remain unresolved groups because one region box cannot establish separate physical ownership.
+
+The representation now preserves the Falcon bbox, raw decoder text, generation evidence, and recognition method. Falcon/geometry-reader fusion claims the words inside the promoted control once, so it cannot emit the same label again as uncovered text. The UI and export distinguish Falcon decoder confidence from geometry-reader recognition confidence.
+
+A matched replay on the same eight saved page outputs isolates this change from hosted-model variation:
+
+| Current adapter replay | Case-macro state accuracy | Missing controls | Checked F1 |
+|---|---:|---:|---:|
+| Before promotion | 61.27% | 6,194 | 4.64% |
+| After promotion | 62.13% | 6,178 | 4.76% |
+
+No replayed case regressed. The largest change was form-000079, from 26.15% to 33.03%, with missing controls falling from 157 to 142. These are development replays and do not replace the separately saved 66.53% adapter result above.
+
+A new live run showed why Qwen output completeness must remain explicit. Form-000078 improved from 51.61% to 53.92%, but form-000079 fell from 26.15% to 18.35%. The new form-000079 Qwen call returned 28 controls for the same six crops where the earlier saved call returned 104. It finished successfully and passed the JSON schema, so transport success did not imply complete form recovery. The lower live aggregate is reported as an unpaired hosted-output regression, not attributed to the deterministic promotion. A learned or validated targeted control-group reread remains required before claiming a live form gain.
+
+This follows the inspected CropVLM result that downstream task improvement matters more than crop overlap. The next crop-policy experiment should route unresolved multi-control rows as owned local regions rather than repeatedly asking one page-scale form crop to enumerate every option. It requires paired outputs and a separate calibration split before activation.
+
 ## Rejected defaults
 
 - Always-full-page Falcon: 33/146 with three failures, below the 35/146 layout route.

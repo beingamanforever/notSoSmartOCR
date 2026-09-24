@@ -47,6 +47,8 @@ TABLE_TEXT_BLOCK_TAGS = frozenset(
 HEADING = re.compile(r"^\s*(#{1,6})\s+(.*)$")
 # Only paired asterisks: a lone one is a real footnote mark on many clinical forms.
 EMPHASIS = re.compile(r"\*\*(.+?)\*\*")
+DECODED_BALLOT_MARK = re.compile(r"\[[xX ?]\]|[☐☑☒✓✔✗✘□■]")
+SELECTED_BALLOTS = frozenset({"[x]", "☑", "☒", "✓", "✔", "✗", "✘", "■"})
 # Markup truncated mid-tag ("</sup" with no ">") is handed back as text, not a tag.
 # Layout categories that carry image pixels rather than text.
 EMPTY_CATEGORIES = frozenset({"image", "picture", "figure", "chart", "seal", "form"})
@@ -271,15 +273,32 @@ class FalconLayoutReader:
             text, kind = _plain_text(text, KIND_BY_CATEGORY.get(category, "text"))
             if not text:
                 continue
-            structure = None
+            decoded_control = _decoded_ballot_control(text, kind)
+            if decoded_control is not None:
+                text, state, state_glyph = decoded_control
+                kind = "checkbox"
+            structure = (
+                {
+                    "state": state,
+                    "label": text,
+                    "label_evidence_ids": [],
+                }
+                if decoded_control is not None
+                else None
+            )
             structure_error = None
             if kind == "table":
                 try:
                     structure = _table_structure(text, element.get("generation"))
                 except ValueError as error:
                     structure_error = str(error)
-            if structure:
+            if kind == "table" and structure:
                 text = _table_text(structure)
+            recognition_method = (
+                "falcon_perception_plain_ocr"
+                if category == "page_text"
+                else "falcon_perception_layout_ocr"
+            )
             region = TextRegion(
                 id=f"p{page_number}-falcon-{index}",
                 kind=kind,
@@ -289,9 +308,18 @@ class FalconLayoutReader:
                 reading_order=index,
                 provider=PROVIDER,
                 text_provenance={
-                    "method": "falcon_perception_plain_ocr"
-                    if category == "page_text"
-                    else "falcon_perception_layout_ocr",
+                    "method": "decoded_ballot_glyph_promotion"
+                    if decoded_control is not None
+                    else recognition_method,
+                    **(
+                        {
+                            "recognition_method": recognition_method,
+                            "state_source": "decoded_ballot_glyph",
+                            "state_glyph": state_glyph,
+                        }
+                        if decoded_control is not None
+                        else {}
+                    ),
                     "reading_order_method": "page_decoder"
                     if category == "page_text"
                     else "detector_sequence",
@@ -519,6 +547,21 @@ def _checkbox_label(text: str) -> str:
     mark = r"(?:\[[x ?]\]|[☑☐✓✔✗✘□■])"
     text = re.sub(rf"^{mark}\s*", "", text, flags=re.I)
     return re.sub(rf"\s*{mark}$", "", text, flags=re.I).strip()
+
+
+def _decoded_ballot_control(text: str, kind: str) -> tuple[str, str, str] | None:
+    if kind not in {"text", "list-item"}:
+        return None
+    marks = list(DECODED_BALLOT_MARK.finditer(text))
+    prefix_end = re.match(r"(?:[-*+]\s+)?", text).end()
+    if len(marks) != 1 or marks[0].start() != prefix_end:
+        return None
+    glyph = marks[0].group()
+    label = text[marks[0].end() :].strip()
+    if glyph == "[?]" or not label:
+        return None
+    state = "selected" if glyph.casefold() in SELECTED_BALLOTS else "unselected"
+    return label, state, glyph
 
 
 def _table_structure(

@@ -24,6 +24,8 @@ from ocr_pipeline.falcon import (
     FalconOCRServiceReader,
 )
 from ocr_pipeline.providers import ReaderError
+from ocr_pipeline.contracts import BoundingBox, TextRegion
+from ocr_pipeline.fused_reader import FusedReader
 
 
 class FakeResponse:
@@ -1611,6 +1613,108 @@ def test_upload_keeps_completed_retries_under_review(category):
             if category == "checkbox-selected":
                 assert "[x] [unresolved text]" in markdown
                 assert "[x] [unresolved text]" in page["text"]["value"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_upload_promotes_only_one_leading_decoded_ballot_mark() -> None:
+    from fastapi.testclient import TestClient
+    from ocr_pipeline.demo import create_app
+    from ocr_pipeline.falcon_layout import FalconLayoutReader
+
+    generation = {
+        "stop_token_seen": True,
+        "temperature": 0.0,
+        "token_score": 0.9,
+    }
+    readings = [
+        serve_falcon_layout.DecodedText("- □ Wheezes", generation),
+        serve_falcon_layout.DecodedText("Cough □", generation),
+        serve_falcon_layout.DecodedText("□ □ Fever", generation),
+    ]
+    engine = FakeLayoutEngine(
+        [
+            {
+                "category": "list-item",
+                "bbox": [0, index * 10, 40, index * 10 + 10],
+                "score": 0.8,
+                "text": reading,
+            }
+            for index, reading in enumerate(readings)
+        ]
+    )
+    server = _start_layout_server(engine)
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 40), "white").save(buffer, format="PNG")
+    try:
+
+        class Geometry:
+            def read_with_merge_level(
+                self, image_path: Path, page_number: int, merge_level: str
+            ) -> list[TextRegion]:
+                del image_path, merge_level
+                return [
+                    TextRegion(
+                        id="word-wheezes",
+                        kind="word",
+                        text="Wheezes",
+                        confidence=0.95,
+                        bounding_box=BoundingBox(4, 1, 36, 9),
+                        reading_order=0,
+                        provider="geometry-reader",
+                    )
+                ]
+
+        reader = FusedReader(
+            FalconLayoutReader(f"http://127.0.0.1:{server.server_port}"),
+            Geometry(),
+        )
+        with TestClient(create_app(reader)) as client:
+            response = client.post(
+                "/api/process",
+                files={"file": ("page.png", buffer.getvalue(), "image/png")},
+            )
+            assert response.status_code == 200
+            payload = response.json()
+            page = payload["result"]["pages"][0]
+            checkbox, internal, multiple = page["regions"]
+            assert checkbox["kind"] == "checkbox"
+            assert checkbox["text"] == "Wheezes"
+            assert checkbox["resolution"] == "resolved"
+            assert checkbox["bounding_box"] == {
+                "left": 0,
+                "top": 0,
+                "right": 40,
+                "bottom": 10,
+            }
+            assert checkbox["structure"]["state"] == "unselected"
+            assert checkbox["structure"]["label"] == "Wheezes"
+            assert checkbox["structure"]["label_evidence_ids"] == []
+            assert [
+                word["text"] for word in checkbox["structure"]["word_evidence"]
+            ] == ["Wheezes"]
+            assert checkbox["text_provenance"]["raw_text"] == readings[0]
+            assert checkbox["text_provenance"]["generation"] == generation
+            assert checkbox["confidence"] == 0.9
+            assert checkbox["text_provenance"]["confidence_meaning"] == (
+                "decoder token score, from the text reader"
+            )
+            assert checkbox["text_provenance"]["recognition_confidence_mean"] == 0.95
+            assert (
+                checkbox["text_provenance"]["method"]
+                == "decoded_ballot_glyph_promotion"
+            )
+            assert checkbox["text_provenance"]["state_source"] == "decoded_ballot_glyph"
+            assert checkbox["text_provenance"]["state_glyph"] == "□"
+            assert internal["kind"] == multiple["kind"] == "list-item"
+            assert page["text"]["value"].count("Wheezes") == 1
+            markdown = client.get(
+                f"/api/sessions/{payload['session_id']}/result.md"
+            ).text
+            assert markdown.count("[ ] Wheezes") == 1
+            assert markdown.count("Wheezes") == 1
+            assert "Geometry recognition score" in client.get("/").text
     finally:
         server.shutdown()
         server.server_close()
