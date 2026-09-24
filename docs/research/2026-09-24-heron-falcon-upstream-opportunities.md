@@ -68,7 +68,21 @@ Three routing papers sharpen the target for the next phase:
 | Post-routing | [ViLU](https://arxiv.org/abs/2507.07620), commit `e4bf5723`, `vilu/models/vilu_attn.py`, `vilu/engine/trainer.py`, and `vilu/losses/bce.py` | Predict actual OCR failure from visual evidence and emitted text together. Raw decoder confidence is only one feature. Train against corrected and uncorrected outcomes, then calibrate on separate source groups. |
 | Crop selection | [CropVLM](https://arxiv.org/abs/2511.19820), commit `9c9cb913`, `grpo.py` and `trainer.py` | Optimize the crop for downstream reader improvement. The paper reports that box IoU can be a poor proxy for final task quality, so this pipeline should label crops by the change in unique page reconstruction instead of overlap alone. |
 
-These are proposed transfers, not local gains. The production candidate does not add the repositories or their model stacks. It reuses Falcon and Heron evidence and trains compact heads only after paired outcomes exist.
+Implementation status:
+
+- The VL-RouterBench transfer is implemented in two experimental paths. The Falcon plain-versus-layout router trains from a paired model-win matrix and reports its oracle ceiling. The new Heron region-role router uses source-grouped Heron class scores to decide whether a detected table also needs a form/control reading. Both loaders reject development artifacts, so neither router can be enabled without separate calibration.
+- The ViLU transfer is not implemented as a learned visual-plus-text post-router. Current post-correction validation preserves evidence and fails closed, but it is deterministic validation rather than the trained failure predictor described by ViLU.
+- The CropVLM transfer is not implemented as a learned crop policy. The new region-role router selects existing Heron regions and measures downstream benchmark change. It does not learn box coordinates or optimize a crop reward.
+
+The production candidate does not add the repositories or their model stacks. It reuses Falcon and Heron evidence and trains compact heads only after paired outcomes exist.
+
+### Heron region-role experiment
+
+The implemented classifier uses all 17 Heron class scores and a regularized logistic regression. It never replaces a table. A positive decision appends a form-source companion with the same physical owner, and malformed features or an uncalibrated artifact leave the current output unchanged.
+
+On 71 private development observations from source-separated pages, full Heron class scores ranked form/control-bearing regions better than the smaller score summary and visual-plus-output alternatives. The fixed held-out source groups still did not support a usable calibration threshold, and model-assisted labels are development evidence rather than adjudicated truth. The runtime therefore remains disabled.
+
+Two selectively routed pages were read by Qwen for $0.00222593. On the selected eight-form development cohort, their owned controls improve case-macro state accuracy from 66.74% to 68.24% and reduce missing controls from 286 to 284. Historical GPT-5.4-mini remains higher at 71.77%. The initial mixed adaptation reduced the three-table score from 45.25% to 27.55% because it replaced the stronger saved table predictions. That violates the append-only design, so the accepted development composition keeps the existing five-table result unchanged at 42.22% and claims no table gain.
 
 ## Structured form ownership result
 

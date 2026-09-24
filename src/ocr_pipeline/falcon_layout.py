@@ -147,6 +147,7 @@ class FalconLayoutReader:
             raise ReaderError("falcon_layout_failed", "malformed routing payload")
 
         regions = []
+        table_regions_by_query = {}
         for index, element in enumerate(elements, start=1):
             category = str(element.get("category") or "text")
             text = str(element.get("text") or "").strip()
@@ -160,7 +161,7 @@ class FalconLayoutReader:
                 continue
             detection = {
                 key: element[key]
-                for key in ("query_id", "class_scores")
+                for key in ("query_id", "class_scores", "region_role")
                 if key in element
             }
             terminated = _read_terminated(element)
@@ -279,45 +280,52 @@ class FalconLayoutReader:
                     structure_error = str(error)
             if structure:
                 text = _table_text(structure)
-            regions.append(
-                TextRegion(
-                    id=f"p{page_number}-falcon-{index}",
-                    kind=kind,
-                    text=text,
-                    confidence=(element.get("generation") or {}).get("token_score"),
-                    bounding_box=box,
-                    reading_order=index,
-                    provider=PROVIDER,
-                    text_provenance={
-                        "method": "falcon_perception_plain_ocr"
-                        if category == "page_text"
-                        else "falcon_perception_layout_ocr",
-                        "reading_order_method": "page_decoder"
-                        if category == "page_text"
-                        else "detector_sequence",
-                        "layout_detection": detection,
-                        "generation": element.get("generation") or {},
-                        "raw_text": element.get("text") or "",
-                        **read_history,
-                        **(
-                            {"table_structure_error": structure_error}
-                            if structure_error
-                            else {}
-                        ),
-                        "layout_category": category,
-                        # Named so nobody reads this as a recognition confidence.
-                        "layout_detection_score": element.get("score"),
-                        "confidence_meaning": "decoder token likelihood, uncalibrated"
-                        if (element.get("generation") or {}).get("token_score")
-                        is not None
-                        else "recognition unavailable",
-                        "model": model,
-                        **({"routing": routing} if routing is not None else {}),
-                    },
-                    resolution="unreadable" if structure_error else read_resolution,
-                    structure=structure or {},
-                )
+            region = TextRegion(
+                id=f"p{page_number}-falcon-{index}",
+                kind=kind,
+                text=text,
+                confidence=(element.get("generation") or {}).get("token_score"),
+                bounding_box=box,
+                reading_order=index,
+                provider=PROVIDER,
+                text_provenance={
+                    "method": "falcon_perception_plain_ocr"
+                    if category == "page_text"
+                    else "falcon_perception_layout_ocr",
+                    "reading_order_method": "page_decoder"
+                    if category == "page_text"
+                    else "detector_sequence",
+                    "layout_detection": detection,
+                    "generation": element.get("generation") or {},
+                    "raw_text": element.get("text") or "",
+                    **read_history,
+                    **(
+                        {"table_structure_error": structure_error}
+                        if structure_error
+                        else {}
+                    ),
+                    "layout_category": category,
+                    # Named so nobody reads this as a recognition confidence.
+                    "layout_detection_score": element.get("score"),
+                    "confidence_meaning": "decoder token likelihood, uncalibrated"
+                    if (element.get("generation") or {}).get("token_score") is not None
+                    else "recognition unavailable",
+                    "model": model,
+                    **({"routing": routing} if routing is not None else {}),
+                },
+                resolution="unreadable" if structure_error else read_resolution,
+                structure=structure or {},
             )
+            regions.append(region)
+            if kind == "table" and element.get("query_id") is not None:
+                table_regions_by_query[element["query_id"]] = region.id
+        for region in regions:
+            role = region.text_provenance.get("layout_detection", {}).get("region_role")
+            if not isinstance(role, dict):
+                continue
+            owner = table_regions_by_query.get(role.get("source_query_id"))
+            if owner is not None:
+                region.structure["owner_region_id"] = owner
         if not regions:
             # A page with no readable region is a failed read, not an empty document.
             # Reporting it as success renders a handful of geometric controls and calls

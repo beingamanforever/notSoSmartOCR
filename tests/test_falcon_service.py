@@ -394,6 +394,26 @@ def _route_extractor() -> dict[str, object]:
     }
 
 
+def _region_role_model(*, selected: bool = True) -> dict[str, object]:
+    names = list(serve_falcon_layout.HERON_REGION_ROLE_FEATURE_NAMES)
+    return {
+        "version": 1,
+        "id": "test-heron-region-role",
+        "status": "calibrated",
+        "feature_names": names,
+        "coefficients": [0.0] * len(names),
+        "means": [0.0] * len(names),
+        "scales": [1.0] * len(names),
+        "intercept": 10.0 if selected else -10.0,
+        "threshold": 0.5,
+        "extractor": _route_extractor(),
+    }
+
+
+def _full_class_scores() -> dict[str, float]:
+    return {label: 0.0 for label in serve_falcon_layout.HERON_ROUTE_CLASSES}
+
+
 def test_route_model_loader_rejects_non_visual_features(tmp_path: Path) -> None:
     path = tmp_path / "router.json"
     path.write_text(json.dumps(_route_model("layout")))
@@ -423,7 +443,7 @@ def test_route_model_loader_rejects_development_artifact(tmp_path: Path) -> None
         serve_falcon_layout.load_route_model(path)
 
 
-def test_route_model_requires_matching_extractor_metadata() -> None:
+def test_learned_models_require_matching_extractor_metadata() -> None:
     model = _route_model("layout")
     engine = FakeLayoutEngine([])
 
@@ -450,6 +470,16 @@ def test_route_model_requires_matching_extractor_metadata() -> None:
             model={"id": "test"},
             detect_route=detect,
             route_model=model,
+            extractor_metadata=mismatched,
+        )
+
+    with pytest.raises(ValueError, match="region role model extractor"):
+        serve_falcon_layout.create_server(
+            engine,
+            "127.0.0.1",
+            0,
+            model={"id": "test"},
+            heron_region_role_model=_region_role_model(),
             extractor_metadata=mismatched,
         )
 
@@ -511,6 +541,353 @@ def test_route_detection_preserves_raw_form_and_key_value_proposals() -> None:
         "form",
     ]
     assert [item["category"] for item in detection["layout"]] == ["form"]
+
+
+def test_region_role_appends_form_companion_without_changing_table() -> None:
+    scores = _full_class_scores()
+    table = {
+        "label": "table",
+        "box": (1, 2, 30, 40),
+        "score": 0.9,
+        "query_id": 7,
+        "class_scores": scores,
+    }
+
+    detection = serve_falcon_layout._route_detection([table], _region_role_model())
+
+    assert detection["layout"][0] == {
+        "category": "table",
+        "bbox": [1, 2, 30, 40],
+        "score": 0.9,
+        "query_id": 7,
+        "class_scores": scores,
+    }
+    assert detection["layout"][1] == {
+        **detection["layout"][0],
+        "category": "form",
+        "region_role": {
+            "action": "add_form_source",
+            "model": {"id": "test-heron-region-role", "version": 1},
+            "score": pytest.approx(0.99995, abs=1e-5),
+            "threshold": 0.5,
+            "source_query_id": 7,
+        },
+    }
+    assert detection["raw"] == [
+        {
+            "label": "table",
+            "box": [1, 2, 30, 40],
+            "score": 0.9,
+            "query_id": 7,
+            "class_scores": scores,
+        }
+    ]
+    engine = FakeLayoutEngine([{**detection["layout"][1], "text": ""}])
+    server = _start_layout_server(engine)
+    try:
+        element = _post_layout_read(server, Image.new("RGB", (40, 40)))["elements"][0]
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert element["region_role"] == detection["layout"][1]["region_role"]
+
+
+def test_region_role_companion_keeps_canonical_table_ownership(tmp_path: Path) -> None:
+    from ocr_pipeline.falcon_layout import FalconLayoutReader
+
+    role = {
+        "action": "add_form_source",
+        "model": {"id": "test-heron-region-role", "version": 1},
+        "score": 0.9,
+        "threshold": 0.5,
+        "source_query_id": 7,
+    }
+    engine = FakeLayoutEngine(
+        [
+            {
+                "category": "table",
+                "bbox": [1, 2, 30, 40],
+                "score": 0.9,
+                "query_id": 7,
+                "class_scores": _full_class_scores(),
+                "text": "<table><tr><td>Dose</td></tr></table>",
+            },
+            {
+                "category": "form",
+                "bbox": [1, 2, 30, 40],
+                "score": 0.9,
+                "query_id": 7,
+                "class_scores": _full_class_scores(),
+                "region_role": role,
+                "text": "",
+            },
+        ]
+    )
+    server = _start_layout_server(engine)
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (40, 40), "white").save(image_path)
+    try:
+        regions = FalconLayoutReader(f"http://127.0.0.1:{server.server_port}").read(
+            image_path, 1
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    table = next(region for region in regions if region.kind == "table")
+    form = next(
+        region
+        for region in regions
+        if (region.structure or {}).get("role") == "form_source"
+    )
+    assert table.text == "Dose"
+    assert form.structure["owner_region_id"] == table.id
+    assert form.text_provenance["layout_detection"]["region_role"] == role
+
+
+def test_region_role_below_threshold_keeps_current_output() -> None:
+    proposals = [
+        {
+            "label": "table",
+            "box": (0, 0, 20, 20),
+            "score": 0.8,
+            "query_id": 1,
+            "class_scores": _full_class_scores(),
+        }
+    ]
+
+    assert serve_falcon_layout._route_detection(
+        proposals, _region_role_model(selected=False)
+    ) == serve_falcon_layout._route_detection(proposals)
+
+
+@pytest.mark.parametrize(
+    "class_scores",
+    [
+        {"table": 0.9},
+        {**_full_class_scores(), "table": float("nan")},
+    ],
+)
+def test_region_role_malformed_features_abstain(
+    class_scores: dict[str, float],
+) -> None:
+    proposals = [
+        {
+            "label": "table",
+            "box": (0, 0, 20, 20),
+            "score": 0.8,
+            "query_id": 1,
+            "class_scores": class_scores,
+        }
+    ]
+
+    assert serve_falcon_layout._route_detection(
+        proposals, _region_role_model()
+    ) == serve_falcon_layout._route_detection(proposals)
+
+
+def test_region_role_suppresses_only_contained_companions() -> None:
+    proposals = [
+        {
+            "label": "table",
+            "box": box,
+            "score": 0.8,
+            "query_id": query_id,
+            "class_scores": _full_class_scores(),
+        }
+        for query_id, box in enumerate(
+            ((0, 0, 100, 100), (1, 1, 99, 99), (0, 0, 100, 100))
+        )
+    ]
+
+    layout = serve_falcon_layout._route_detection(proposals, _region_role_model())[
+        "layout"
+    ]
+
+    assert [item["category"] for item in layout] == [
+        "table",
+        "table",
+        "table",
+        "form",
+    ]
+    assert [item["query_id"] for item in layout[:3]] == [0, 1, 2]
+    assert layout[3]["region_role"]["source_query_id"] == 0
+
+
+def test_region_role_leaves_native_form_unchanged() -> None:
+    form = {
+        "label": "form",
+        "box": (0, 0, 20, 20),
+        "score": 0.8,
+        "query_id": 1,
+        "class_scores": _full_class_scores(),
+    }
+
+    detection = serve_falcon_layout._route_detection([form], _region_role_model())
+
+    assert detection["layout"] == [
+        {
+            "category": "form",
+            "bbox": [0, 0, 20, 20],
+            "score": 0.8,
+            "query_id": 1,
+            "class_scores": form["class_scores"],
+        }
+    ]
+
+
+def test_region_role_reuses_matching_native_form() -> None:
+    scores = _full_class_scores()
+    proposals = [
+        {
+            "label": "table",
+            "box": (0, 0, 20, 20),
+            "score": 0.9,
+            "query_id": 1,
+            "class_scores": scores,
+        },
+        {
+            "label": "form",
+            "box": (0, 0, 20, 20),
+            "score": 0.8,
+            "query_id": 2,
+            "class_scores": scores,
+        },
+    ]
+
+    layout = serve_falcon_layout._route_detection(proposals, _region_role_model())[
+        "layout"
+    ]
+
+    assert [item["category"] for item in layout] == ["table", "form"]
+    assert layout[1]["query_id"] == 2
+    assert layout[1]["region_role"]["source_query_id"] == 1
+
+
+def test_region_role_ownership_is_independent_of_element_order(tmp_path: Path) -> None:
+    from ocr_pipeline.falcon_layout import FalconLayoutReader
+
+    scores = _full_class_scores()
+    proposals = [
+        {
+            "label": "form",
+            "box": (0, 0, 20, 20),
+            "score": 0.9,
+            "query_id": 2,
+            "class_scores": scores,
+        },
+        {
+            "label": "table",
+            "box": (0, 0, 20, 20),
+            "score": 0.8,
+            "query_id": 1,
+            "class_scores": scores,
+        },
+    ]
+    layout = serve_falcon_layout._route_detection(proposals, _region_role_model())[
+        "layout"
+    ]
+    engine = FakeLayoutEngine(
+        [
+            {**layout[0], "text": ""},
+            {
+                **layout[1],
+                "text": "<table><tr><td>Dose</td></tr></table>",
+            },
+        ]
+    )
+    server = _start_layout_server(engine)
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (40, 40), "white").save(image_path)
+    try:
+        regions = FalconLayoutReader(f"http://127.0.0.1:{server.server_port}").read(
+            image_path, 1
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    table = next(region for region in regions if region.kind == "table")
+    form = next(
+        region
+        for region in regions
+        if (region.structure or {}).get("role") == "form_source"
+    )
+    assert form.structure["owner_region_id"] == table.id
+
+
+def test_region_role_omits_owner_for_dropped_empty_table(tmp_path: Path) -> None:
+    from ocr_pipeline.falcon_layout import FalconLayoutReader
+
+    role = {
+        "action": "add_form_source",
+        "model": {"id": "test-heron-region-role", "version": 1},
+        "score": 0.9,
+        "threshold": 0.5,
+        "source_query_id": 7,
+    }
+    engine = FakeLayoutEngine(
+        [
+            {
+                "category": "table",
+                "bbox": [1, 2, 30, 40],
+                "score": 0.9,
+                "query_id": 7,
+                "class_scores": _full_class_scores(),
+                "text": "",
+            },
+            {
+                "category": "form",
+                "bbox": [1, 2, 30, 40],
+                "score": 0.9,
+                "query_id": 8,
+                "class_scores": _full_class_scores(),
+                "region_role": role,
+                "text": "",
+            },
+        ]
+    )
+    server = _start_layout_server(engine)
+    image_path = tmp_path / "page.png"
+    Image.new("RGB", (40, 40), "white").save(image_path)
+    try:
+        regions = FalconLayoutReader(f"http://127.0.0.1:{server.server_port}").read(
+            image_path, 1
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert not any(region.kind == "table" for region in regions)
+    form = next(
+        region
+        for region in regions
+        if (region.structure or {}).get("role") == "form_source"
+    )
+    assert "owner_region_id" not in form.structure
+
+
+def test_region_role_loader_rejects_development_artifact(tmp_path: Path) -> None:
+    path = tmp_path / "region-role.json"
+    model = _region_role_model()
+    model["development"] = {"grouped_validation": {"sources": 12}}
+    path.write_text(json.dumps(model))
+
+    assert serve_falcon_layout.load_heron_region_role_model(path)["id"] == (
+        "test-heron-region-role"
+    )
+
+    model["unknown"] = True
+    path.write_text(json.dumps(model))
+    with pytest.raises(ValueError, match="schema"):
+        serve_falcon_layout.load_heron_region_role_model(path)
+
+    model.pop("unknown")
+    model["status"] = "development"
+    path.write_text(json.dumps(model))
+
+    with pytest.raises(ValueError, match="schema"):
+        serve_falcon_layout.load_heron_region_role_model(path)
 
 
 def test_router_threshold_uses_total_quality_before_page_win_count() -> None:

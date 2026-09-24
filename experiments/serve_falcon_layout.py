@@ -96,6 +96,9 @@ HERON_ROUTE_FEATURE_NAMES = (
         for suffix in ("class_score_mean", "class_score_max")
     ),
 )
+HERON_REGION_ROLE_FEATURE_NAMES = tuple(
+    f"class_score.{label}" for label in HERON_ROUTE_CLASSES
+)
 MAX_REQUEST_BYTES = 64_000_000
 MAX_IMAGE_PIXELS = 32_000_000
 LOGGER = logging.getLogger(__name__)
@@ -208,6 +211,65 @@ def load_route_model(path: os.PathLike[str] | str) -> dict[str, Any]:
         raise ValueError("Falcon route model scales must be positive")
     if model["cost_tradeoff"] < 0:
         raise ValueError("Falcon route model cost tradeoff must be nonnegative")
+    return model
+
+
+def load_heron_region_role_model(
+    path: os.PathLike[str] | str,
+) -> dict[str, Any]:
+    """Load a calibrated table-to-form role classifier."""
+    try:
+        with open(path, encoding="utf-8") as source:
+            model = json.load(source)
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError(f"Invalid Heron region role model: {error}") from error
+    if not isinstance(model, dict):
+        raise ValueError("Heron region role model must be a JSON object")
+    feature_names = model.get("feature_names")
+    coefficients = model.get("coefficients")
+    means = model.get("means")
+    scales = model.get("scales")
+    required_keys = {
+        "version",
+        "id",
+        "status",
+        "feature_names",
+        "coefficients",
+        "means",
+        "scales",
+        "intercept",
+        "threshold",
+        "extractor",
+    }
+    if (
+        not required_keys <= set(model) <= required_keys | {"development"}
+        or model.get("version") != 1
+        or not isinstance(model.get("id"), str)
+        or not model["id"].strip()
+        or model.get("status") != "calibrated"
+        or ("development" in model and not isinstance(model["development"], dict))
+        or feature_names != list(HERON_REGION_ROLE_FEATURE_NAMES)
+        or not all(isinstance(values, list) for values in (coefficients, means, scales))
+        or any(
+            len(values) != len(HERON_REGION_ROLE_FEATURE_NAMES)
+            for values in (coefficients, means, scales)
+        )
+        or not _valid_extractor(model.get("extractor"))
+    ):
+        raise ValueError("Invalid Heron region role model schema")
+    numbers = [
+        *coefficients,
+        *means,
+        *scales,
+        model.get("intercept"),
+        model.get("threshold"),
+    ]
+    if any(
+        type(value) not in (int, float) or not math.isfinite(value) for value in numbers
+    ):
+        raise ValueError("Heron region role model values must be finite numbers")
+    if any(scale <= 0 for scale in scales) or not 0 <= model["threshold"] <= 1:
+        raise ValueError("Invalid Heron region role model values")
     return model
 
 
@@ -366,7 +428,66 @@ def _exclusive_form_indices(items: list[dict[str, Any]]) -> set[int]:
     }
 
 
-def _route_detection(proposals: list[dict[str, Any]]) -> dict[str, Any]:
+def _region_role_score(model: dict[str, Any], proposal: dict[str, Any]) -> float | None:
+    class_scores = proposal.get("class_scores")
+    if not isinstance(class_scores, dict) or set(class_scores) != set(
+        HERON_ROUTE_CLASSES
+    ):
+        return None
+    values = [class_scores[label] for label in HERON_ROUTE_CLASSES]
+    if any(
+        type(value) not in (int, float) or not math.isfinite(value) for value in values
+    ):
+        return None
+    logit = float(model["intercept"]) + sum(
+        float(coefficient) * (float(value) - float(mean)) / float(scale)
+        for coefficient, value, mean, scale in zip(
+            model["coefficients"],
+            values,
+            model["means"],
+            model["scales"],
+            strict=True,
+        )
+    )
+    if not math.isfinite(logit):
+        return None
+    if logit >= 0:
+        return 1 / (1 + math.exp(-logit))
+    exponential = math.exp(logit)
+    return exponential / (1 + exponential)
+
+
+def _same_source_box(left: Sequence[float], right: Sequence[float]) -> bool:
+    left_x, top_y, right_x, bottom_y = (float(value) for value in left)
+    other_left, other_top, other_right, other_bottom = (float(value) for value in right)
+    intersection = max(0.0, min(right_x, other_right) - max(left_x, other_left)) * max(
+        0.0, min(bottom_y, other_bottom) - max(top_y, other_top)
+    )
+    left_area = max(0.0, right_x - left_x) * max(0.0, bottom_y - top_y)
+    right_area = max(0.0, other_right - other_left) * max(0.0, other_bottom - other_top)
+    union = left_area + right_area - intersection
+    return union > 0 and intersection / union >= 0.95
+
+
+def _companion_indices(items: list[dict[str, Any]]) -> set[int]:
+    retained = []
+    for index in sorted(
+        range(len(items)),
+        key=lambda value: (-items[value]["region_role"]["score"], value),
+    ):
+        if any(
+            _same_source_box(items[index]["bbox"], items[other]["bbox"])
+            for other in retained
+        ):
+            continue
+        retained.append(index)
+    return set(retained)
+
+
+def _route_detection(
+    proposals: list[dict[str, Any]],
+    region_role_model: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     kept = _exclusive_form_indices(proposals)
     raw = [
         {
@@ -389,6 +510,57 @@ def _route_detection(proposals: list[dict[str, Any]]) -> dict[str, Any]:
         for index, item in enumerate(proposals)
         if index in kept
     ]
+    companions = []
+    if region_role_model is not None:
+        for item in proposals:
+            if item["label"] != "table":
+                continue
+            score = _region_role_score(region_role_model, item)
+            if score is None or score < region_role_model["threshold"]:
+                continue
+            companions.append(
+                {
+                    "category": "form",
+                    "bbox": list(item["box"]),
+                    "score": item["score"],
+                    **{
+                        key: item[key]
+                        for key in ("query_id", "class_scores")
+                        if key in item
+                    },
+                    "region_role": {
+                        "action": "add_form_source",
+                        "model": {
+                            "id": region_role_model["id"],
+                            "version": region_role_model["version"],
+                        },
+                        "score": score,
+                        "threshold": float(region_role_model["threshold"]),
+                        "source_query_id": item.get("query_id"),
+                    },
+                }
+            )
+        native_forms = [item for item in layout if item["category"] == "form"]
+        unmatched = []
+        for companion in companions:
+            native = next(
+                (
+                    item
+                    for item in native_forms
+                    if _same_source_box(item["bbox"], companion["bbox"])
+                ),
+                None,
+            )
+            if native is None:
+                unmatched.append(companion)
+                continue
+            current = native.get("region_role")
+            if current is None or current["score"] < companion["region_role"]["score"]:
+                native["region_role"] = companion["region_role"]
+        retained = _companion_indices(unmatched)
+        layout.extend(
+            companion for index, companion in enumerate(unmatched) if index in retained
+        )
     return {"raw": raw, "layout": layout}
 
 
@@ -408,6 +580,7 @@ def create_server(
     max_image_pixels: int = MAX_IMAGE_PIXELS,
     feature_config: dict[str, Any] | None = None,
     route_model: dict[str, Any] | None = None,
+    heron_region_role_model: dict[str, Any] | None = None,
     extractor_metadata: dict[str, Any] | None = None,
 ) -> ThreadingHTTPServer:
     layout = dict(layout or {})
@@ -420,6 +593,11 @@ def create_server(
         raise ValueError("A Falcon route model requires one-pass Heron route detection")
     if route_model is not None and route_model["extractor"] != extractor_metadata:
         raise ValueError("Falcon route model extractor does not match the service")
+    if (
+        heron_region_role_model is not None
+        and heron_region_role_model["extractor"] != extractor_metadata
+    ):
+        raise ValueError("Heron region role model extractor does not match the service")
 
     @contextmanager
     def execute_engine():
@@ -908,7 +1086,7 @@ def create_server(
                 "generation": getattr(text, "generation", {}),
                 **{
                     key: element[key]
-                    for key in ("query_id", "class_scores")
+                    for key in ("query_id", "class_scores", "region_role")
                     if key in element
                 },
             }
@@ -1078,6 +1256,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"--max-image-size must be a multiple of 16 up to {FALCON_MAX_IMAGE_SIZE}"
         )
     route_model = load_route_model(args.route_model) if args.route_model else None
+    region_role_model = (
+        load_heron_region_role_model(args.heron_region_role_model)
+        if args.heron_region_role_model
+        else None
+    )
 
     from falcon_perception import (
         load_and_prepare_model,
@@ -1149,7 +1332,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         def run_route_detection(self, images):
             return [
-                _route_detection(self.layout_detector.detect_elements(image))
+                _route_detection(
+                    self.layout_detector.detect_elements(image), region_role_model
+                )
                 for image in images
             ]
 
@@ -1358,13 +1543,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "score_meaning": "layout detection confidence; decoder probabilities in generation",
         },
         route_model=route_model,
+        heron_region_role_model=region_role_model,
         extractor_metadata={
             "version": ROUTE_EXTRACTOR_VERSION,
             "heron_model_id": args.layout_model,
             "heron_model_revision": args.layout_model_revision,
             "layout_score_threshold": args.layout_threshold,
         }
-        if route_model is not None
+        if route_model is not None or region_role_model is not None
         else None,
     )
     try:
@@ -1412,6 +1598,11 @@ def _parser() -> argparse.ArgumentParser:
         "--route-model",
         type=os.fspath,
         help="Validated linear JSON router for layout versus native full-page Falcon",
+    )
+    parser.add_argument(
+        "--heron-region-role-model",
+        type=os.fspath,
+        help="Calibrated Heron table-to-form role model",
     )
     parser.add_argument(
         "--max-image-size", type=_positive_int, default=FALCON_MAX_IMAGE_SIZE
