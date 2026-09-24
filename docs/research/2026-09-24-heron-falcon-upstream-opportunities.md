@@ -32,6 +32,25 @@ The implemented grouped Ridge experiment confirms that limitation:
 
 The 43/146 result selects policy parameters on the same development outcomes and is optimistic. The honest nested estimate regresses. The service therefore rejects the development artifact and accepts only a separately calibrated router. Learned routing remains disabled by default.
 
+The router matrix is now reproducible against the latest canonical downstream
+pipeline rather than the older layout-only output. The builder rescored the
+exact packaged Markdown with the shared occurrence-aware evaluator, retained
+the three failed native pages, and joined only named pre-decode Heron features.
+
+| Current action | Exact snippets | Recorded expert cost |
+|---|---:|---:|
+| Canonical layout plus selective Qwen | 40/146 | $0.00380308 known, 2 pages unknown |
+| Native full page Falcon | 33/146 | $0 |
+| Per-page oracle | 49/146 | cost depends on tie policy |
+| Development-selected Ridge | 43/146 | $0.00351105 with bounded unknowns |
+| Nested source-group Ridge estimate | 38/146 | $0.00372819 with bounded unknowns |
+
+The two unknown page charges were represented by an explicit $0.00054164
+development bound, equal to the largest observed page charge in this run. They
+remain marked as unobserved in every row. This permits the quality experiment
+to run without reporting the bound as a measured charge. The nested estimate
+still falls below the current 40/146 default, so the router remains disabled.
+
 ## Source-backed changes worth testing
 
 ### 1. Learned Falcon mode routing
@@ -71,6 +90,7 @@ Three routing papers sharpen the target for the next phase:
 Implementation status:
 
 - The VL-RouterBench transfer is implemented in two experimental paths. The Falcon plain-versus-layout router trains from a paired model-win matrix and reports its oracle ceiling. The new Heron region-role router uses source-grouped Heron class scores to decide whether a detected table also needs a form/control reading. Both loaders reject development artifacts, so neither router can be enabled without separate calibration.
+- `experiments/build_falcon_mode_observations.py` now rebuilds the page-mode matrix from the exact canonical Markdown, native Falcon records, named Heron features, source-document groups, and per-page hosted cost provenance. It fails on missing pages or unknown charges unless an explicit bound is supplied.
 - The ViLU transfer has an offline public-data prototype, not a live clinical integration. A source-separated visual classifier trained on same-call Falcon post states retained Falcon for 1,319 of 4,509 development line crops, reducing Qwen calls by 29.3%. Its routed CER was 33.80% versus 34.79% for always-Qwen, but the paired source bootstrap interval for the difference crossed zero. A later visual-plus-transcript model found no threshold that safely saved even one calibration call. The production path therefore still uses deterministic, fail-closed correction validation and does not load either experimental post-router.
 - The CropVLM transfer is not implemented as a learned crop policy. The new region-role router selects existing Heron regions and measures downstream benchmark change. It does not learn box coordinates or optimize a crop reward.
 
@@ -138,7 +158,7 @@ On the same saved eight-form development pages used by the accepted 68.24% resul
 
 ## Acceptance rule
 
-Adopt a change only when a source-grouped, failure-inclusive comparison shows a positive paired gain over the current route, no observed critical-field regression, no reduction in form or table score, no increase in duplicate physical readings, and lower Qwen use than always-Qwen. Report distance to the 48/146 oracle. An inconclusive result remains inconclusive.
+Adopt a change only when a source-grouped, failure-inclusive comparison shows a positive paired gain over the current route, no observed critical-field regression, no reduction in form or table score, no increase in duplicate physical readings, and lower Qwen use than always-Qwen. Report distance to the 48/146 pure-Falcon oracle and the 49/146 current-pipeline-versus-native oracle. An inconclusive result remains inconclusive.
 
 ## Tool record
 

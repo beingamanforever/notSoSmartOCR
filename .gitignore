@@ -28,6 +28,7 @@ experiments/results/
 /artifacts/architecture/
 /artifacts/research/
 /artifacts/screenshots/
+/artifacts/share/
 
 # New verification files and training corpora remain local.
 /tests/
