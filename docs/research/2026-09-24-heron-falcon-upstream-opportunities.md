@@ -120,6 +120,14 @@ A new live run showed why Qwen output completeness must remain explicit. Form-00
 
 This follows the inspected CropVLM result that downstream task improvement matters more than crop overlap. The next crop-policy experiment should route unresolved multi-control rows as owned local regions rather than repeatedly asking one page-scale form crop to enumerate every option. It requires paired outputs and a separate calibration split before activation.
 
+### Owned form-row refinement
+
+The targeted control-group reread is now implemented. Existing Heron and Falcon layout rows are candidates only when the learned form-source route fired and the row contains evidence for multiple options. Physical rectangle and shared-evidence conflicts select distinct rows without dropping side-by-side columns. Qwen receives a low-resolution page overview for context and the original pixels for each owned row. The page-scale form crop remains available for controls outside those rows, with owned row bands masked so the same ink is not read twice.
+
+The first live integration combined page-scale and row crops in one general request. It either omitted row controls or exhausted the output limit. The repaired flow gives owned rows a separate form-only request, validates every row ID, preserves a successful primary request if row refinement fails, and uses the existing 16,384-token response allowance. A recovered control enters canonical output only when its model box aligns with exactly one existing physical evidence owner. Zero-match and multi-match candidates remain unresolved review evidence.
+
+On the same saved eight-form development pages used by the accepted 68.24% result, replaying the saved hosted output through the final ownership gate reaches 69.22% case-macro state accuracy. Pooled accuracy rises from 48.21% to 51.11% and missing controls fall from 284 to 268. Checked F1 is 57.97%, below the prior 59.15%, because 23 controls without unique label ownership now abstain instead of entering canonical output. Historical GPT-5.4-mini remains higher at 71.77%. The masked residual form view still needs a fresh hosted run, so this is a saved-response development comparison, not an untouched clinical estimate or a complete live measurement of the final route.
+
 ## Rejected defaults
 
 - Always-full-page Falcon: 33/146 with three failures, below the 35/146 layout route.

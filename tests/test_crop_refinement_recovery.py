@@ -14,7 +14,7 @@ from ocr_pipeline.cross_page_tables import (
     TableContinuationPrediction,
 )
 from ocr_pipeline.demo import create_app
-from ocr_pipeline.markdown_refinement import refine_page
+from ocr_pipeline.markdown_refinement import _owned_form_rows, refine_page
 from ocr_pipeline.rendering import render_page_markdown
 
 
@@ -206,6 +206,419 @@ def test_form_source_adds_physically_owned_controls_without_replacing_text(
     assert malformed["form_controls_added"] == 0
     assert malformed["accepted_control_crop_ids"] == []
     assert malformed["refined_regions"] is None
+
+
+def test_owned_form_row_uses_single_row_evidence_for_nonoverlapping_controls(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    image = tmp_path / "form.png"
+    Image.new("RGB", (200, 100), "white").save(image)
+    page = {
+        "page_number": 1,
+        "width": 200,
+        "height": 100,
+        "regions": [
+            {
+                "id": "form",
+                "kind": "figure",
+                "text": "",
+                "resolution": "unreadable",
+                "bounding_box": {"left": 0, "top": 0, "right": 200, "bottom": 100},
+                "structure": {"role": "form_source"},
+            },
+            {
+                "id": "row",
+                "kind": "layout_block",
+                "text": "□ Existing option □ Recovered option",
+                "resolution": "resolved",
+                "bounding_box": {"left": 10, "top": 10, "right": 190, "bottom": 50},
+                "structure": {
+                    "role": "layout_block",
+                    "block_type": "form_row",
+                    "child_evidence_ids": ["row-evidence"],
+                    "fields": [{"evidence_ids": ["row-evidence"]}],
+                },
+            },
+            {
+                "id": "row-evidence",
+                "kind": "text",
+                "text": "□ Existing option □ Recovered option",
+                "resolution": "resolved",
+                "bounding_box": {
+                    "left": 10,
+                    "top": 20,
+                    "right": 190,
+                    "bottom": 50,
+                },
+                "structure": {"layout_owner_id": "row"},
+            },
+            {
+                "id": "signature",
+                "kind": "signature",
+                "text": "",
+                "resolution": "unreadable",
+                "bounding_box": {"left": 10, "top": 60, "right": 100, "bottom": 90},
+            },
+        ],
+    }
+
+    def transport(request, timeout):
+        payload = json.loads(request.data)
+        prompt = json.dumps(payload["messages"][1])
+        schema_name = payload["response_format"]["json_schema"]["name"]
+        if schema_name == "page_crops":
+            assert "page_context" not in prompt
+            assert "owned_form_row" not in prompt
+            assert "form_source" in prompt
+            crops = [
+                {
+                    "region_id": "crop-1",
+                    "markdown": "[form options extracted]",
+                    "controls": [
+                        {
+                            "label": "Uncovered option",
+                            "group_label": "Other",
+                            "state": "unselected",
+                            "bbox_2d": [100, 700, 600, 900],
+                        }
+                    ],
+                },
+                {"region_id": "crop-2", "markdown": "[signature]"},
+            ]
+        else:
+            assert schema_name == "owned_form_rows"
+            assert "page_context" in prompt
+            assert "owned_form_row" in prompt
+            assert (
+                sum(
+                    item.get("type") == "image_url"
+                    for item in payload["messages"][1]["content"]
+                )
+                == 2
+            )
+            crops = [
+                {
+                    "region_id": "crop-3",
+                    "markdown": "[form options extracted]",
+                    "controls": [
+                        {
+                            "label": "Existing option",
+                            "group_label": "Choices",
+                            "state": "unselected",
+                            "bbox_2d": [56, 125, 389, 500],
+                        },
+                        {
+                            "label": "Recovered option",
+                            "group_label": "Choices",
+                            "state": "selected",
+                            "bbox_2d": [500, 125, 950, 500],
+                        },
+                    ],
+                }
+            ]
+        answer = {"crops": crops}
+        return (
+            200,
+            {},
+            json.dumps(
+                {
+                    "model": payload["model"],
+                    "choices": [
+                        {
+                            "message": {"content": json.dumps(answer)},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 30},
+                }
+            ).encode(),
+        )
+
+    result = refine_page(image, page, "base output", transport=transport)
+
+    recovered = [
+        region
+        for region in result["refined_regions"]
+        if region.get("text") == "Recovered option"
+        and (region.get("text_provenance") or {}).get("method")
+        == "qwen_form_option_extraction"
+    ]
+    row = next(region for region in result["refined_regions"] if region["id"] == "row")
+    assert result["status"] == "generated"
+    assert result["form_controls_added"] == 3
+    assert result["accepted_control_crop_ids"] == ["crop-1", "crop-3"]
+    assert row["kind"] == "layout_block"
+    assert row["text"] == "[ ] Existing option [x] Recovered option"
+    assert recovered[0]["structure"]["layout_owner_id"] == "row"
+    assert recovered[0]["structure"]["label_evidence_ids"] == ["row-evidence"]
+    added = [
+        region
+        for region in result["refined_regions"]
+        if (region.get("text_provenance") or {}).get("method")
+        == "qwen_form_option_extraction"
+        and region.get("structure", {}).get("layout_owner_id") == "row"
+    ]
+    assert all(
+        region["structure"]["label_evidence_ids"] == ["row-evidence"]
+        for region in added
+    )
+    assert {region["text"] for region in added} == {
+        "Existing option",
+        "Recovered option",
+    }
+    assert result["content"]["markdown"].count("[ ] Existing option") == 1
+    assert result["content"]["markdown"].count("[x] Recovered option") == 1
+    assert result["content"]["markdown"].count("Uncovered option") == 1
+
+
+def test_owned_form_row_failure_keeps_completed_primary_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    image = tmp_path / "form.png"
+    Image.new("RGB", (200, 100), "white").save(image)
+    page = {
+        "page_number": 1,
+        "width": 200,
+        "height": 100,
+        "regions": [
+            {
+                "id": "form",
+                "kind": "figure",
+                "text": "",
+                "resolution": "unreadable",
+                "bounding_box": {"left": 0, "top": 0, "right": 200, "bottom": 100},
+                "structure": {"role": "form_source"},
+            },
+            {
+                "id": "row",
+                "kind": "layout_block",
+                "text": "□ First □ Second",
+                "resolution": "resolved",
+                "bounding_box": {"left": 10, "top": 10, "right": 190, "bottom": 50},
+                "structure": {"role": "layout_block", "block_type": "form_row"},
+            },
+            {
+                "id": "signature",
+                "kind": "signature",
+                "text": "",
+                "resolution": "unreadable",
+                "bounding_box": {"left": 10, "top": 60, "right": 100, "bottom": 90},
+            },
+        ],
+    }
+
+    def transport(request, timeout):
+        payload = json.loads(request.data)
+        if payload["response_format"]["json_schema"]["name"] == "owned_form_rows":
+            return 500, {}, b'{"error":{"message":"row reader unavailable"}}'
+        answer = {
+            "crops": [
+                {
+                    "region_id": "crop-1",
+                    "markdown": "[form options extracted]",
+                    "controls": [
+                        {
+                            "label": "Uncovered option",
+                            "group_label": "Other",
+                            "state": "unselected",
+                            "bbox_2d": [100, 700, 600, 900],
+                        }
+                    ],
+                },
+                {"region_id": "crop-2", "markdown": "[signature]"},
+            ]
+        }
+        return (
+            200,
+            {},
+            json.dumps(
+                {
+                    "model": payload["model"],
+                    "choices": [
+                        {
+                            "message": {"content": json.dumps(answer)},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 30,
+                        "cost": 0.001,
+                    },
+                }
+            ).encode(),
+        )
+
+    result = refine_page(image, page, "base output", transport=transport)
+
+    assert result["status"] == "partial"
+    assert result["cost"] == 0.001
+    assert result["attempts"] == 2
+    assert result["accepted_crop_ids"] == ["crop-2"]
+    assert result["rejected_crop_ids"] == ["crop-1", "crop-3"]
+    assert result["accepted_control_crop_ids"] == ["crop-1"]
+    assert result["request_errors"][0]["request"] == "owned_form_rows"
+    assert "[signature]" in result["content"]["markdown"]
+
+
+@pytest.mark.parametrize(
+    "option_box", ([0, 600, 100, 900], [0, 0, 1000, 1000])
+)
+def test_owned_form_row_keeps_ambiguous_label_ownership_out_of_canonical_text(
+    tmp_path, monkeypatch, option_box
+):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    image = tmp_path / "form.png"
+    Image.new("RGB", (200, 100), "white").save(image)
+    page = {
+        "page_number": 1,
+        "width": 200,
+        "height": 100,
+        "regions": [
+            {
+                "id": "form",
+                "kind": "figure",
+                "text": "",
+                "resolution": "unreadable",
+                "bounding_box": {"left": 0, "top": 0, "right": 200, "bottom": 100},
+                "structure": {"role": "form_source"},
+            },
+            {
+                "id": "row",
+                "kind": "layout_block",
+                "text": "□ Option A □ Option B",
+                "resolution": "resolved",
+                "bounding_box": {"left": 0, "top": 10, "right": 200, "bottom": 50},
+                "structure": {
+                    "role": "layout_block",
+                    "block_type": "form_row",
+                    "child_evidence_ids": ["label-a", "label-b"],
+                    "fields": [
+                        {"evidence_ids": ["label-a"]},
+                        {"evidence_ids": ["label-b"]},
+                    ],
+                },
+            },
+            {
+                "id": "label-a",
+                "kind": "text",
+                "text": "Option A",
+                "resolution": "resolved",
+                "bounding_box": {"left": 10, "top": 15, "right": 80, "bottom": 30},
+                "structure": {"layout_owner_id": "row"},
+            },
+            {
+                "id": "label-b",
+                "kind": "text",
+                "text": "Option B",
+                "resolution": "resolved",
+                "bounding_box": {
+                    "left": 120,
+                    "top": 15,
+                    "right": 190,
+                    "bottom": 30,
+                },
+                "structure": {"layout_owner_id": "row"},
+            },
+        ],
+    }
+
+    def transport(request, timeout):
+        payload = json.loads(request.data)
+        schema_name = payload["response_format"]["json_schema"]["name"]
+        crops = (
+            [
+                {
+                    "region_id": "crop-1",
+                    "markdown": "[form options extracted]",
+                    "controls": [],
+                }
+            ]
+            if schema_name == "page_crops"
+            else [
+                {
+                    "region_id": "crop-2",
+                    "markdown": "[form options extracted]",
+                    "controls": [
+                        {
+                            "label": "Option A",
+                            "group_label": "Choices",
+                            "state": "selected",
+                            "bbox_2d": option_box,
+                        }
+                    ],
+                }
+            ]
+        )
+        return (
+            200,
+            {},
+            json.dumps(
+                {
+                    "model": payload["model"],
+                    "choices": [
+                        {
+                            "message": {"content": json.dumps({"crops": crops})},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 50, "completion_tokens": 10},
+                }
+            ).encode(),
+        )
+
+    result = refine_page(image, page, "base output", transport=transport)
+    unresolved = [
+        region
+        for region in result["refined_regions"]
+        if (region.get("text_provenance") or {}).get("method")
+        == "qwen_form_option_extraction"
+    ]
+
+    assert result["status"] == "partial"
+    assert result["form_controls_added"] == 0
+    assert result["form_controls_unresolved"] == 1
+    assert result["accepted_control_crop_ids"] == []
+    assert unresolved[0]["resolution"] == "unreadable"
+    assert unresolved[0]["structure"]["label_evidence_ids"] == []
+    assert "[x] Option A" not in result["content"]["markdown"]
+    assert result["content"]["markdown"].count("Option A") == 1
+
+
+def test_owned_form_rows_keep_side_by_side_columns():
+    form = {
+        "id": "form",
+        "kind": "figure",
+        "bounding_box": {"left": 0, "top": 0, "right": 200, "bottom": 100},
+        "structure": {"role": "form_source"},
+    }
+    rows = [
+        {
+            "id": side,
+            "kind": "layout_block",
+            "text": "□ First □ Second",
+            "reading_order": index,
+            "bounding_box": {
+                "left": left,
+                "top": 10,
+                "right": right,
+                "bottom": 40,
+            },
+            "structure": {
+                "role": "layout_block",
+                "block_type": "form_row",
+                "child_evidence_ids": [f"{side}-1", f"{side}-2"],
+            },
+        }
+        for index, (side, left, right) in enumerate(
+            (("left", 0, 95), ("right", 105, 200)), start=1
+        )
+    ]
+
+    assert [row["id"] for row in _owned_form_rows([form, *rows])] == [
+        "left",
+        "right",
+    ]
 
 
 def test_form_source_without_structured_controls_stays_unresolved(

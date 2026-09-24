@@ -188,10 +188,13 @@ def _display_regions(
         _id(region)
         for region in included
         if _semantic_kind(region) == "control"
-        and any(
-            _owned_by_layout(source, owner_ids)
-            for label_id in (_structure(region).get("label_evidence_ids") or [])
-            if (source := source_index.get(str(label_id))) is not None
+        and (
+            _owned_by_layout(region, owner_ids)
+            or any(
+                _owned_by_layout(source, owner_ids)
+                for label_id in (_structure(region).get("label_evidence_ids") or [])
+                if (source := source_index.get(str(label_id))) is not None
+            )
         )
     }
     return [
