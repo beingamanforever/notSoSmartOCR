@@ -20,6 +20,7 @@ import re
 import statistics
 import shutil
 import time
+import unicodedata
 from urllib.parse import urlsplit
 
 from markdown_it import MarkdownIt
@@ -662,8 +663,10 @@ def read_annotations(path):
 
 def score_snippets(text, references):
     normalized = normalize(text)
+    # The reference goes through the same normalization, so list and heading markers
+    # ("- ", "1. ") count the same on both sides.
     expected = [
-        " ".join(unescape(reference["text"]).split()) if reference["scorable"] else ""
+        normalize(reference["text"]) if reference["scorable"] else ""
         for reference in references
     ]
     exact_matches = assign_occurrences(normalized, expected)
@@ -704,33 +707,41 @@ def score_snippets(text, references):
 
 
 def assign_occurrences(text, expected, source_offsets=None, source_text=None):
-    """Assign each source span once, preferring the most specific reference."""
+    """Assign each source span to at most one reference, placing as many as possible."""
     source_text = source_text or text
     offsets = source_offsets or list(range(len(text)))
-    assigned = [False] * len(expected)
-    used = []
-    order = sorted(range(len(expected)), key=lambda i: len(expected[i]), reverse=True)
-    for index in order:
-        value = expected[index]
-        if not value:
-            continue
+    candidates = []
+    for value in expected:
+        spans = []
         start = 0
-        while (match := text.find(value, start)) >= 0:
-            end = match + len(value)
-            source_start = offsets[match]
-            source_end = offsets[end - 1] + 1
+        while value and (match := text.find(value, start)) >= 0:
+            span = (offsets[match], offsets[match + len(value) - 1] + 1)
             start = match + 1
-            if not has_word_boundaries(source_text, source_start, source_end):
-                continue
-            if any(
-                source_start < used_end and used_start < source_end
-                for used_start, used_end in used
-            ):
-                continue
-            assigned[index] = True
-            used.append((source_start, source_end))
-            break
-    return assigned
+            if has_word_boundaries(source_text, *span):
+                spans.append(span)
+        candidates.append(spans)
+    order = sorted(
+        (i for i, spans in enumerate(candidates) if spans),
+        # Ties keep the old preference for the most specific (longest) reference.
+        key=lambda i: (len(candidates[i]), -len(expected[i])),
+    )
+    best: list[int] = []
+
+    def search(position, used, chosen):
+        nonlocal best
+        if len(chosen) + len(order) - position <= len(best):
+            return
+        if position == len(order):
+            best = list(chosen)
+            return
+        index = order[position]
+        for start, end in candidates[index]:
+            if all(end <= used_start or used_end <= start for used_start, used_end in used):
+                search(position + 1, [*used, (start, end)], [*chosen, index])
+        search(position + 1, used, chosen)
+
+    search(0, [], [])
+    return [index in best for index in range(len(expected))]
 
 
 def compact_with_offsets(text):
@@ -781,6 +792,7 @@ def span_alignment(reference, prediction):
 def normalize(text):
     # Strip presentation syntax without discarding text inside HTML tables.
     blocks = []
+    text = unicodedata.normalize("NFC", text)
     for token in MarkdownIt("commonmark", {"html": True}).parse(text):
         if token.type == "inline":
             blocks.append(

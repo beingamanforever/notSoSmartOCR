@@ -45,13 +45,19 @@ def test_structured_adapters_do_not_copy_target_answers(monkeypatch):
     form = {
         "target": {
             "controls": [
-                {"control_id": "control-1", "label": "Consent", "state": "checked"}
+                {
+                    "control_id": "control-1",
+                    "label": "Consent",
+                    "state": "checked",
+                    "image_ids": ["image-1"],
+                }
             ]
         }
     }
     changed_form = json.loads(json.dumps(form))
     changed_form["target"]["controls"][0]["state"] = "unchecked"
-    assert adapt_form(form, form_page) == adapt_form(changed_form, form_page)
+    pages = {"image-1": form_page}
+    assert adapt_form(form, pages) == adapt_form(changed_form, pages)
 
     table_page = {
         "regions": [
@@ -116,12 +122,91 @@ def test_structured_adapters_do_not_copy_target_answers(monkeypatch):
     changed_table["target"]["tables"][0]["columns"].append(
         {"column_id": "column-3", "label": "Also missing"}
     )
-    prediction = adapt_tables(table, table_page)
-    assert prediction == adapt_tables(changed_table, table_page)
+    prediction = adapt_tables(table, {"image-1": table_page})
+    assert prediction == adapt_tables(changed_table, {"image-1": table_page})
     assert [row["row_id"] for row in prediction["tables"][0]["rows"]] == [
         "row-1",
         "row-2",
     ]
+
+
+def test_structured_adapters_pair_repeated_labels_and_unlabelled_rows(monkeypatch):
+    monkeypatch.syspath_prepend(
+        str(Path(__file__).parents[1] / "internal-clinical-ocr-benchmark")
+    )
+    from experiments.evaluate_structured_handwritten import adapt_form, adapt_tables
+
+    def box(top):
+        return {"left": 0, "top": top, "right": 10, "bottom": top + 5}
+
+    page = {
+        "regions": [
+            {"kind": "checkbox", "bounding_box": box(top), "structure": {"label": label, "state": state}}
+            for top, label, state in (
+                (0, "Yes", "selected"),
+                (10, "Yes", "unselected"),
+                (20, "Diabetes:", "selected"),
+            )
+        ]
+    }
+    controls = [
+        {"control_id": f"c{i}", "label": label, "image_ids": ["image-1"]}
+        for i, label in enumerate(("Yes", "Yes", "Diabetes"))
+    ]
+    form = {"target": {"controls": controls}}
+    assert adapt_form(form, {"image-1": page})["controls"] == [
+        {"control_id": "c0", "state": "checked"},
+        {"control_id": "c1", "state": "unchecked"},
+        {"control_id": "c2", "state": "checked"},
+    ]
+
+    table_page = {
+        "regions": [
+            {"kind": "section-header", "text": "Vitals", "bounding_box": box(0)},
+            {
+                "kind": "table",
+                "bounding_box": {"left": 0, "top": 10, "right": 100, "bottom": 100},
+                "structure": {
+                    "cells": [
+                        {"row_nums": [r], "column_nums": [c], "text": text}
+                        for r, c, text in (
+                            (0, 0, "Item"), (0, 1, "Value"),
+                            (1, 0, "BP"), (1, 1, "120/80"),
+                            (2, 0, ""), (2, 1, "98.6"),
+                        )
+                    ]
+                },
+            },
+        ]
+    }
+    table = {
+        "target": {
+            "tables": [
+                {
+                    "table_id": "t1",
+                    "image_id": "image-1",
+                    "label": "Vitals",
+                    "rows": [
+                        {"row_id": "row-1", "label": "Item"},
+                        {"row_id": "row-2", "label": "BP"},
+                        {"row_id": "row-3", "label": "row-3"},
+                    ],
+                    "columns": [
+                        {"column_id": "column-1", "label": "Item"},
+                        {"column_id": "column-2", "label": "Value"},
+                    ],
+                    "cells": [
+                        {"row_id": "row-3", "column_id": "column-2", "text": "98.6"},
+                    ],
+                }
+            ]
+        }
+    }
+    table_page["regions"][1]["structure"]["cells"][2]["text"] = "B P"  # one-space misread
+    table["target"]["tables"][0]["rows"][1]["label"] = "B.P"
+    predicted = adapt_tables(table, {"image-1": table_page})["tables"][0]
+    assert predicted["label"] == "Vitals"
+    assert {"row_id": "row-3", "column_id": "column-2", "text": "98.6"} in predicted["cells"]
 
 
 def test_comparison_end_to_end():
@@ -165,6 +250,24 @@ def test_comparison_end_to_end():
         ],
     )
     assert [score["recovered"] for score in overlapping] == [False, True]
+    # Placing the most references beats greedy longest-first placement.
+    shared = score_snippets(
+        "John Smith Jr\n\nJohn Smith",
+        [
+            {"row": 8, "text": "John Smith", "scorable": True},
+            {"row": 9, "text": "Smith Jr", "scorable": True},
+        ],
+    )
+    assert [score["recovered"] for score in shared] == [True, True]
+    # List markers are normalized identically in the reference and the prediction.
+    listed = score_snippets(
+        "- Aspirin 81 mg\n\n1. Walker daily",
+        [
+            {"row": 10, "text": "- Aspirin 81 mg", "scorable": True},
+            {"row": 11, "text": "1. Walker daily", "scorable": True},
+        ],
+    )
+    assert [score["recovered"] for score in listed] == [True, True]
 
     class Handler(BaseHTTPRequestHandler):
         falcon_model = "tiiuae/Falcon-OCR"

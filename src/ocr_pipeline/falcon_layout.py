@@ -1,21 +1,26 @@
 """Read learned layout regions with the official Falcon OCR decoder.
 
 Decoder scores and layout detection scores have separate provenance. A region box
-does not imply word locations, and token likelihood is not calibrated correctness.
+does not imply word locations. Text region confidence is a calibrated probability;
+table and checkbox confidence stays the uncalibrated decoder token likelihood.
 """
 
 from __future__ import annotations
 
 import base64
+import html
 import json
 import io
 import math
+from collections import Counter
 import re
+import unicodedata
 import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 from html.parser import HTMLParser
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from PIL import Image
@@ -23,6 +28,7 @@ from PIL import Image
 from .contracts import BoundingBox, TextRegion
 from .providers import ReaderError
 from .falcon import FALCON_SERVICE_MAX_RESPONSE_BYTES
+from .text_layer import read_cells
 
 PROVIDER = "falcon-perception"
 # Match the presentation HTML span limit and bound expanded grids before allocation.
@@ -47,11 +53,45 @@ TABLE_TEXT_BLOCK_TAGS = frozenset(
 HEADING = re.compile(r"^\s*(#{1,6})\s+(.*)$")
 # Only paired asterisks: a lone one is a real footnote mark on many clinical forms.
 EMPHASIS = re.compile(r"\*\*(.+?)\*\*")
-DECODED_BALLOT_MARK = re.compile(r"\[[xX ?]\]|[☐☑☒✓✔✗✘□■]")
+# Falcon's single v1.5 prompt picks its own markup, so any region can carry these.
+INLINE_TAG = re.compile(r"</?(?:sup|sub|strong|b|em|i|u|span|p|div|font)\b[^>]*>", re.I)
+LINE_BREAK_TAG = re.compile(r"<br\s*/?>", re.I)
+BALLOT_MARK = r"\[[xX ?]\]|[☐☑☒✓✔✗✘□■]"
+DECODED_BALLOT_MARK = re.compile(BALLOT_MARK)
 SELECTED_BALLOTS = frozenset({"[x]", "☑", "☒", "✓", "✔", "✗", "✘", "■"})
+# Filled squares and check marks also serve as list bullets; empty boxes do not.
+UNAMBIGUOUS_BALLOTS = frozenset({"[x]", "[ ]", "☐", "☑", "☒", "□"})
+# Platt scaling (Platt 1999) of Falcon's mean token log-probability and Heron's
+# detection score, fitted on 1,331 OmniDocBench text regions labelled with the official
+# OmniDocBench text normalization. Document-grouped 5-fold CV: ECE 0.121 for the raw
+# token score, 0.044 calibrated, AUROC 0.93.
+CONFIDENCE_WEIGHTS = (7.930, 1.787)
+CONFIDENCE_BIAS = 1.197
+CALIBRATED_CONFIDENCE = (
+    "calibrated probability that the text is within 10% normalized edit distance "
+    "of the ground truth"
+)
+UNCALIBRATED_CONFIDENCE = "decoder token likelihood, uncalibrated"
+TEXT_LAYER = "pdf_text_layer"
+TYPED_MARK = re.compile(r"^[Xx]\s+|\s+[Xx]$")
+PROGRAMMATIC_TEXT = "exact text from the PDF text layer, not recognized"
 # Markup truncated mid-tag ("</sup" with no ">") is handed back as text, not a tag.
+TRAILING_PARTIAL_TAG = re.compile(r"<[^<>]*$")
+MARKUP = re.compile(r"<[^<>]*>")
 # Layout categories that carry image pixels rather than text.
-EMPTY_CATEGORIES = frozenset({"image", "picture", "figure", "chart", "seal", "form"})
+EMPTY_CATEGORIES = frozenset(
+    {
+        "image",
+        "picture",
+        "figure",
+        "chart",
+        "seal",
+        "form",
+        "key-value-region",
+        "signature",
+        "hand-mark",
+    }
+)
 # Layout categories mapped onto the kinds the rest of the pipeline already understands.
 KIND_BY_CATEGORY = {
     "page_text": "page_text",
@@ -80,7 +120,13 @@ class FalconLayoutReader:
 
     name = "falcon-perception-layout"
 
-    def __init__(self, url: str, *, timeout_seconds: float = 600) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        timeout_seconds: float = 600,
+        word_detector: Callable[[Path], list[list[float]]] | None = None,
+    ) -> None:
         parsed = urlsplit(url)
         if parsed.scheme != "http" or parsed.hostname not in {
             "127.0.0.1",
@@ -92,6 +138,7 @@ class FalconLayoutReader:
             raise ValueError("timeout_seconds must be positive")
         self.url = url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.word_detector = word_detector
         self._model: dict[str, Any] = {}
 
     def check_health(self) -> None:
@@ -131,39 +178,37 @@ class FalconLayoutReader:
         return texts
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        cells = read_cells(image_path)
         payload = {
             "image": base64.b64encode(image_path.read_bytes()).decode("ascii"),
-            "page_text": False,
+            # A born-digital page has text cells; a scan sends detected words instead,
+            # so text no layout region holds is still read (Docling's orphan clusters).
+            **(
+                {"cells": cells}
+                if cells
+                else {"words": self.word_detector(image_path)}
+                if self.word_detector
+                else {}
+            ),
         }
         body = self._request(f"{self.url}/read", payload)
         elements = body.get("elements")
         if not isinstance(elements, list):
             raise ReaderError("falcon_layout_failed", "malformed element payload")
         model = dict(body.get("model") or self._model)
-        routing = body.get("routing")
-        if routing is not None and (
-            not isinstance(routing, dict)
-            or routing.get("action") not in {"layout", "plain"}
-            or not isinstance(routing.get("model"), dict)
-        ):
-            raise ReaderError("falcon_layout_failed", "malformed routing payload")
 
         regions = []
-        table_regions_by_query = {}
+        # One detected box can hold stacked tables; each is its own table grid.
+        elements = [part for element in elements for part in _table_parts(element)]
         for index, element in enumerate(elements, start=1):
             category = str(element.get("category") or "text")
             text = str(element.get("text") or "").strip()
-            if not text and category not in EMPTY_CATEGORIES | {
-                "checkbox-selected",
-                "checkbox-unselected",
-            }:
-                continue
             box = _bounding_box(element.get("bbox"))
             if box is None:
                 continue
             detection = {
                 key: element[key]
-                for key in ("query_id", "class_scores", "region_role")
+                for key in ("query_id", "class_scores", "orphan_text")
                 if key in element
             }
             terminated = _read_terminated(element)
@@ -177,20 +222,26 @@ class FalconLayoutReader:
                     else {}
                 ),
             }
-            # A completed retry is an alternative, not independent confirmation.
-            read_resolution = (
-                "unreadable"
-                if terminated
-                else "conflicting"
-                if attempts
-                else "resolved"
-            )
+            # A clean retry is the read; its calibrated confidence carries the doubt.
+            read_resolution = "unreadable" if terminated else "resolved"
             if category in {"checkbox-selected", "checkbox-unselected"}:
                 selected = category == "checkbox-selected"
                 raw_text = text
                 text = _checkbox_label(text)
                 if raw_text and not text:
                     read_resolution = "unreadable"
+                glyph = DECODED_BALLOT_MARK.match(raw_text)
+                glyph_selected = glyph and glyph.group().casefold() in SELECTED_BALLOTS
+                programmatic = element.get("text_source") == TEXT_LAYER
+                typed = programmatic and not glyph and TYPED_MARK.search(text)
+                if typed:
+                    # A form filled in software marks its box with a typed "X".
+                    text = TYPED_MARK.sub("", text).strip()
+                    selected = True
+                if glyph and programmatic:
+                    selected = bool(glyph_selected)  # the page's own glyph is the state
+                elif glyph and glyph_selected != selected:
+                    read_resolution = "conflicting"
                 regions.append(
                     TextRegion(
                         id=f"p{page_number}-falcon-{index}",
@@ -201,27 +252,46 @@ class FalconLayoutReader:
                         reading_order=index,
                         provider=PROVIDER,
                         text_provenance={
-                            "method": "learned_checkbox_detection",
+                            "method": TEXT_LAYER
+                            if programmatic
+                            else "learned_checkbox_detection",
                             "reading_order_method": "detector_sequence",
                             "model": model,
-                            "layout_detection": detection,
+                            "layout_detection": {
+                                **detection,
+                                "category": category,
+                                "score": float(element["score"]),
+                            },
                             "generation": element.get("generation") or {},
                             "raw_text": raw_text,
                             **read_history,
-                            "confidence_meaning": "decoder token likelihood, uncalibrated",
-                            **({"routing": routing} if routing is not None else {}),
+                            "confidence_meaning": PROGRAMMATIC_TEXT
+                            if programmatic
+                            else UNCALIBRATED_CONFIDENCE,
                         },
                         resolution=read_resolution,
                         structure={
                             "state": "selected" if selected else "unselected",
-                            "state_confidence": float(element["score"]),
+                            **(
+                                {
+                                    "decoded_state": "selected"
+                                    if glyph_selected
+                                    else "unselected"
+                                }
+                                if glyph
+                                else {}
+                            ),
+                            "state_confidence": None
+                            if programmatic and (glyph or typed)
+                            else float(element["score"]),
                             "label_evidence_ids": [],
                             "label": text,
                         },
                     )
                 )
                 continue
-            if category in EMPTY_CATEGORIES:
+            # A picture the reader transcribed (handwriting Heron calls `picture`) is text.
+            if category in EMPTY_CATEGORIES and not (category == "picture" and text):
                 with Image.open(image_path) as source:
                     box = BoundingBox(
                         max(0, box.left),
@@ -258,22 +328,29 @@ class FalconLayoutReader:
                             "layout_category": category,
                             "layout_detection_score": element.get("score"),
                             "model": model,
-                            **({"routing": routing} if routing is not None else {}),
                         },
                         resolution="unreadable"
-                        if category == "form"
+                        if category in {"form", "key-value-region"}
                         else read_resolution,
                         structure={
                             "image": asset,
-                            **({"role": "form_source"} if category == "form" else {}),
+                            **(
+                                {"role": "form_source"}
+                                if category in {"form", "key-value-region"}
+                                else {}
+                            ),
+                            # Located, never transcribed, as document APIs report it.
+                            **(
+                                {"role": "signature"} if category == "signature" else {}
+                            ),
                         },
                     )
                 )
                 continue
             text, kind = _plain_text(text, KIND_BY_CATEGORY.get(category, "text"))
-            if not text:
-                continue
-            decoded_control = _decoded_ballot_control(text, kind)
+            decoded_control = _decoded_ballot_control(
+                text, kind, element.get("class_scores")
+            )
             if decoded_control is not None:
                 text, state, state_glyph = decoded_control
                 kind = "checkbox"
@@ -287,6 +364,9 @@ class FalconLayoutReader:
                 else None
             )
             structure_error = None
+            if terminated:
+                # Evidence, not content: the detector's kind, not the one its markup claims.
+                kind = KIND_BY_CATEGORY.get(category, "text")
             if kind == "table":
                 try:
                     structure = _table_structure(text, element.get("generation"))
@@ -294,16 +374,32 @@ class FalconLayoutReader:
                     structure_error = str(error)
             if kind == "table" and structure:
                 text = _table_text(structure)
+            programmatic = element.get("text_source") == TEXT_LAYER
             recognition_method = (
-                "falcon_perception_plain_ocr"
+                TEXT_LAYER
+                if programmatic
+                else "falcon_perception_plain_ocr"
                 if category == "page_text"
                 else "falcon_perception_layout_ocr"
+            )
+            token_score = (element.get("generation") or {}).get("token_score")
+            # Fitted on greedy first reads; a sampled retry is outside that calibration.
+            # The calibration was fitted on Heron detection scores; an orphan line's
+            # score is docTR's, so it stays an uncalibrated decoder score.
+            calibrated = (
+                token_score is not None
+                and element.get("score") is not None
+                and kind not in {"table", "checkbox"}
+                and not attempts
+                and not element.get("orphan_text")
             )
             region = TextRegion(
                 id=f"p{page_number}-falcon-{index}",
                 kind=kind,
                 text=text,
-                confidence=(element.get("generation") or {}).get("token_score"),
+                confidence=calibrated_confidence(token_score, element["score"])
+                if calibrated
+                else token_score,
                 bounding_box=box,
                 reading_order=index,
                 provider=PROVIDER,
@@ -333,27 +429,26 @@ class FalconLayoutReader:
                         else {}
                     ),
                     "layout_category": category,
+                    **(
+                        {"table_structure_model": element["table_source"]}
+                        if "table_source" in element
+                        else {}
+                    ),
                     # Named so nobody reads this as a recognition confidence.
                     "layout_detection_score": element.get("score"),
-                    "confidence_meaning": "decoder token likelihood, uncalibrated"
-                    if (element.get("generation") or {}).get("token_score") is not None
+                    "confidence_meaning": PROGRAMMATIC_TEXT
+                    if programmatic
+                    else CALIBRATED_CONFIDENCE
+                    if calibrated
+                    else UNCALIBRATED_CONFIDENCE
+                    if token_score is not None
                     else "recognition unavailable",
                     "model": model,
-                    **({"routing": routing} if routing is not None else {}),
                 },
                 resolution="unreadable" if structure_error else read_resolution,
                 structure=structure or {},
             )
             regions.append(region)
-            if kind == "table" and element.get("query_id") is not None:
-                table_regions_by_query[element["query_id"]] = region.id
-        for region in regions:
-            role = region.text_provenance.get("layout_detection", {}).get("region_role")
-            if not isinstance(role, dict):
-                continue
-            owner = table_regions_by_query.get(role.get("source_query_id"))
-            if owner is not None:
-                region.structure["owner_region_id"] = owner
         if not regions:
             # A page with no readable region is a failed read, not an empty document.
             # Reporting it as success renders a handful of geometric controls and calls
@@ -364,6 +459,7 @@ class FalconLayoutReader:
                 f"the layout reader returned no readable region for page {page_number}",
             )
         _assign_image_owners(regions)
+        _flag_foreign_scripts(regions)
         return regions
 
     def _request(self, url: str, payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -386,6 +482,61 @@ class FalconLayoutReader:
             return result
         except (urllib.error.URLError, TimeoutError, ValueError, OSError) as error:
             raise ReaderError("falcon_layout_failed", str(error)) from error
+
+
+def calibrated_confidence(token_score: float, layout_score: float) -> float:
+    logit = (
+        CONFIDENCE_WEIGHTS[0] * math.log(max(token_score, 1e-12))
+        + CONFIDENCE_WEIGHTS[1] * layout_score
+        + CONFIDENCE_BIAS
+    )
+    return 1 / (1 + math.exp(-logit))
+
+
+def _flag_foreign_scripts(regions: list[TextRegion]) -> None:
+    """A script holding a sliver of the page's letters is a misread glyph, not a language.
+
+    Small crops of ticks and boxes decode as CJK characters (a box reads as "电"), and a
+    handwritten "2" as Georgian "ა" in several regions of one page, so "used by no other
+    region" missed repeated misreads.
+    """
+    counts = [
+        Counter() if region.kind == "formula" else _script_letters(region.text)
+        for region in regions
+    ]
+    page = sum(counts, Counter())
+    if len(page) < 2:
+        return
+    total = sum(page.values())
+    minor = {script for script, letters in page.items() if letters < MINOR_SCRIPT_SHARE * total}
+    for region, letters in zip(regions, counts):
+        # PDF characters were extracted, not generated by the crop decoder.
+        if (region.text_provenance or {}).get(
+            "confidence_meaning"
+        ) == PROGRAMMATIC_TEXT:
+            continue
+        foreign = set(letters) & minor
+        if not foreign or region.resolution == "unreadable":
+            continue
+        region.resolution = "conflicting"
+        region.text_provenance["foreign_script"] = sorted(foreign)
+
+
+# A page script holds at least this share of the page's letters.
+MINOR_SCRIPT_SHARE = 0.05
+
+
+def _script_letters(text: str) -> Counter:
+    # NFKC folds symbol letters (µ, º) into their script. Greek letters are ordinary
+    # symbols in Latin scientific text.
+    letters = Counter(
+        unicodedata.name(char, "?").split()[0]
+        for char in unicodedata.normalize("NFKC", text)
+        if char.isalpha()
+    )
+    letters.pop("GREEK", None)
+    return letters
+
 
 
 def _assign_image_owners(regions: list[TextRegion]) -> None:
@@ -426,12 +577,25 @@ def _assign_image_owners(regions: list[TextRegion]) -> None:
             continue
         role = (region.structure or {}).get("role")
         region.structure.update(
-            role="form_source" if role == "form_source" else "figure_source",
+            # Hidden form containers do not replace their children's visible pixels.
+            role=role
+            if role in {"form_source", "signature"}
+            or (parent.structure or {}).get("role") == "form_source"
+            or parent.resolution != "resolved"
+            else "figure_source",
             parent_region_id=parent.id,
         )
         children = parent.structure.setdefault("child_evidence_ids", [])
         if region.id not in children:
             children.append(region.id)
+        if (
+            region.structure.get("role") != "figure_source"
+            and region.resolution == "resolved"
+        ):
+            parents.insert(0, region)
+
+
+TABLE_START = re.compile(r"<table\b", re.IGNORECASE)
 
 
 class _TableParser(HTMLParser):
@@ -463,6 +627,8 @@ class _TableParser(HTMLParser):
             self._table_seen = True
         elif tag == "thead":
             self._in_head = True
+        elif tag in {"tbody", "tfoot"}:
+            self._in_head = False
         elif tag == "tr":
             # A row still open when the next one starts was never closed. The model's
             # table markup is often truncated mid-row, so flushing here rather than
@@ -490,7 +656,7 @@ class _TableParser(HTMLParser):
             self._outside.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag == "thead":
+        if tag in {"thead", "table"}:
             self._in_head = False
         elif tag == "tr":
             self._close_row()
@@ -508,6 +674,7 @@ class _TableParser(HTMLParser):
             self._outside.append(data)
 
     def close(self) -> None:
+        self.rawdata = TRAILING_PARTIAL_TAG.sub("", self.rawdata)
         super().close()
         # Truncated markup closes nothing: no </td>, no </tr>, no </table>.
         self._close_row()
@@ -536,20 +703,43 @@ class _TableParser(HTMLParser):
         self._row = None
 
 
-def _checkbox_label(text: str) -> str:
-    if "<table" in text.casefold():
-        parser = _TableParser(text)
+def _table_rows(text: str) -> list[list[str]] | None:
+    """Cell texts of one HTML table, or None when the markup is not one grid."""
+    parser = _TableParser(text)
+    try:
         parser.feed(text)
         parser.close()
-        text = " ".join(
-            cell_text for row in parser.rows for cell_text, *_ in row if cell_text
+    except ValueError:
+        return None
+    if parser.leading_text or parser.trailing_text or not parser.rows:
+        return None
+    return [[cell for cell, *_ in row] for row in parser.rows]
+
+
+def _unmarked_text(text: str) -> str:
+    """Flatten Falcon's HTML markup to the plain text `TextRegion.text` carries."""
+    if "<table" in text.casefold():
+        rows = _table_rows(text)
+        text = (
+            "\n".join(" ".join(cell for cell in row if cell) for row in rows)
+            if rows is not None
+            else " ".join(MARKUP.sub(" ", text).split())
         )
-    mark = r"(?:\[[x ?]\]|[☑☐✓✔✗✘□■])"
-    text = re.sub(rf"^{mark}\s*", "", text, flags=re.I)
-    return re.sub(rf"\s*{mark}$", "", text, flags=re.I).strip()
+    if not INLINE_TAG.search(text) and not LINE_BREAK_TAG.search(text):
+        return text
+    return html.unescape(INLINE_TAG.sub("", LINE_BREAK_TAG.sub("\n", text)))
 
 
-def _decoded_ballot_control(text: str, kind: str) -> tuple[str, str, str] | None:
+def _checkbox_label(text: str) -> str:
+    # Falcon may mark the label up as a heading; the region's kind is still checkbox.
+    text = _plain_text(text, "text")[0]
+    text = re.sub(rf"^(?:{BALLOT_MARK})\s*", "", text)
+    return re.sub(rf"\s*(?:{BALLOT_MARK})$", "", text).strip()
+
+
+def _decoded_ballot_control(
+    text: str, kind: str, class_scores: dict[str, float] | None = None
+) -> tuple[str, str, str] | None:
     if kind not in {"text", "list-item"}:
         return None
     marks = list(DECODED_BALLOT_MARK.finditer(text))
@@ -560,8 +750,25 @@ def _decoded_ballot_control(text: str, kind: str) -> tuple[str, str, str] | None
     label = text[marks[0].end() :].strip()
     if glyph == "[?]" or not label:
         return None
+    if glyph.casefold() not in UNAMBIGUOUS_BALLOTS and not _detector_sees_control(
+        class_scores
+    ):
+        return None
     state = "selected" if glyph.casefold() in SELECTED_BALLOTS else "unselected"
     return label, state, glyph
+
+
+def _detector_sees_control(class_scores: dict[str, float] | None) -> bool:
+    """A bullet-like glyph is a control only if Heron scores it more as one than a list."""
+    if not class_scores:
+        return False
+    control = max(
+        class_scores.get("checkbox_selected", 0.0),
+        class_scores.get("checkbox_unselected", 0.0),
+    )
+    return control > max(
+        class_scores.get("list_item", 0.0), class_scores.get("text", 0.0)
+    )
 
 
 def _table_structure(
@@ -620,14 +827,16 @@ def _table_structure(
         cells.append(cell)
         taken.update((r, c) for r in rows for c in columns)
     # A browser draws a short row as empty trailing cells, and the topology check needs
-    # the grid to be a complete rectangle, so the same cells are made explicit here.
+    # the grid to be a complete rectangle, so the same cells are made explicit here,
+    # marked as filler: the model wrote no cell there, empty or not.
     for position in (
         (r, c)
         for r in range(row_count)
         for c in range(column_count)
         if (r, c) not in taken
     ):
-        cells.append(_cell(len(cells), [position[0]], [position[1]], "", False))
+        filler = _cell(len(cells), [position[0]], [position[1]], "", False)
+        cells.append({**filler, "grid_fill": True})
     # Counted from the parsed rows, not the padded grid: a short header row gets filler
     # cells, and those are not headers.
     header_rows = 0
@@ -657,6 +866,41 @@ def _cell(
         "resolution": "resolved",
         "column_header": header,
     }
+
+
+def _table_parts(element: dict[str, Any]) -> list[dict[str, Any]]:
+    """Split a table read holding several <table> elements into one read per table.
+
+    The parts share the detected box (where one table ends is unknown) and each
+    keeps its own slice of the decoder's token offsets.
+    """
+    text = str(element.get("text") or "")
+    starts = [match.start() for match in TABLE_START.finditer(text)]
+    # Text before the first table (a caption) stays with the first table's read.
+    bounds = list(zip([0, *starts[1:]], [*starts[1:], len(text)]))
+    if (
+        element.get("category") != "table"
+        or len(starts) < 2
+        # A nested table opens before its parent closes; only stacked tables split.
+        or any("</table>" not in text[start:end].lower() for start, end in bounds[:-1])
+    ):
+        return [element]
+    generation = element.get("generation") or {}
+    parts = []
+    for start, end in bounds:
+        tokens = [
+            {**token, "start": token["start"] - start, "end": token["end"] - start}
+            for token in generation.get("tokens", [])
+            if token["start"] >= start and token["end"] <= end
+        ]
+        parts.append(
+            {
+                **element,
+                "text": text[start:end].strip(),
+                "generation": {**generation, "tokens": tokens},
+            }
+        )
+    return parts
 
 
 def _table_text(structure: dict[str, Any]) -> str:
@@ -700,11 +944,17 @@ def _plain_text(text: str, kind: str) -> tuple[str, str]:
     structure, so leaving the marker in place double-encodes it: the markdown lane adds
     its own prefix ("### # Title") and the text lane shows the bare marker to a reviewer.
     Table and formula markup is the region's content, so it passes through untouched.
+    A two-dimensional HTML table in any other region becomes a table; other markup
+    flattens to plain text.
     """
     if re.fullmatch(r"(`{3,}|~{3,})[^\n]*\n[\s\S]*\n\1\s*", text):
         return text, "code"
     if kind in {"table", "formula", "code"}:
         return text, kind
+    rows = _table_rows(text) if "<table" in text.casefold() else None
+    if rows is not None and len(rows) > 1 and max(map(len, rows)) > 1:
+        return text, "table"
+    text = _unmarked_text(text)
     level = 0
     lines = []
     for line in text.splitlines():
@@ -725,13 +975,39 @@ def _read_terminated(element: dict[str, Any]) -> str | None:
         return "spent its whole token budget"
     if element.get("looped"):
         return "repetition loop the retry ladder did not recover"
+    if element.get("text_source") != TEXT_LAYER and _exceeds_capacity(element):
+        return "more characters than its pixels can hold"
+    if not str(element.get("text") or "").strip() and element.get(
+        "category", "text"
+    ) not in EMPTY_CATEGORIES | {"checkbox-selected", "checkbox-unselected"}:
+        return "returned no text"
     return None
+
+
+# A legible glyph needs at least about 3x4 source pixels. Across 3568 Falcon reads the
+# densest genuine text held one character per 38 px2; an 18x30 px margin mark read as a
+# 1825-token table held one per 1.4 px2, with calibrated confidence 0.99.
+MIN_GLYPH_AREA = 12
+
+
+def _exceeds_capacity(element: dict[str, Any]) -> bool:
+    box = element.get("bbox")
+    if not isinstance(box, list) or len(box) != 4:
+        return False
+    area = max(0.0, float(box[2]) - float(box[0])) * max(0.0, float(box[3]) - float(box[1]))
+    characters = len("".join(MARKUP.sub(" ", str(element.get("text") or "")).split()))
+    return characters * MIN_GLYPH_AREA > area
 
 
 def _bounding_box(value: Any) -> BoundingBox | None:
     if not isinstance(value, list) or len(value) != 4:
         return None
-    left, top, right, bottom = (int(round(float(part))) for part in value)
+    values = [float(part) for part in value]
+    if not all(math.isfinite(part) for part in values):
+        return None
+    if values[2] <= values[0] or values[3] <= values[1]:
+        return None
+    left, top, right, bottom = (int(round(part)) for part in values)
     if right <= left or bottom <= top:
         return None
     return BoundingBox(left, top, right, bottom)

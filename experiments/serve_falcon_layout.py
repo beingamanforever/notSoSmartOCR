@@ -26,6 +26,7 @@ from concurrent.futures import wait
 from contextlib import contextmanager, nullcontext
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Protocol
 
 from PIL import Image, UnidentifiedImageError
@@ -39,104 +40,75 @@ from ocr_pipeline.falcon import (
     FALCON_OCR_CATEGORIES,
 )
 from ocr_pipeline.heron_layout import DEFAULT_MODEL_ID, DEFAULT_MODEL_REVISION
+from ocr_pipeline.falcon_layout import EMPTY_CATEGORIES
 
 # Detection and crop options the caller may override per request, so a coverage sweep
 # does not need a restart per combination.
 LAYOUT_OPTIONS = {
-    "layout_threshold": float,
     "max_image_size": int,
     "min_image_size": int,
     # A dense table stops mid-markup at the official 4096, losing its remaining rows.
     "max_new_tokens": int,
-    # Not a detection option: asks for the full-page read alongside the region reads.
-    "page_text": bool,
 }
-ROUTE_TRAINING_ACTIONS = {
-    "layout": "layout_selective_qwen",
-    "plain": "plain_falcon",
-}
-ROUTE_EXTRACTOR_VERSION = 1
-HERON_ROUTE_CLASSES = (
-    "caption",
-    "footnote",
-    "formula",
-    "list_item",
-    "page_footer",
-    "page_header",
-    "picture",
-    "section_header",
-    "table",
-    "text",
-    "title",
-    "document_index",
-    "code",
-    "checkbox_selected",
-    "checkbox_unselected",
-    "form",
-    "key_value_region",
-)
-HERON_ROUTE_FEATURE_NAMES = (
-    "image_log1p_width",
-    "image_log1p_height",
-    "image_aspect_ratio",
-    "detections_per_megapixel",
-    *(
-        f"{label}.{suffix}"
-        for label in HERON_ROUTE_CLASSES
-        for suffix in (
-            "count_fraction",
-            "max_score",
-            "area_ratio_sum",
-            "area_ratio_max",
-        )
-    ),
-    *(
-        f"{label}.{suffix}"
-        for label in HERON_ROUTE_CLASSES
-        for suffix in ("class_score_mean", "class_score_max")
-    ),
-)
-HERON_REGION_ROLE_FEATURE_NAMES = tuple(
-    f"class_score.{label}" for label in HERON_ROUTE_CLASSES
-)
 MAX_REQUEST_BYTES = 64_000_000
 MAX_IMAGE_PIXELS = 32_000_000
 LOGGER = logging.getLogger(__name__)
 # olmocr's production fix for VLM decode repetition: escalate temperature and retry.
 RETRY_TEMPERATURES = (0.2, 0.5, 0.8)
+# olmocr keeps the first retry that stops; on faint crops that kept sampled inventions
+# ("1 2 3 ... 1000" for a grey address line). A sampled read is kept only when another
+# successful read agrees with it (self-consistency); a hallucination rarely repeats.
+RETRY_AGREEMENT = 0.9
+# On a born-digital page these still decode: structure and LaTeX are not in the cells.
+DECODED_WITH_CELLS = frozenset({"table", "formula"})
+MAX_CELLS = 20_000
+RETRY_MIN_IMAGE_SIZE = 256
 MIN_DECODER_CYCLE_TOKENS = 256
+MAX_DECODER_CYCLE_PERIOD = 64
+DECODER_CYCLE_CHECK_INTERVAL = 32
 
 
-def _cycle_step(
-    state: tuple[int | None, int | None, int, int], token: int
-) -> tuple[int, int | None, int, int]:
-    last, previous, one, two = state
-    return (
-        token,
-        last,
-        one + 1 if token == last else 1,
-        two + 1 if token == previous else 2,
+def _decoder_cycle(token_ids: Sequence[int]) -> bool:
+    """Detect a recent repeat of any short period spanning the minimum cycle length."""
+    import numpy as np
+
+    tail = np.asarray(
+        token_ids[-(MIN_DECODER_CYCLE_TOKENS + MAX_DECODER_CYCLE_PERIOD) :]
     )
-
-
-def _decoder_cycle(token_ids: list[int]) -> bool:
-    """Detect a sustained trailing or near-complete decoder cycle."""
-    if len(token_ids) < MIN_DECODER_CYCLE_TOKENS:
+    if len(tail) < MIN_DECODER_CYCLE_TOKENS:
         return False
-    state: tuple[int | None, int | None, int, int] = (None, None, 0, 0)
-    longest = 0
-    for token in token_ids:
-        state = _cycle_step(state, token)
-        longest = max(longest, state[2], state[3])
-    return _cycle_detected(state, longest, len(token_ids))
+    # A short output that is almost entirely one cycle also counts.
+    needed = min(MIN_DECODER_CYCLE_TOKENS, 0.9 * len(token_ids))
+    for period in range(1, MAX_DECODER_CYCLE_PERIOD + 1):
+        same = np.concatenate(([0], tail[period:] == tail[:-period], [0]))
+        edges = np.flatnonzero(np.diff(same.astype(np.int8)))
+        if (edges[1::2] - edges[::2]).max(initial=0) + period >= needed:
+            return True
+    return False
 
 
-def _cycle_detected(
-    state: tuple[int | None, int | None, int, int], longest: int, length: int
-) -> bool:
-    return length >= MIN_DECODER_CYCLE_TOKENS and (
-        max(state[2:]) >= MIN_DECODER_CYCLE_TOKENS or longest * 10 >= length * 9
-    )
+def _agreed_reading(readings: Sequence[str]) -> str | None:
+    """The latest reading another reading agrees with, if any."""
+    from difflib import SequenceMatcher
+
+    normalized = [" ".join(reading.split()).casefold() for reading in readings]
+    for index in reversed(range(len(readings))):
+        if any(
+            SequenceMatcher(None, normalized[index], other).ratio() >= RETRY_AGREEMENT
+            for position, other in enumerate(normalized)
+            if position != index
+        ):
+            return readings[index]
+    return None
+
+
+def _without_reserved(
+    ids: Sequence[int], scores: Sequence[float], reserved: frozenset[int]
+) -> tuple[list[int], list[float]]:
+    """Drop reserved vocabulary slots (">>UNUSED_261<<"): they carry no text, and the
+    official decode keeps them, so an empty crop reads as that literal."""
+    kept = [(i, p) for i, p in zip(ids, scores) if i not in reserved]
+    return [i for i, _ in kept], [p for _, p in kept]
 
 
 class DecodedText(str):
@@ -159,257 +131,13 @@ class LayoutEngine(Protocol):
     def generate_plain(self, images: list[Any], **options: Any) -> list[str]: ...
 
 
-def load_route_model(path: os.PathLike[str] | str) -> dict[str, Any]:
-    """Load the dependency-free binary router exported by the offline trainer."""
-    try:
-        with open(path, encoding="utf-8") as source:
-            model = json.load(source)
-    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise ValueError(f"Invalid Falcon route model: {error}") from error
-    if not isinstance(model, dict):
-        raise ValueError("Falcon route model must be a JSON object")
-    feature_names = model.get("feature_names")
-    coefficients = model.get("coefficients")
-    means = model.get("means")
-    scales = model.get("scales")
-    cost_head = model.get("cost_head")
-    extractor = model.get("extractor")
-    if (
-        model.get("version") != 1
-        or not isinstance(model.get("id"), str)
-        or not model["id"].strip()
-        or model.get("status") != "calibrated"
-        or model.get("training_actions") != ROUTE_TRAINING_ACTIONS
-        or not isinstance(feature_names, list)
-        or feature_names != list(HERON_ROUTE_FEATURE_NAMES)
-        or not all(isinstance(values, list) for values in (coefficients, means, scales))
-        or any(
-            len(values) != len(feature_names)
-            for values in (coefficients, means, scales)
-        )
-        or not isinstance(cost_head, dict)
-        or not isinstance(cost_head.get("coefficients"), list)
-        or len(cost_head["coefficients"]) != len(feature_names)
-        or not _valid_extractor(extractor)
-    ):
-        raise ValueError("Invalid Falcon route model schema")
-    numbers = [
-        *coefficients,
-        *means,
-        *scales,
-        model.get("intercept"),
-        model.get("threshold"),
-        model.get("cost_tradeoff"),
-        *cost_head["coefficients"],
-        cost_head.get("intercept"),
-    ]
-    if any(
-        type(value) not in (int, float) or not math.isfinite(value) for value in numbers
-    ):
-        raise ValueError("Falcon route model values must be finite numbers")
-    if any(scale <= 0 for scale in scales):
-        raise ValueError("Falcon route model scales must be positive")
-    if model["cost_tradeoff"] < 0:
-        raise ValueError("Falcon route model cost tradeoff must be nonnegative")
-    return model
-
-
-def load_heron_region_role_model(
-    path: os.PathLike[str] | str,
-) -> dict[str, Any]:
-    """Load a calibrated table-to-form role classifier."""
-    try:
-        with open(path, encoding="utf-8") as source:
-            model = json.load(source)
-    except (OSError, TypeError, ValueError, json.JSONDecodeError) as error:
-        raise ValueError(f"Invalid Heron region role model: {error}") from error
-    if not isinstance(model, dict):
-        raise ValueError("Heron region role model must be a JSON object")
-    feature_names = model.get("feature_names")
-    coefficients = model.get("coefficients")
-    means = model.get("means")
-    scales = model.get("scales")
-    required_keys = {
-        "version",
-        "id",
-        "status",
-        "feature_names",
-        "coefficients",
-        "means",
-        "scales",
-        "intercept",
-        "threshold",
-        "extractor",
-    }
-    if (
-        not required_keys <= set(model) <= required_keys | {"development"}
-        or model.get("version") != 1
-        or not isinstance(model.get("id"), str)
-        or not model["id"].strip()
-        or model.get("status") != "calibrated"
-        or ("development" in model and not isinstance(model["development"], dict))
-        or feature_names != list(HERON_REGION_ROLE_FEATURE_NAMES)
-        or not all(isinstance(values, list) for values in (coefficients, means, scales))
-        or any(
-            len(values) != len(HERON_REGION_ROLE_FEATURE_NAMES)
-            for values in (coefficients, means, scales)
-        )
-        or not _valid_extractor(model.get("extractor"))
-    ):
-        raise ValueError("Invalid Heron region role model schema")
-    numbers = [
-        *coefficients,
-        *means,
-        *scales,
-        model.get("intercept"),
-        model.get("threshold"),
-    ]
-    if any(
-        type(value) not in (int, float) or not math.isfinite(value) for value in numbers
-    ):
-        raise ValueError("Heron region role model values must be finite numbers")
-    if any(scale <= 0 for scale in scales) or not 0 <= model["threshold"] <= 1:
-        raise ValueError("Invalid Heron region role model values")
-    return model
-
-
-def _valid_extractor(value: Any) -> bool:
-    return (
-        isinstance(value, dict)
-        and value.get("version") == ROUTE_EXTRACTOR_VERSION
-        and isinstance(value.get("heron_model_id"), str)
-        and bool(value["heron_model_id"])
-        and isinstance(value.get("heron_model_revision"), str)
-        and bool(re.fullmatch(r"[0-9a-f]{40}", value["heron_model_revision"]))
-        and type(value.get("layout_score_threshold")) in (int, float)
-        and math.isfinite(value["layout_score_threshold"])
-        and 0 <= value["layout_score_threshold"] <= 1
-    )
-
-
-def _route_page(
-    model: dict[str, Any], image: Image.Image, detections: list[dict[str, Any]]
-) -> dict[str, Any]:
-    features = route_features(*image.size, detections, model["feature_names"])
-    quality_delta = float(model["intercept"]) + sum(
-        float(coefficient) * (feature - float(mean)) / float(scale)
-        for coefficient, feature, mean, scale in zip(
-            model["coefficients"],
-            features,
-            model["means"],
-            model["scales"],
-            strict=True,
-        )
-    )
-    cost_saving = float(model["cost_head"]["intercept"]) + sum(
-        float(coefficient) * (feature - float(mean)) / float(scale)
-        for coefficient, feature, mean, scale in zip(
-            model["cost_head"]["coefficients"],
-            features,
-            model["means"],
-            model["scales"],
-            strict=True,
-        )
-    )
-    value = quality_delta + float(model["cost_tradeoff"]) * cost_saving
-    action = "plain" if value > model["threshold"] else "layout"
-    return {
-        "action": action,
-        "training_action": model["training_actions"][action],
-        "plain_quality_delta": quality_delta,
-        "plain_cost_saving": cost_saving,
-        "plain_value": value,
-        "cost_tradeoff": float(model["cost_tradeoff"]),
-        "threshold": float(model["threshold"]),
-        "model": {"id": model["id"], "version": model["version"]},
-    }
-
-
-def route_feature_values(
-    width: int,
-    height: int,
-    detections: list[dict[str, Any]],
-) -> dict[str, float]:
-    if width <= 0 or height <= 0:
-        raise ValueError("Route image dimensions must be positive")
-    page_area = width * height
-    normalized = []
-    for detection in detections:
-        category = str(detection.get("label") or detection.get("category") or "")
-        category = "code" if category == "algorithm" else category.replace("-", "_")
-        bbox = detection.get("box") or detection.get("bbox")
-        score = detection.get("score")
-        if (
-            not category
-            or not isinstance(bbox, (list, tuple))
-            or len(bbox) != 4
-            or type(score) not in (int, float)
-            or not math.isfinite(score)
-        ):
-            raise ValueError("Route proposals must contain category, bbox, and score")
-        try:
-            left, top, right, bottom = (float(value) for value in bbox)
-        except (TypeError, ValueError) as error:
-            raise ValueError("Route proposal bbox must be numeric") from error
-        if not all(math.isfinite(value) for value in (left, top, right, bottom)):
-            raise ValueError("Route proposal bbox must be finite")
-        raw_class_scores = detection.get("class_scores") or {}
-        if not isinstance(raw_class_scores, dict):
-            raise ValueError("Route proposal class_scores must be an object")
-        clean_class_scores = {}
-        for label, value in raw_class_scores.items():
-            if type(value) not in (int, float) or not math.isfinite(value):
-                raise ValueError("Route proposal class scores must be finite numbers")
-            clean_class_scores[str(label).replace("-", "_")] = float(value)
-        normalized.append(
-            {
-                "label": category,
-                "score": float(score),
-                "area_ratio": max(0.0, right - left)
-                * max(0.0, bottom - top)
-                / page_area,
-                "class_scores": clean_class_scores,
-            }
-        )
-    count = max(1, len(normalized))
-    values = {
-        "image_log1p_width": math.log1p(width),
-        "image_log1p_height": math.log1p(height),
-        "image_aspect_ratio": width / height,
-        "detections_per_megapixel": len(normalized) / max(1.0, page_area / 1_000_000),
-    }
-    for label in HERON_ROUTE_CLASSES:
-        selected = [item for item in normalized if item["label"] == label]
-        scores = [item["score"] for item in selected]
-        areas = [item["area_ratio"] for item in selected]
-        values[f"{label}.count_fraction"] = len(selected) / count
-        values[f"{label}.max_score"] = max(scores, default=0.0)
-        values[f"{label}.area_ratio_sum"] = sum(areas)
-        values[f"{label}.area_ratio_max"] = max(areas, default=0.0)
-    for label in HERON_ROUTE_CLASSES:
-        scores = [item["class_scores"].get(label, 0.0) for item in normalized]
-        values[f"{label}.class_score_mean"] = (
-            sum(scores) / len(scores) if scores else 0.0
-        )
-        values[f"{label}.class_score_max"] = max(scores, default=0.0)
-    return values
-
-
-def route_features(
-    width: int,
-    height: int,
-    detections: list[dict[str, Any]],
-    names: list[str],
-) -> list[float]:
-    if names != list(HERON_ROUTE_FEATURE_NAMES):
-        raise ValueError("Route feature names do not match the measured schema")
-    values = route_feature_values(width, height, detections)
-    return [values[name] for name in names]
-
-
 def _clamp_box(
     bbox: Sequence[float], width: int, height: int
 ) -> tuple[int, int, int, int] | None:
+    if len(bbox) != 4 or not all(math.isfinite(value) for value in bbox):
+        return None
+    if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+        return None
     left = max(0, min(width, int(bbox[0])))
     top = max(0, min(height, int(bbox[1])))
     right = max(0, min(width, int(bbox[2])))
@@ -424,144 +152,145 @@ def _exclusive_form_indices(items: list[dict[str, Any]]) -> set[int]:
     return {
         index
         for index, item in enumerate(items)
-        if item["label"] not in {"key_value_region", "document_index"}
+        if item["label"] != "key_value_region"
+        or not any(
+            parent["label"] == "form"
+            and parent["box"][0] <= item["box"][0]
+            and parent["box"][1] <= item["box"][1]
+            and parent["box"][2] >= item["box"][2]
+            and parent["box"][3] >= item["box"][3]
+            for parent in items
+        )
     }
 
 
-def _region_role_score(model: dict[str, Any], proposal: dict[str, Any]) -> float | None:
-    class_scores = proposal.get("class_scores")
-    if not isinstance(class_scores, dict) or set(class_scores) != set(
-        HERON_ROUTE_CLASSES
-    ):
-        return None
-    values = [class_scores[label] for label in HERON_ROUTE_CLASSES]
-    if any(
-        type(value) not in (int, float) or not math.isfinite(value) for value in values
-    ):
-        return None
-    logit = float(model["intercept"]) + sum(
-        float(coefficient) * (float(value) - float(mean)) / float(scale)
-        for coefficient, value, mean, scale in zip(
-            model["coefficients"],
-            values,
-            model["means"],
-            model["scales"],
-            strict=True,
-        )
+# Falcon Perception's official layout path: PP-DocLayoutV3 at its default threshold, then
+# its nested-box and duplicate filters. Labels map to the Heron vocabulary so every later
+# stage (routing, regions, rendering) is shared by both detectors.
+PP_LAYOUT_THRESHOLD = 0.3
+PP_CONTAINMENT = 0.8
+PP_TO_HERON = {
+    "abstract": "text",
+    "algorithm": "code",
+    "aside_text": "text",
+    "chart": "picture",
+    "content": "document_index",
+    "doc_title": "title",
+    "figure_title": "caption",
+    "footer": "page_footer",
+    "footnote": "footnote",
+    "formula": "formula",
+    "formula_number": "text",
+    "header": "page_header",
+    "image": "picture",
+    "number": "page_footer",
+    "paragraph_title": "section_header",
+    "reference": "text",
+    "reference_content": "text",
+    "seal": "picture",
+    "table": "table",
+    "text": "text",
+    "vision_footnote": "footnote",
+}
+
+
+def _official_proposals(detections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Official PP-DocLayoutV3 output (reading-order sorted) as Heron-style proposals."""
+    from falcon_perception.paged_ocr_inference import (
+        dedup_overlapping_detections,
+        filter_nested_detections,
     )
-    if not math.isfinite(logit):
-        return None
-    if logit >= 0:
-        return 1 / (1 + math.exp(-logit))
-    exponential = math.exp(logit)
-    return exponential / (1 + exponential)
 
-
-def _same_source_box(left: Sequence[float], right: Sequence[float]) -> bool:
-    left_x, top_y, right_x, bottom_y = (float(value) for value in left)
-    other_left, other_top, other_right, other_bottom = (float(value) for value in right)
-    intersection = max(0.0, min(right_x, other_right) - max(left_x, other_left)) * max(
-        0.0, min(bottom_y, other_bottom) - max(top_y, other_top)
+    kept = dedup_overlapping_detections(
+        filter_nested_detections(detections, PP_CONTAINMENT)
     )
-    left_area = max(0.0, right_x - left_x) * max(0.0, bottom_y - top_y)
-    right_area = max(0.0, other_right - other_left) * max(0.0, other_bottom - other_top)
-    union = left_area + right_area - intersection
-    return union > 0 and intersection / union >= 0.95
-
-
-def _companion_indices(items: list[dict[str, Any]]) -> set[int]:
-    retained = []
-    for index in sorted(
-        range(len(items)),
-        key=lambda value: (-items[value]["region_role"]["score"], value),
-    ):
-        if any(
-            _same_source_box(items[index]["bbox"], items[other]["bbox"])
-            for other in retained
-        ):
-            continue
-        retained.append(index)
-    return set(retained)
+    return [
+        {"label": PP_TO_HERON[item["category"]], "score": item["score"], "box": tuple(item["bbox"])}
+        for item in kept
+        if item["category"] in PP_TO_HERON
+    ]
 
 
 def _route_detection(
     proposals: list[dict[str, Any]],
-    region_role_model: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    kept = _exclusive_form_indices(proposals)
-    raw = [
-        {
-            "label": item["label"],
-            "box": list(item["box"]),
-            "score": item["score"],
-            **{key: item[key] for key in ("query_id", "class_scores") if key in item},
-        }
-        for item in proposals
-    ]
-    layout = [
+    resolved: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    resolved = proposals if resolved is None else resolved
+    kept = _exclusive_form_indices(resolved)
+    return [
         {
             "category": "algorithm"
             if item["label"] == "code"
             else item["label"].replace("_", "-"),
             "bbox": list(item["box"]),
             "score": item["score"],
-            **{key: item[key] for key in ("query_id", "class_scores") if key in item},
+            **{
+                key: item[key]
+                for key in ("query_id", "class_scores", "cell_text", "orphan_text")
+                if key in item
+            },
         }
-        for index, item in enumerate(proposals)
+        for index, item in enumerate(resolved)
         if index in kept
     ]
-    companions = []
-    if region_role_model is not None:
-        for item in proposals:
-            if item["label"] != "table":
-                continue
-            score = _region_role_score(region_role_model, item)
-            if score is None or score < region_role_model["threshold"]:
-                continue
-            companions.append(
-                {
-                    "category": "form",
-                    "bbox": list(item["box"]),
-                    "score": item["score"],
-                    **{
-                        key: item[key]
-                        for key in ("query_id", "class_scores")
-                        if key in item
-                    },
-                    "region_role": {
-                        "action": "add_form_source",
-                        "model": {
-                            "id": region_role_model["id"],
-                            "version": region_role_model["version"],
-                        },
-                        "score": score,
-                        "threshold": float(region_role_model["threshold"]),
-                        "source_query_id": item.get("query_id"),
-                    },
-                }
-            )
-        native_forms = [item for item in layout if item["category"] == "form"]
-        unmatched = []
-        for companion in companions:
-            native = next(
-                (
-                    item
-                    for item in native_forms
-                    if _same_source_box(item["bbox"], companion["bbox"])
-                ),
-                None,
-            )
-            if native is None:
-                unmatched.append(companion)
-                continue
-            current = native.get("region_role")
-            if current is None or current["score"] < companion["region_role"]["score"]:
-                native["region_role"] = companion["region_role"]
-        retained = _companion_indices(unmatched)
-        layout.extend(
-            companion for index, companion in enumerate(unmatched) if index in retained
+
+
+def _read_digital_tables(
+    table_reader: Callable[..., str],
+    image: Image.Image,
+    detections: list[dict[str, Any]],
+    cells: list[dict[str, Any]],
+) -> None:
+    """Give each born-digital table TableFormer's grid over the page's own cells."""
+    for detection in detections:
+        if detection["category"] != "table" or not detection.get("cell_text"):
+            continue
+        try:
+            detection["cell_text"] = table_reader(image, detection["bbox"], cells)
+        except Exception:
+            # The table still decodes from pixels; the failure stays in the log.
+            LOGGER.exception("TableFormer failed on a born-digital table")
+            continue
+        detection["table_source"] = getattr(table_reader, "name", "tableformer")
+
+
+def _valid_cells(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) > MAX_CELLS:
+        raise ValueError("invalid cells")
+    cells = []
+    for cell in value:
+        box = cell.get("bbox") if isinstance(cell, dict) else None
+        if (
+            not isinstance(cell, dict)
+            or not isinstance(cell.get("text"), str)
+            or not _finite_numbers(box, 4)
+        ):
+            raise ValueError("invalid cell")
+        cells.append({"text": cell["text"], "bbox": [float(v) for v in box]})
+    return cells
+
+
+def _finite_numbers(values: Any, count: int) -> bool:
+    return (
+        isinstance(values, list)
+        and len(values) == count
+        and all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            for v in values
         )
-    return {"raw": raw, "layout": layout}
+    )
+
+
+def _valid_words(value: Any) -> list[list[float]]:
+    """Detected word boxes, [left, top, right, bottom, score] in page pixels."""
+    if not isinstance(value, list) or len(value) > MAX_CELLS:
+        raise ValueError("invalid words")
+    if not all(
+        _finite_numbers(word, 5) and word[0] < word[2] and word[1] < word[3]
+        for word in value
+    ):
+        raise ValueError("invalid word")
+    return [[float(v) for v in word] for word in value]
 
 
 def create_server(
@@ -573,15 +302,13 @@ def create_server(
     tokenizer: Any = None,
     detect_layout: Callable[[list[Image.Image]], list[list[dict[str, Any]]]]
     | None = None,
-    detect_route: Callable[[list[Image.Image]], list[dict[str, Any]]] | None = None,
     layout: dict[str, Any] | None = None,
     category_by_layout: dict[str, str] | None = None,
     max_request_bytes: int = MAX_REQUEST_BYTES,
     max_image_pixels: int = MAX_IMAGE_PIXELS,
     feature_config: dict[str, Any] | None = None,
-    route_model: dict[str, Any] | None = None,
-    heron_region_role_model: dict[str, Any] | None = None,
-    extractor_metadata: dict[str, Any] | None = None,
+    table_reader: Callable[..., str] | None = None,
+    detect_on_engine: bool = False,
 ) -> ThreadingHTTPServer:
     layout = dict(layout or {})
     category_by_layout = dict(category_by_layout or {})
@@ -589,15 +316,6 @@ def create_server(
     unavailable = threading.Event()
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise ValueError("Falcon layout service must bind to loopback")
-    if route_model is not None and detect_route is None:
-        raise ValueError("A Falcon route model requires one-pass Heron route detection")
-    if route_model is not None and route_model["extractor"] != extractor_metadata:
-        raise ValueError("Falcon route model extractor does not match the service")
-    if (
-        heron_region_role_model is not None
-        and heron_region_role_model["extractor"] != extractor_metadata
-    ):
-        raise ValueError("Heron region role model extractor does not match the service")
 
     @contextmanager
     def execute_engine():
@@ -629,16 +347,6 @@ def create_server(
                     "status": "unavailable" if unavailable.is_set() else "ready",
                     "pid": os.getpid(),
                     "model": model,
-                    **(
-                        {
-                            "routing_model": {
-                                "id": route_model["id"],
-                                "version": route_model["version"],
-                            }
-                        }
-                        if route_model is not None
-                        else {}
-                    ),
                 },
             )
 
@@ -655,88 +363,34 @@ def create_server(
             except (ValueError, OSError, UnidentifiedImageError, binascii.Error):
                 self._write_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_request"})
                 return
-            want_page = bool(overrides.pop("page_text", False))
-            if route_model is not None and want_page:
-                image.close()
-                self._write_json(
-                    HTTPStatus.BAD_REQUEST,
-                    {"error": "page_text_not_available_with_learned_routing"},
-                )
-                return
             cap = int(
                 {**layout, **overrides}.get("max_new_tokens") or FALCON_MAX_NEW_TOKENS
             )
             try:
                 options = {**layout, **overrides}
-                routing = None
-                if route_model is not None:
-                    with execute_engine():
-                        detections = detect_route([image])
-                        if not isinstance(detections, list) or len(detections) != 1:
-                            raise ValueError(
-                                "Heron must return one proposal list per page"
-                            )
-                        detection = detections[0]
-                        if (
-                            not isinstance(detection, dict)
-                            or not isinstance(detection.get("raw"), list)
-                            or not isinstance(detection.get("layout"), list)
-                        ):
-                            raise ValueError("Heron route detection is malformed")
-                        routing = _route_page(route_model, image, detection["raw"])
-                        if routing["action"] == "plain":
-                            reading = engine.generate_plain(
-                                images=[image], use_tqdm=False
-                            )[0]
-                            if not isinstance(reading, str) or not reading.strip():
-                                raise ValueError(
-                                    "Falcon plain decoder returned no text"
-                                )
-                            page_text = ""
-                            built = [
-                                {
-                                    "category": "page_text",
-                                    "bbox": [
-                                        0.0,
-                                        0.0,
-                                        float(image.width),
-                                        float(image.height),
-                                    ],
-                                    "text": reading,
-                                    "truncated": self._truncated(reading),
-                                    "looped": self._looped(reading, "text"),
-                                    "generation": getattr(reading, "generation", {}),
-                                }
-                            ]
-                        else:
-                            options["detections"] = [detection["layout"]]
-                            elements = engine.generate_with_layout(
-                                images=[image], use_tqdm=False, **options
-                            )[0]
-                            page_text = ""
-                            built = [
-                                self._build_element(element, image, cap)
-                                for element in elements
-                                if element.get("bbox")
-                            ]
-                else:
-                    if detect_layout is not None:
-                        options["detections"] = detect_layout([image])
-                    with execute_engine():
-                        elements = engine.generate_with_layout(
-                            images=[image], use_tqdm=False, **options
-                        )[0]
-                        # Optional comparison path retained for existing callers.
-                        page_text = (
-                            engine.generate_plain(images=[image], use_tqdm=False)[0]
-                            if want_page
-                            else ""
+                cells = options.pop("cells", None)
+                words = options.pop("words", None)
+                timings = {"meaning": "inclusive_host_seconds_not_gpu_kernel_timings"}
+                started = time.perf_counter()
+                if detect_layout is not None:
+                    # A GPU detector shares the device with decoding, so it takes the engine lock.
+                    with execute_engine() if detect_on_engine else nullcontext():
+                        options["detections"] = (
+                            detect_layout([image], cells=[cells])
+                            if cells
+                            else detect_layout([image], words=[words])
+                            if words
+                            else detect_layout([image])
                         )
-                        built = [
-                            self._build_element(element, image, cap)
-                            for element in elements
-                            if element.get("bbox")
-                        ]
+                timings["layout_seconds"] = time.perf_counter() - started
+                if cells and table_reader is not None and "detections" in options:
+                    started = time.perf_counter()
+                    _read_digital_tables(
+                        table_reader, image, options["detections"][0], cells
+                    )
+                    timings["digital_table_seconds"] = time.perf_counter() - started
+                with execute_engine():
+                    built = self._read_layout(image, options, cap, timings)
             except Exception:
                 LOGGER.exception("Falcon layout read failed")
                 self._write_json(
@@ -756,9 +410,8 @@ def create_server(
                 HTTPStatus.OK,
                 {
                     "elements": built,
-                    "page_text": page_text,
                     "model": model,
-                    **({"routing": routing} if routing is not None else {}),
+                    "timings": timings,
                 },
             )
 
@@ -1069,30 +722,104 @@ def create_server(
                 "error": error,
             }
 
+        def _read_layout(
+            self,
+            image: Image.Image,
+            options: dict[str, Any],
+            cap: int,
+            timings: dict[str, Any] | None = None,
+        ) -> list[dict[str, Any]]:
+            timings = {} if timings is None else timings
+            started = time.perf_counter()
+            elements = engine.generate_with_layout(
+                images=[image], use_tqdm=False, **options
+            )[0]
+            timings["decode_seconds"] = time.perf_counter() - started
+            timings["crops"] = len(elements)
+            started = time.perf_counter()
+            # Failed crops are retried together through the same crop path.
+            attempts = {
+                index: []
+                for index, element in enumerate(elements)
+                if self._failed(element)
+            }
+            for temperature in RETRY_TEMPERATURES:
+                pending = [
+                    index
+                    for index, tries in attempts.items()
+                    if _agreed_reading(self._successes(elements[index], tries)) is None
+                ]
+                if not pending:
+                    break
+                retried = engine.generate_with_layout(
+                    images=[image],
+                    use_tqdm=False,
+                    **{
+                        **options,
+                        "detections": [[elements[index] for index in pending]],
+                        "temperature": temperature,
+                        "min_image_size": RETRY_MIN_IMAGE_SIZE,
+                        "max_new_tokens": cap,
+                    },
+                )[0]
+                for index, element in zip(pending, retried, strict=True):
+                    attempts[index].append(element["text"])
+            timings["retry_seconds"] = time.perf_counter() - started
+            timings["retried_crops"] = len(attempts)
+            return [
+                self._build_element(element, attempts.get(index, []))
+                for index, element in enumerate(elements)
+                if element.get("bbox")
+            ]
+
+        def _successes(self, element: dict[str, Any], tries: list[str]) -> list[str]:
+            return [
+                reading
+                for reading in tries
+                if reading.strip() and not self._failed({**element, "text": reading})
+            ]
+
+        def _failed(self, element: dict[str, Any]) -> bool:
+            text = element.get("text", "")
+            category = str(element.get("category") or "text")
+            empty = not text.strip() and category not in EMPTY_CATEGORIES | {
+                "checkbox-selected",
+                "checkbox-unselected",
+            }
+            return empty or self._truncated(text) or self._looped(text, category)
+
         def _build_element(
-            self, element: dict[str, Any], image: Image.Image, cap: int
+            self, element: dict[str, Any], attempts: list[str]
         ) -> dict[str, Any]:
             category = str(element.get("category") or "text")
-            bbox = [float(value) for value in element["bbox"]]
-            text = element.get("text") or ""
-            truncated = self._truncated(text)
+            text = element.get("text", "")
             looped = self._looped(text, category)
             built = {
                 "category": category,
-                "bbox": bbox,
+                "bbox": [float(value) for value in element["bbox"]],
                 "score": float(element.get("score") or 0.0),
                 "text": text,
-                "truncated": truncated,
+                "truncated": self._truncated(text),
                 "generation": getattr(text, "generation", {}),
                 **{
                     key: element[key]
-                    for key in ("query_id", "class_scores", "region_role")
+                    for key in ("query_id", "class_scores")
                     if key in element
                 },
+                **(
+                    {"text_source": "pdf_text_layer"}
+                    if element.get("cell_text")
+                    and (
+                        "table_source" in element or category not in DECODED_WITH_CELLS
+                    )
+                    else {}
+                ),
+                **(
+                    {"table_source": element["table_source"]}
+                    if "table_source" in element
+                    else {}
+                ),
             }
-            if not truncated and not looped:
-                return built
-            attempts = self._retry_read(image, bbox, category, cap)
             if not attempts:
                 if looped:
                     built["looped"] = True
@@ -1102,59 +829,14 @@ def create_server(
                 for reading in [text, *attempts]
             ]
             built["retries"] = len(attempts)
-            last = attempts[-1]
-            if (
-                last.strip()
-                and not self._truncated(last)
-                and not self._looped(last, category)
-            ):
-                built["text"] = last
-                built["generation"] = getattr(last, "generation", {})
+            agreed = _agreed_reading(self._successes(element, attempts))
+            if agreed is not None:
+                built["text"] = agreed
+                built["generation"] = getattr(agreed, "generation", {})
                 built["truncated"] = False
             elif looped:
                 built["looped"] = True
             return built
-
-        def _retry_read(
-            self,
-            image: Image.Image,
-            bbox: list[float],
-            category: str,
-            cap: int,
-        ) -> list[str]:
-            """Retry the source crop at the official loader's minimum resolution."""
-            ocr_category = category_by_layout.get(category)
-            box = _clamp_box(bbox, image.width, image.height)
-            if ocr_category is None or box is None:
-                return []
-            crop = image.crop(box)
-            attempts = []
-            try:
-                budget = FALCON_MAX_NEW_TOKENS
-                temperatures = (0.0, *RETRY_TEMPERATURES)
-                for temperature in temperatures:
-                    text = engine.generate_plain(
-                        images=[crop],
-                        category=[ocr_category],
-                        temperature=temperature,
-                        max_new_tokens=budget,
-                        min_image_size=256,
-                        max_image_size=int(
-                            layout.get("max_image_size", FALCON_MAX_IMAGE_SIZE)
-                        ),
-                        use_tqdm=False,
-                    )[0]
-                    attempts.append(text)
-                    if (
-                        text.strip()
-                        and not self._truncated(text)
-                        and not self._looped(text, category)
-                    ):
-                        break
-                return attempts
-            finally:
-                _drain_tokenization(engine)
-                crop.close()
 
         @staticmethod
         def _truncated(text: str) -> bool:
@@ -1185,6 +867,10 @@ def create_server(
                 for name in LAYOUT_OPTIONS
                 if name in payload
             }
+            if "cells" in payload:
+                overrides["cells"] = _valid_cells(payload["cells"])
+            if "words" in payload:
+                overrides["words"] = _valid_words(payload["words"])
             if (
                 not 0
                 < overrides.get("max_new_tokens", FALCON_MAX_NEW_TOKENS)
@@ -1197,6 +883,11 @@ def create_server(
                 or max_image_size % 16 != 0
             ):
                 raise ValueError("invalid max_image_size")
+            min_image_size = overrides.get(
+                "min_image_size", layout.get("min_image_size", 64)
+            )
+            if not 0 < min_image_size <= max_image_size:
+                raise ValueError("invalid min_image_size")
             data = base64.b64decode(encoded, validate=True)
             with Image.open(io.BytesIO(data)) as opened:
                 if opened.width * opened.height > max_image_pixels:
@@ -1255,13 +946,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(
             f"--max-image-size must be a multiple of 16 up to {FALCON_MAX_IMAGE_SIZE}"
         )
-    route_model = load_route_model(args.route_model) if args.route_model else None
-    region_role_model = (
-        load_heron_region_role_model(args.heron_region_role_model)
-        if args.heron_region_role_model
-        else None
-    )
-
+    if args.control_slices == 1 or args.control_slices < 0:
+        parser.error("--control-slices must be 0 (off) or at least 2")
+    if args.min_image_size > args.max_image_size:
+        parser.error("--min-image-size must not exceed --max-image-size")
     from falcon_perception import (
         load_and_prepare_model,
         setup_torch_config,
@@ -1272,12 +960,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         LAYOUT_TO_OCR_CATEGORY,
         OCRInferenceEngine,
     )
-    from ocr_pipeline.heron_layout import HeronTableDetector
+    from ocr_pipeline.digital_tables import DigitalTableReader
+    from ocr_pipeline.coverage import orphan_text_detections
+    from ocr_pipeline.heron_layout import (
+        CONTROL_LABELS,
+        CONTROL_REGION_LABELS,
+        HeronTableDetector,
+        resolve_layout,
+    )
 
     layout_categories = {
         **LAYOUT_TO_OCR_CATEGORY,
         "checkbox-selected": LAYOUT_TO_OCR_CATEGORY["text"],
         "checkbox-unselected": LAYOUT_TO_OCR_CATEGORY["text"],
+        "document-index": LAYOUT_TO_OCR_CATEGORY["text"],
+        # Heron labels most handwriting `picture` (54% of NAF handwritten fields), so
+        # pictures are read too: +10 exact handwriting snippets, table TEDS 0.749 -> 0.768.
+        "picture": LAYOUT_TO_OCR_CATEGORY["text"],
     }
 
     class DocumentLayoutEngine(OCRInferenceEngine):
@@ -1299,16 +998,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     False,
                 )
                 if monitor:
-                    state = _cycle_step(
-                        getattr(sequence, "_cycle_state", (None, None, 0, 0)),
-                        token_id,
-                    )
-                    sequence._cycle_state = state
-                    sequence._cycle_longest = max(
-                        getattr(sequence, "_cycle_longest", 0), state[2], state[3]
-                    )
-                    if _cycle_detected(
-                        state, sequence._cycle_longest, sequence.output_length
+                    history = getattr(sequence, "_cycle_history", None)
+                    if history is None:
+                        history = sequence._cycle_history = []
+                    history.append(token_id)
+                    if len(history) % DECODER_CYCLE_CHECK_INTERVAL == 0 and (
+                        _decoder_cycle(history)
                     ):
                         sequence._decoder_cycle_stopped = True
                 if (
@@ -1323,20 +1018,52 @@ def main(argv: Sequence[str] | None = None) -> int:
                 self._finalize_done(done)
             return [sequence for sequence in sequences if not sequence.finished]
 
+        layout_backend = "heron"
+        control_slices = 0
+        orphan_text = True
+
         def load_layout_model(self, layout_model=None):
-            # The caller supplies the IBM detector. Never lazily load Paddle weights.
-            return
+            # Paddle weights load only when explicitly chosen as the layout backend.
+            if self.layout_backend == "pp-doclayout-v3":
+                OCRInferenceEngine.load_layout_model(self)
 
-        def run_layout_detection(self, images, threshold=0.5):
-            return [item["layout"] for item in self.run_route_detection(images)]
-
-        def run_route_detection(self, images):
-            return [
-                _route_detection(
-                    self.layout_detector.detect_elements(image), region_role_model
-                )
-                for image in images
-            ]
+        def run_layout_detection(self, images, threshold=0.5, cells=None, words=None):
+            detections = []
+            for index, image in enumerate(images):
+                page_cells = cells[index] if cells else None
+                page_words = words[index] if words else None
+                if self.layout_backend == "pp-doclayout-v3":
+                    proposals = _official_proposals(
+                        OCRInferenceEngine.run_layout_detection(
+                            self, [image], threshold=PP_LAYOUT_THRESHOLD
+                        )[0]
+                    )
+                    # A born-digital page still takes Docling's cell assignment.
+                    resolved = (
+                        resolve_layout(proposals, *image.size, page_cells)
+                        if page_cells
+                        else proposals
+                    )
+                else:
+                    proposals = self.layout_detector.detect_elements(image)
+                    # Only tiles over control, form, key-value or table proposals are sliced.
+                    regions = [
+                        item["box"]
+                        for item in proposals
+                        if item["label"] in CONTROL_REGION_LABELS
+                    ]
+                    if self.control_slices and regions:
+                        proposals += self.layout_detector.detect_sliced_controls(
+                            image,
+                            self.control_slices,
+                            regions,
+                            [item for item in proposals if item["label"] in CONTROL_LABELS],
+                        )
+                    resolved = resolve_layout(proposals, *image.size, page_cells)
+                if page_words and not page_cells and self.orphan_text:
+                    resolved = [*resolved, *orphan_text_detections(resolved, page_words, image)]
+                detections.append(_route_detection(proposals, resolved))
+            return detections
 
         @staticmethod
         def build_crop_sequences(
@@ -1356,6 +1083,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 box = _clamp_box(detection["bbox"], *pil_img.size)
                 if category is None or box is None:
                     continue
+                if "table_source" in detection or (
+                    detection.get("cell_text")
+                    and detection["category"] not in DECODED_WITH_CELLS
+                ):
+                    continue  # the page's own text layer already holds this text
                 crop = pil_img.crop(box)
                 prepared = _prepare_falcon_crop(crop, max_image_size)
                 if prepared.owned:
@@ -1378,8 +1110,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return sequences
 
         def generate_with_layout(self, images, **options):
-            # Different learned classes may share pixels. Upstream overlap suppression
-            # randomly drops one of equal-size text/picture proposals, losing the text.
+            # Overlaps are resolved in run_layout_detection. Upstream suppression is tuned
+            # for PP-DocLayout and randomly drops equal-size text/picture proposals.
             detections = options.pop("detections", None)
             if detections is None:
                 detections = self.run_layout_detection(images)
@@ -1387,7 +1119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 [
                     {
                         **detection,
-                        "text": "",
+                        "text": detection.get("cell_text", ""),
                     }
                     for detection in page
                 ]
@@ -1438,6 +1170,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     sequence._image_raw.close()
             return results
 
+        def _reserved_ids(self):
+            if not hasattr(self, "_reserved"):
+                added = self.tokenizer._tok.get_added_tokens_decoder()
+                self._reserved = frozenset(
+                    i for i, token in added.items() if token.special and token.content.startswith(">>UNUSED_")
+                )
+            return self._reserved
+
         def _decode_seq_text(self, sequence):
             import torch
 
@@ -1445,6 +1185,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             probabilities = torch.stack(sequence._output_probs).float().cpu().tolist()
             stopped = bool(ids and ids[-1] in self._stop_token_ids())
             content_ids = ids[:-1] if stopped else ids
+            content_ids, probabilities = _without_reserved(
+                content_ids, probabilities, self._reserved_ids()
+            )
             raw = self.tokenizer.decode(content_ids)
             text = raw.strip()
             detail = {
@@ -1501,9 +1244,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError(
             "Falcon context length does not match the pinned v1.5 configuration"
         )
+    # A local fine-tuned checkpoint directory is pinned by its path, not a hub revision.
+    layout_revision = (
+        None
+        if Path(args.layout_model).is_dir() or args.layout_backend != "heron"
+        else args.layout_model_revision
+    )
+    engine.layout_backend = args.layout_backend
+    engine.control_slices = args.control_slices
+    engine.orphan_text = not args.no_orphan_text
+    engine.load_layout_model()
     engine.layout_detector = HeronTableDetector(
         model_id=args.layout_model,
-        revision=args.layout_model_revision,
+        revision=layout_revision,
         device=args.layout_device,
         score_threshold=args.layout_threshold,
     )
@@ -1512,46 +1265,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.host,
         args.port,
         tokenizer=tokenizer,
-        detect_layout=engine.run_layout_detection
-        if args.layout_device == "cpu"
-        else None,
-        detect_route=engine.run_route_detection if route_model is not None else None,
+        detect_layout=engine.run_layout_detection,
+        detect_on_engine=args.layout_device != "cpu",
         layout={
             "layout_threshold": args.layout_threshold,
             "max_new_tokens": args.max_new_tokens,
             "max_image_size": args.max_image_size,
+            "min_image_size": args.min_image_size,
         },
         category_by_layout=layout_categories,
         max_image_pixels=args.max_image_pixels,
+        table_reader=DigitalTableReader(
+            device=args.device, artifacts_path=args.tableformer_artifacts
+        ),
         feature_config={
             "compile_model": args.compile,
             "capture_cudagraph": args.cudagraph,
             "max_batch_size": args.max_batch_size,
             "n_pages": args.n_pages,
             "max_seq_length": model.args.max_seq_len,
+            "control_slices": args.control_slices,
+            "orphan_text": {"enabled": not args.no_orphan_text, "word_detector": "docTR db_resnet50"},
         },
         model={
             "id": args.model,
             "revision": args.model_revision,
             "inference_repository_revision": FALCON_INFERENCE_REPOSITORY_REVISION,
             "engine": "falcon-perception ocr_layout",
-            "layout_model": args.layout_model,
-            "layout_model_revision": args.layout_model_revision,
+            "layout_model": args.layout_model
+            if args.layout_backend == "heron"
+            else "PaddlePaddle/PP-DocLayoutV3_safetensors",
+            "layout_model_revision": layout_revision,
             "origin": "TII, UAE",
             "license": "Apache-2.0",
             "dtype": args.dtype,
             "score_meaning": "layout detection confidence; decoder probabilities in generation",
         },
-        route_model=route_model,
-        heron_region_role_model=region_role_model,
-        extractor_metadata={
-            "version": ROUTE_EXTRACTOR_VERSION,
-            "heron_model_id": args.layout_model,
-            "heron_model_revision": args.layout_model_revision,
-            "layout_score_threshold": args.layout_threshold,
-        }
-        if route_model is not None or region_role_model is not None
-        else None,
     )
     try:
         server.serve_forever(poll_interval=0.5)
@@ -1585,9 +1334,24 @@ def _parser() -> argparse.ArgumentParser:
     # Retained for existing launch commands; learned proposal ownership is preserved.
     parser.add_argument("--layout-threshold", type=float, default=0.3)
     parser.add_argument(
+        "--no-orphan-text",
+        action="store_true",
+        help="do not read detected words that no layout region holds (A/B only)",
+    )
+    parser.add_argument(
+        "--control-slices",
+        type=int,
+        # Handwritten forms 40.5% -> 49.6%, checkbox coverage 56.5% -> 60.0% (3x3).
+        default=3,
+        help="tiles per side for the sliced checkbox pass (0: off)",
+    )
+    parser.add_argument(
         "--max-new-tokens", type=_positive_int, default=FALCON_MAX_NEW_TOKENS
     )
     parser.add_argument("--layout-model", default=DEFAULT_MODEL_ID)
+    parser.add_argument(
+        "--layout-backend", choices=("heron", "pp-doclayout-v3"), default="heron"
+    )
     parser.add_argument(
         "--layout-model-revision",
         type=_model_revision,
@@ -1595,20 +1359,17 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--layout-device", default="cpu")
     parser.add_argument(
-        "--route-model",
-        type=os.fspath,
-        help="Validated linear JSON router for layout versus native full-page Falcon",
-    )
-    parser.add_argument(
-        "--heron-region-role-model",
-        type=os.fspath,
-        help="Calibrated Heron table-to-form role model",
-    )
-    parser.add_argument(
         "--max-image-size", type=_positive_int, default=FALCON_MAX_IMAGE_SIZE
     )
+    # Official Falcon resize floor: shorter crops are upscaled to it (64 in generate_plain).
+    parser.add_argument("--min-image-size", type=_positive_int, default=64)
     parser.add_argument(
         "--max-image-pixels", type=_positive_int, default=MAX_IMAGE_PIXELS
+    )
+    parser.add_argument(
+        "--tableformer-artifacts",
+        type=Path,
+        help="Parent of docling-project--docling-models; downloaded when omitted",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8087)

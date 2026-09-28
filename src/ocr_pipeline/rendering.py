@@ -15,11 +15,18 @@ UNREADABLE_HANDWRITING = "[unreadable handwriting]"
 MARK_GLYPHS = ("✓", "✗", "∅", "◯")
 CONTROL_SYMBOLS = ("[x]", "[ ]", "[?]", *MARK_GLYPHS)
 NATIVE_CONTROL_METHODS = {
+    "pdf_text_layer",
     "decoded_ballot_glyph_promotion",
     "learned_checkbox_detection",
     "qwen_crop_refinement",
     "qwen_form_option_extraction",
 }
+
+
+# Docling Markdown export levels: the page title, then its section headers.
+HEADING_MARKS = {"title": "#", "heading": "##"}
+# CommonMark opens raw HTML only at these, so OCR prose never becomes live markup.
+RAW_HTML_START = re.compile(r"<(?=[A-Za-z/!?])")
 
 
 def render_evidence(regions: list[TextRegion]) -> EvidenceText:
@@ -240,16 +247,15 @@ def _markdown_block(
     elif kind == "figure":
         asset = _structure(region).get("image", {})
         block = (
-            f"![Extracted image](data:image/png;base64,{asset['data']})"
+            f"![{'Signature' if _structure(region).get('role') == 'signature' else 'Extracted image'}]"
+            f"(data:image/png;base64,{asset['data']})"
             if resolution == "resolved"
             and asset.get("media_type") == "image/png"
             and asset.get("data")
             else text
         )
-    elif kind == "title":
-        block = f"### {text}" if text else ""
-    elif kind == "heading":
-        block = f"#### {text}" if text else ""
+    elif kind in HEADING_MARKS:
+        block = f"{HEADING_MARKS[kind]} {text}" if text else ""
     elif kind == "code":
         code = _canonical_layout_text(region, source_index)
         fence = re.match(r"^ {0,3}(`{3,}|~{3,})[^\n]*\n", code)
@@ -299,7 +305,9 @@ def _markdown_block(
         block = f"**{label}:** {value}" if label else value
     else:
         block = _display_text(region)
-    return block
+    if kind in {"table", "figure", "code", "formula"}:
+        return block
+    return RAW_HTML_START.sub("&lt;", block)
 
 
 def _markdown_table(region: dict[str, Any]) -> str:
@@ -309,10 +317,11 @@ def _markdown_table(region: dict[str, Any]) -> str:
     except TableTopologyError as error:
         return _invalid_table(region, str(error))
 
+    # A Markdown pipe table has exactly one header row; any other count needs HTML.
     header_row_count = structure.get("header_row_count")
     block = (
         _html_table(topology)
-        if topology.has_spans or header_row_count == 0
+        if topology.has_spans or header_row_count not in (None, 1)
         else _simple_markdown_table(topology)
     )
     return "\n\n".join(

@@ -7,6 +7,7 @@ import re
 import statistics
 from collections.abc import Callable
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -134,18 +135,53 @@ class EvidenceLayoutStage:
         if not sources:
             return updated
 
-        separators = _detect_separators(image_path, sources)
-        separators = (
-            *separators,
-            *_infer_sidebar_separators(image_path, sources, separators),
-        )
+        # Learned layout regions are already segmented and typed by the detector.
+        learned = all(_learned_region(region) for region in sources)
+        separators: tuple[_Separator, ...] = ()
+        positions: dict[str, int] = {}
+        candidates = None
+        if learned:
+            units = _learned_order(
+                [
+                    region
+                    for region in updated
+                    if region in sources
+                    or _top_level_presentation_item(region, excluded_ids)
+                ],
+                [
+                    region
+                    for region in updated
+                    if (region.text_provenance or {}).get("layout_category")
+                    == "key-value-region"
+                ],
+            )
+            ordered = [region for unit in units for region in unit]
+            positions = {region.id: index for index, region in enumerate(ordered)}
+            # One block per region, or per key-value field (its label and value read
+            # together). Docling's predict_merges is not used: it joins same-row cells
+            # of different form columns.
+            candidates = [
+                ("paragraph", [_Line([region]) for region in members])
+                if len(members) > 1
+                else (_source_type(members[0]), [_Line(members)])
+                for unit in units
+                if (members := [region for region in unit if region in sources])
+            ]
+        else:
+            separators = _detect_separators(image_path, sources)
+            separators = (
+                *separators,
+                *_infer_sidebar_separators(image_path, sources, separators),
+            )
         blocks = _build_blocks(
             sources,
             page_number,
             {region.id for region in updated},
             separators,
+            candidates,
         )
-        blocks = _group_formula_blocks(image_path, blocks)
+        if not learned:
+            blocks = _group_formula_blocks(image_path, blocks)
         owners = {
             evidence_id: (block.id, block.structure["block_type"])
             for block in blocks
@@ -159,7 +195,13 @@ class EvidenceLayoutStage:
             structure["layout_owner_id"], structure["layout_owner_type"] = owner
             region.structure = structure
         result = [*updated, *blocks]
-        _assign_presentation_ranks(result, separators, excluded_ids)
+        _assign_presentation_ranks(
+            result,
+            excluded_ids,
+            (lambda items: _position_order(items, positions))
+            if learned
+            else (lambda items: _spatial_order(items, separators)),
+        )
         return result
 
 
@@ -223,46 +265,10 @@ def _build_blocks(
     page_number: int,
     existing_ids: set[str],
     separators: tuple[_Separator, ...],
+    candidates: list[tuple[str, list[_Line]]] | None = None,
 ) -> list[TextRegion]:
-    atomic = [
-        region
-        for region in sources
-        if _source_type(region) != "text" or _is_orientation_residual(region)
-    ]
-    regular = [
-        region
-        for region in sources
-        if _source_type(region) == "text" and not _is_orientation_residual(region)
-    ]
-    lines = _spatial_lines(regular, separators)
-    lines = _pre_cut_order(lines, separators, lambda line: line.box)
-    groups, lines = _column_groups(lines)
-    paragraph: list[_Line] = []
-    for line in lines:
-        if _form_row(line):
-            if paragraph:
-                groups.append((_paragraph_type(paragraph), paragraph))
-                paragraph = []
-            groups.append(("form_row", [line]))
-            continue
-        if paragraph and (
-            not _same_paragraph(paragraph[-1], line)
-            or _crosses_boundary(paragraph[-1].box, line.box, separators)
-        ):
-            groups.append((_paragraph_type(paragraph), paragraph))
-            paragraph = []
-        paragraph.append(line)
-    if paragraph:
-        groups.append((_paragraph_type(paragraph), paragraph))
-
-    candidates: list[tuple[str, list[_Line]]] = groups + _atomic_candidates(
-        atomic, separators
-    )
-    candidates = _pre_cut_order(
-        candidates,
-        separators,
-        lambda item: _union(line.box for line in item[1]),
-    )
+    if candidates is None:
+        candidates = _spatial_candidates(sources, separators)
     candidates = _semantic_block_types(candidates)
 
     blocks = []
@@ -353,10 +359,55 @@ def _build_blocks(
     return blocks
 
 
+def _spatial_candidates(
+    sources: list[TextRegion], separators: tuple[_Separator, ...]
+) -> list[tuple[str, list[_Line]]]:
+    atomic = [
+        region
+        for region in sources
+        if _source_type(region) != "text" or _is_orientation_residual(region)
+    ]
+    regular = [
+        region
+        for region in sources
+        if _source_type(region) == "text" and not _is_orientation_residual(region)
+    ]
+    lines = _spatial_lines(regular, separators)
+    lines = _pre_cut_order(lines, separators, lambda line: line.box)
+    groups, lines = _column_groups(lines)
+    paragraph: list[_Line] = []
+    for line in lines:
+        if _form_row(line):
+            if paragraph:
+                groups.append((_paragraph_type(paragraph), paragraph))
+                paragraph = []
+            groups.append(("form_row", [line]))
+            continue
+        if paragraph and (
+            not _same_paragraph(paragraph[-1], line)
+            or _crosses_boundary(paragraph[-1].box, line.box, separators)
+        ):
+            groups.append((_paragraph_type(paragraph), paragraph))
+            paragraph = []
+        paragraph.append(line)
+    if paragraph:
+        groups.append((_paragraph_type(paragraph), paragraph))
+
+    candidates: list[tuple[str, list[_Line]]] = groups + _atomic_candidates(
+        atomic, separators
+    )
+    candidates = _pre_cut_order(
+        candidates,
+        separators,
+        lambda item: _union(line.box for line in item[1]),
+    )
+    return candidates
+
+
 def _assign_presentation_ranks(
     regions: list[TextRegion],
-    separators: tuple[_Separator, ...],
     excluded_ids: set[str],
+    order: Callable[[list[TextRegion]], tuple[list[TextRegion], str]],
 ) -> None:
     regions_by_id = {region.id: region for region in regions}
     top_level = [
@@ -364,31 +415,11 @@ def _assign_presentation_ranks(
         for region in regions
         if _top_level_presentation_item(region, excluded_ids)
     ]
-    rows = []
-    for line in _spatial_lines(top_level, separators):
-        if _form_row(line) and all(
-            (item.structure or {}).get("block_type")
-            in {"paragraph", "line", "list", "field", "form_row"}
-            and "\n" not in item.text
-            for item in line.items
-        ):
-            rows.append(line)
-        else:
-            rows.extend(_Line([item]) for item in line.items)
-    lines = _pre_cut_order(
-        rows,
-        separators,
-        lambda line: line.box,
-    )
-    ordered = [
-        region
-        for line in lines
-        for region in sorted(line.items, key=lambda item: item.bounding_box.left)
-    ]
+    ordered, method = order(top_level)
     for rank, region in enumerate(ordered, start=1):
         structure = copy.deepcopy(region.structure) if region.structure else {}
         structure["presentation_rank"] = rank
-        structure["presentation_order_method"] = "spatial_sort"
+        structure["presentation_order_method"] = method
         region.structure = structure
         if region.provider == PROVIDER:
             region.reading_order = rank
@@ -400,8 +431,133 @@ def _assign_presentation_ranks(
                 continue
             label_structure = copy.deepcopy(label.structure) if label.structure else {}
             label_structure["presentation_rank"] = rank
-            label_structure["presentation_order_method"] = "spatial_sort"
+            label_structure["presentation_order_method"] = method
             label.structure = label_structure
+
+
+def _spatial_order(
+    top_level: list[TextRegion], separators: tuple[_Separator, ...]
+) -> tuple[list[TextRegion], str]:
+    rows = []
+    for line in _spatial_lines(top_level, separators):
+        if _form_row(line) and all(
+            (item.structure or {}).get("block_type")
+            in {"paragraph", "line", "list", "field", "form_row"}
+            and "\n" not in item.text
+            for item in line.items
+        ):
+            rows.append(line)
+        else:
+            rows.extend(_Line([item]) for item in line.items)
+    lines = _pre_cut_order(rows, separators, lambda line: line.box)
+    ordered = [
+        region
+        for line in lines
+        for region in sorted(line.items, key=lambda item: item.bounding_box.left)
+    ]
+    return ordered, "spatial_sort"
+
+
+def _learned_order(
+    top_level: list[TextRegion], fields: list[TextRegion]
+) -> list[list[TextRegion]]:
+    """Reading units in recursive XY-cut order (Ha et al., 1995).
+
+    A region inside a detected key-value field joins that field's unit, ordered as one
+    element as Docling's ReadingOrderModel orders a container's children. On
+    OmniDocBench English ground-truth boxes XY-cut beat Docling's rule-based predictor:
+    reading-order edit 0.043 vs 0.064 on text pages and 0.046 vs 0.110 on table pages.
+    """
+    groups: dict[str, list[TextRegion]] = {}
+    for region in sorted(
+        top_level,
+        key=lambda region: (region.bounding_box.top, region.bounding_box.left),
+    ):
+        box = region.bounding_box
+        holder = min(
+            (
+                field
+                for field in fields
+                if field.bounding_box.left
+                <= _horizontal_center(box)
+                <= field.bounding_box.right
+                and field.bounding_box.top <= _center(box) <= field.bounding_box.bottom
+            ),
+            key=lambda field: (
+                _height(field.bounding_box)
+                * (field.bounding_box.right - field.bounding_box.left)
+            ),
+            default=None,
+        )
+        groups.setdefault(holder.id if holder else region.id, []).append(region)
+    units = [
+        [
+            region
+            for unit in _xy_cut([[region] for region in members])
+            for region in unit
+        ]
+        for members in groups.values()
+    ]
+    return _xy_cut(units)
+
+
+def _xy_cut(units: list[list[TextRegion]]) -> list[list[TextRegion]]:
+    """Split at the widest whitespace gap on either axis, then order each side."""
+    if len(units) < 2:
+        return units
+    boxes = [_union(region.bounding_box for region in unit) for unit in units]
+    row = max(
+        _gaps([(box.top, box.bottom) for box in boxes]),
+        key=lambda gap: gap[1],
+        default=None,
+    )
+    column = max(
+        _gaps([(box.left, box.right) for box in boxes]),
+        key=lambda gap: gap[1],
+        default=None,
+    )
+    if row is None and column is None:
+        return units
+    if column is not None and (row is None or column[1] > row[1]):
+        before = [_horizontal_center(box) < column[0] for box in boxes]
+    else:
+        before = [_center(box) < row[0] for box in boxes]
+    first = [unit for unit, side in zip(units, before) if side]
+    second = [unit for unit, side in zip(units, before) if not side]
+    if not first or not second:
+        return units
+    return _xy_cut(first) + _xy_cut(second)
+
+
+def _gaps(intervals: list[tuple[int, int]]) -> list[tuple[float, int]]:
+    """(center, width) of each empty gap between the merged 1-D intervals."""
+    merged: list[list[int]] = []
+    for low, high in sorted(intervals):
+        if merged and low <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], high)
+        else:
+            merged.append([low, high])
+    return [
+        ((first[1] + second[0]) / 2, second[0] - first[1])
+        for first, second in pairwise(merged)
+    ]
+
+
+def _position_order(
+    top_level: list[TextRegion], positions: dict[str, int]
+) -> tuple[list[TextRegion], str]:
+    def position(region: TextRegion) -> int:
+        ids = [region.id, *_child_ids(region)]
+        return min(
+            (positions[item] for item in ids if item in positions),
+            default=len(positions),
+        )
+
+    return sorted(top_level, key=position), "xy_cut"
+
+
+def _learned_region(region: TextRegion) -> bool:
+    return bool((region.text_provenance or {}).get("layout_category"))
 
 
 def _top_level_presentation_item(

@@ -47,10 +47,12 @@ from .pipeline import (
     _source_kind,
 )
 from .pipeline import process_document
+from .text_layer import sidecar
+from .orientation import REVIEW_CONFIDENCE as ORIENTATION_REVIEW_CONFIDENCE
 from .orientation import OrientationReader
 from .preprocessing import PageFrameReader, RoutedTesseractReader
 from .providers import LocalReader, ReaderError, TesseractReader
-from .rendering import render_evidence, render_page_markdown
+from .rendering import HEADING_MARKS, render_evidence, render_page_markdown
 from .table_topology import TableTopologyError, validate_table_topology
 
 try:
@@ -72,6 +74,8 @@ except ImportError:  # pragma: no cover - exercised only without demo dependenci
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 FEEDBACK_RETENTION = 1000
+# Finished sessions kept in memory; the oldest is dropped with its files beyond this.
+SESSION_RETENTION = 32
 FEEDBACK_REASONS = frozenset(
     {"missing_text", "wrong_text", "reading_order", "table", "handwriting", "other"}
 )
@@ -420,11 +424,19 @@ class SessionStore:
 
     def save(self, session_id: str, session: dict[str, Any]) -> None:
         with self._lock:
+            self._sessions.pop(session_id, None)
             self._sessions[session_id] = session
+            expired = list(self._sessions)[:-SESSION_RETENTION]
+            dropped = [self._sessions.pop(key) for key in expired]
+        for old in dropped:
+            shutil.rmtree(old["directory"], ignore_errors=True)
 
     def get(self, session_id: str) -> dict[str, Any]:
         with self._lock:
-            session = self._sessions.get(session_id)
+            session = self._sessions.pop(session_id, None)
+            if session is not None:
+                # Reinserting keeps the dict in access order, so eviction drops the least recently used.
+                self._sessions[session_id] = session
         if session is None:
             raise KeyError(session_id)
         return session
@@ -1932,6 +1944,8 @@ def _render_previews(
             try:
                 if page.parent == preview_dir and page.suffix.lower() == ".png":
                     page.replace(destination)
+                    if sidecar(page).is_file():
+                        sidecar(page).replace(sidecar(destination))
                 elif page.suffix.lower() == ".png":
                     with Image.open(page) as image:
                         if getattr(image, "is_animated", False):
@@ -3194,10 +3208,12 @@ def _page_uncertainty(page: dict[str, Any]) -> dict[str, Any]:
     for region in regions:
         provenance = region.get("text_provenance") or {}
         orientation = provenance.get("orientation")
-        if isinstance(orientation, dict):
-            angle = orientation.get("angle")
-            if angle in {90, 180, 270}:
-                risk_reasons.append(f"orientation_rotated_{angle}_degrees")
+        if (
+            isinstance(orientation, dict)
+            and orientation.get("confidence", 1.0) < ORIENTATION_REVIEW_CONFIDENCE
+            and "orientation_uncertain" not in risk_reasons
+        ):
+            risk_reasons.append("orientation_uncertain")
 
         structure = region.get("structure") or {}
         if region["kind"] == "coverage_risk":
@@ -3572,9 +3588,9 @@ def _presentation_markdown_block(block: dict[str, Any]) -> str:
         return ""
     category = block.get("category")
     if category == "title":
-        return f"### {raw_text}"
+        return f"{HEADING_MARKS['title']} {raw_text}"
     if category == "section-header":
-        return f"#### {raw_text}"
+        return f"{HEADING_MARKS['heading']} {raw_text}"
     if category == "list-item":
         return f"- {raw_text}"
     if category == "formula":

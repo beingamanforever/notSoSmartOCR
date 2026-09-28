@@ -23,10 +23,13 @@
       --confidence-medium-soft: #fde7c9;
       --confidence-low: #b91c1c;
       --confidence-low-soft: #fbdada;
+      --text-layer-soft: #e2ebf8;
       --positive: #15803d;
       --positive-soft: #dcfce7;
       --negative: var(--confidence-low);
       --negative-soft: var(--confidence-low-soft);
+      /* One motion system: Material 3 standard easing at a single short duration. */
+      --motion: 200ms cubic-bezier(0.2, 0, 0, 1);
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
         "Segoe UI", sans-serif;
     }
@@ -207,11 +210,20 @@
       line-height: 1.35;
     }
     .workspace {
+      --split: 50%;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(460px, 1fr);
+      grid-template-columns: minmax(0, var(--split)) 10px minmax(0, 1fr);
       align-items: stretch;
-      gap: 18px;
+      gap: 4px;
     }
+    .split-handle {
+      cursor: col-resize;
+      border-radius: 6px;
+      background: linear-gradient(var(--line-strong), var(--line-strong)) center / 2px 36px no-repeat;
+      transition: background-color var(--motion);
+      touch-action: none;
+    }
+    .split-handle:hover, .split-handle.dragging { background-color: var(--accent-soft); }
     .card {
       min-width: 0;
       border-radius: 16px;
@@ -612,6 +624,7 @@
     .confidence-review .confidence-evidence[data-confidence-level="high"] { background: var(--confidence-high-soft); }
     .confidence-review .confidence-evidence[data-confidence-level="medium"] { background: var(--confidence-medium-soft); }
     .confidence-review .confidence-evidence[data-confidence-level="low"] { background: var(--confidence-low-soft); }
+    .confidence-review .confidence-evidence[data-confidence-level="text-layer"] { background: var(--text-layer-soft); }
     .confidence-review .confidence-evidence[data-confidence-level="unknown"] { text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
     .confidence-review .confidence-evidence[data-confidence-level="high"]:hover,
     .confidence-review .confidence-evidence[data-confidence-level="high"].confidence-active { background: #c2e7d5; }
@@ -655,7 +668,13 @@
     .rendered-content { max-width: 86ch; }
     .rendered-page p { margin: 0; line-height: 1.72; white-space: pre-wrap; }
     pre { margin: 0; color: var(--text); font: .78rem/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
-    .semantic-block { margin: 0 0 13px; line-height: 1.65; white-space: pre-wrap; }
+    .semantic-block { margin: 0 0 10px; padding: 2px 8px; margin-left: -8px; margin-right: -8px; border-radius: 7px; line-height: 1.6; white-space: pre-wrap; transition: background-color var(--motion), box-shadow var(--motion); }
+    .semantic-block[data-evidence-ids] { cursor: pointer; }
+    .semantic-block[data-evidence-ids]:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+    .semantic-block.linked { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+    .block-row { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 22px; row-gap: 2px; margin: 0 0 8px; }
+    .block-row > .semantic-block { margin: 0 -8px 0 -8px; }
+    .block-row > .semantic-block + .semantic-block { margin-left: 0; }
     .semantic-block.title { margin: 4px 0 18px; font-size: 1.4rem; font-weight: 760; line-height: 1.25; }
     .semantic-block.heading { margin: 20px 0 8px; font-size: 1rem; font-weight: 730; line-height: 1.35; }
     .semantic-block.author { margin-bottom: 16px; color: var(--text); font-size: .82rem; line-height: 1.45; }
@@ -773,6 +792,7 @@
       .shell { padding: 18px; }
       .examples { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
       .workspace { grid-template-columns: 1fr; }
+      .split-handle { display: none; }
       .preview-wrap { min-height: 420px; }
       .tab-panel { min-height: 420px; }
     }
@@ -799,6 +819,7 @@
     }
     @media (prefers-reduced-motion: reduce) {
       .button:hover:not(:disabled) { transform: none; }
+      .semantic-block, .split-handle { transition: none !important; }
       .confidence-evidence, .presentation-source-link { transition: none !important; }
       .refining-note::before { animation: none; opacity: .8; }
     }
@@ -895,6 +916,7 @@
           <canvas id="page-canvas" tabindex="0" aria-label="OCR page with region overlays"></canvas>
         </div>
       </article>
+      <div class="split-handle" id="split-handle" role="separator" aria-orientation="vertical" aria-label="Resize panes" tabindex="0"></div>
       <article class="card output-card">
         <div class="card-head">
           <span class="card-title">Document output</span>
@@ -1089,7 +1111,6 @@
     const cropContext = cropCanvas.getContext("2d");
     const rootStyle = getComputedStyle(document.documentElement);
     const actionColor = rootStyle.getPropertyValue("--accent").trim();
-    const neutralColor = rootStyle.getPropertyValue("--panel").trim();
     const regionColors = {
       title: "#1d4ed8",
       heading: "#2563eb",
@@ -1273,6 +1294,38 @@
     byId("save-region-edit").addEventListener("click", () => handleCorrection("edit"));
     byId("keep-unresolved").addEventListener("click", () => handleCorrection("keep_unresolved"));
     byId("confidence-toggle").addEventListener("click", handleConfidenceReview);
+    (() => {
+      const handle = byId("split-handle");
+      const workspace = handle.parentElement;
+      const apply = (share) => workspace.style.setProperty("--split", `${Math.min(70, Math.max(30, share))}%`);
+      try {
+        const saved = Number(localStorage.getItem("ocr-split"));
+        if (saved) apply(saved);
+      } catch {}
+      handle.addEventListener("pointerdown", (event) => {
+        handle.setPointerCapture(event.pointerId);
+        handle.classList.add("dragging");
+      });
+      handle.addEventListener("pointermove", (event) => {
+        if (!handle.classList.contains("dragging")) return;
+        const bounds = workspace.getBoundingClientRect();
+        apply(100 * (event.clientX - bounds.left) / bounds.width);
+      });
+      const finish = () => {
+        if (!handle.classList.contains("dragging")) return;
+        handle.classList.remove("dragging");
+        try { localStorage.setItem("ocr-split", parseFloat(workspace.style.getPropertyValue("--split"))); } catch {}
+        drawPage();
+      };
+      handle.addEventListener("pointerup", finish);
+      handle.addEventListener("pointercancel", finish);
+      handle.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        const current = parseFloat(workspace.style.getPropertyValue("--split")) || 50;
+        apply(current + (event.key === "ArrowLeft" ? -2 : 2));
+      });
+    })();
+
     window.addEventListener("pagehide", cancelRecovery, { once: true });
 
     function activeTabId() {
@@ -2106,14 +2159,16 @@
     function decorateConfidence(element, confidence, inline = false, evidence = {}) {
       element.classList.add("confidence-evidence");
       if (inline) element.classList.add("confidence-inline");
-      element.dataset.confidenceLevel = validConfidence(confidence)
-        ? confidenceLevel(confidence)
-        : "unknown";
-      element.dataset.confidencePercent = validConfidence(confidence)
-        ? formatConfidence(confidence)
-        : "Unknown";
+      // Text copied from a PDF's own text layer was never recognized, so it has no score.
+      element.dataset.confidenceLevel = evidence.textLayer
+        ? "text-layer"
+        : validConfidence(confidence) ? confidenceLevel(confidence) : "unknown";
+      element.dataset.confidencePercent = evidence.textLayer
+        ? "Text layer"
+        : validConfidence(confidence) ? formatConfidence(confidence) : "Unknown";
       element.dataset.confidenceScope = evidence.scope || "region";
       element.dataset.confidenceKind = evidence.confidenceKind || "Recognition score";
+      element.dataset.confidenceCalibration = evidence.calibration || "Uncalibrated";
       element.dataset.confidenceProvider = evidence.provider || "Unreported provider";
       if (evidence.id) element.dataset.evidenceId = evidence.id;
       if (Number.isInteger(evidence.pageNumber)) {
@@ -2132,8 +2187,10 @@
           decorateConfidence(math, region.confidence, true, {
             id: region.id,
             provider: region.provider,
+            textLayer: textLayerSource(region),
             scope: confidenceScope(region),
-            confidenceKind: confidenceKind(region)
+            confidenceKind: confidenceKind(region),
+            calibration: confidenceCalibration(region)
           });
           parent.append(math);
           return;
@@ -2167,9 +2224,11 @@
           marker.textContent = text;
           decorateConfidence(marker, score, true, {
             id: entry ? `${region.id}-word-${entry.index + 1}` : region.id,
-            provider: nativeScores ? region.provider : entry ? region.text_provenance?.geometry_provider : region.provider,
-            scope: entry ? "word" : nativeScores ? "word score; region location" : confidenceScope(region),
-            confidenceKind: nativeScores ? "Decoder token score" : entry ? "Geometry recognition score" : confidenceKind(region)
+            provider: scores.length ? region.provider : entry ? region.text_provenance?.geometry_provider : region.provider,
+            scope: scores.length ? "word score; region location" : entry ? "word" : confidenceScope(region),
+            textLayer: !scores.length && !entry && textLayerSource(region),
+            confidenceKind: scores.length ? "Decoder token score" : entry ? "Geometry recognition score" : confidenceKind(region),
+            calibration: scores.length || entry ? "Uncalibrated" : confidenceCalibration(region)
           });
           parent.append(marker);
         });
@@ -2181,16 +2240,18 @@
       return true;
     }
 
+    // Pandoc's tex_math_dollars rule keeps currency such as "$20 and $30" as text.
+    const PANDOC_INLINE_MATH = /(?<![\\$])\$(?=\S)([^$\n]*?\S)\$(?!\d)/gu;
+
     function renderInlineMath(text) {
       if (typeof window.renderMathInElement !== "function") return null;
       const marker = document.createElement("span");
-      marker.textContent = text;
+      marker.textContent = text.replace(PANDOC_INLINE_MATH, (_, body) => `\\(${body}\\)`);
       window.renderMathInElement(marker, {
         delimiters: [
           { left: "$$", right: "$$", display: true },
           { left: "\\[", right: "\\]", display: true },
-          { left: "\\(", right: "\\)", display: false },
-          { left: "$", right: "$", display: false }
+          { left: "\\(", right: "\\)", display: false }
         ],
         throwOnError: true,
         strict: "error",
@@ -2198,6 +2259,12 @@
       });
       return marker.querySelector(".katex") ? marker : null;
     }
+
+    function textLayerSource(region) {
+      return region?.text_provenance?.method === "pdf_text_layer";
+    }
+
+    const TEXT_LAYER_NOTE = "Exact text from the PDF text layer · no recognition score";
 
     function confidenceScope(region) {
       const kind = String(region?.kind || "").toLowerCase();
@@ -2215,7 +2282,6 @@
     }
 
     function confidenceKind(region) {
-      if (region?.text_provenance?.generation?.token_score !== undefined) return "Decoder token score";
       if (["learned_checkbox_detection", "decoded_ballot_glyph_promotion"].includes(region?.text_provenance?.method)) return "Recognition score";
       const role = region?.structure?.role;
       if (role === "table" && validConfidence(region?.structure?.detection_confidence)) {
@@ -2225,7 +2291,15 @@
       // A reader that only reports where a region is must not be shown as if it were
       // reporting how sure it is about the characters.
       if (detectionOnlyConfidence(region)) return "Detection score";
+      if (confidenceCalibration(region) !== "Uncalibrated") return "Text quality probability";
+      if (region?.text_provenance?.generation?.token_score !== undefined) return "Decoder token score";
       return "Recognition score";
+    }
+
+    function confidenceCalibration(region) {
+      return String(region?.text_provenance?.confidence_meaning || "").startsWith("calibrated probability")
+        ? "Calibrated on OmniDocBench text; clinical calibration unverified"
+        : "Uncalibrated";
     }
 
     function detectionOnlyConfidence(region) {
@@ -2321,11 +2395,13 @@
       }
       const inspector = byId("confidence-inspector");
       const percent = target.dataset.confidencePercent;
-      byId("confidence-inspector-score").textContent = percent === "Unknown"
+      byId("confidence-inspector-score").textContent = percent === "Text layer"
+        ? TEXT_LAYER_NOTE
+        : percent === "Unknown"
         ? target.dataset.confidenceProvider.startsWith("qwen/")
           ? "Qwen reread accepted · Calibrated confidence unavailable"
           : "Confidence: Not available"
-        : `${target.dataset.confidenceKind}: ${percent} · Uncalibrated`;
+        : `${target.dataset.confidenceKind}: ${percent} · ${target.dataset.confidenceCalibration}`;
       byId("confidence-inspector-source").textContent = target.dataset.confidenceScope;
       renderedView.querySelector(".confidence-active")?.classList.remove("confidence-active");
       target.classList.add("confidence-active");
@@ -2393,8 +2469,8 @@
       const inspector = byId("confidence-inspector");
       const confidence = displayConfidence(region);
       byId("confidence-inspector-score").textContent = validConfidence(confidence.value)
-        ? `${confidence.label}: ${formatConfidence(confidence.value)} · Uncalibrated`
-        : `${confidence.label}: Not available`;
+        ? `${confidence.label}: ${formatConfidence(confidence.value)} · ${confidence.calibration || "Uncalibrated"}`
+        : confidence.note || `${confidence.label}: Not available`;
       byId("confidence-inspector-source").textContent = confidence.scope;
       inspector.hidden = false;
       const inspectorBox = inspector.getBoundingClientRect();
@@ -2432,6 +2508,9 @@
           scope: "table detection"
         };
       }
+      if (textLayerSource(region)) {
+        return { label: "Text source", value: null, note: TEXT_LAYER_NOTE, scope: "text layer" };
+      }
       if (semanticKind(region) === "control") {
         return {
           label: "State score",
@@ -2442,6 +2521,7 @@
       return {
         label: confidenceKind(region),
         value: region?.confidence,
+        calibration: confidenceCalibration(region),
         scope: detectionOnlyConfidence(region)
           ? "region detection"
           : confidenceScope(region)
@@ -2716,7 +2796,8 @@
         id: source.id,
         provider: source.provider,
         scope: confidenceScope(source),
-        confidenceKind: confidenceKind(source)
+        confidenceKind: confidenceKind(source),
+        calibration: confidenceCalibration(source)
       });
       element.append(marker);
       container.classList.add("confidence-host");
@@ -2734,12 +2815,14 @@
 
     function decoratePresentationSource(element, block, source) {
       const rendering = block.rendering || {};
+      const detection = rendering.source_confidence_kind === "Detection score";
       decorateConfidence(element, rendering.source_confidence, false, {
         id: rendering.source_region_id || source.id,
         pageNumber: rendering.source_page_number,
         provider: source.provider,
         scope: rendering.source_confidence_scope || "source region",
-        confidenceKind: rendering.source_confidence_kind || "Recognition score"
+        confidenceKind: detection ? "Detection score" : confidenceKind(source),
+        calibration: detection ? "Uncalibrated" : confidenceCalibration(source)
       });
       element.classList.add("confidence-host", "presentation-source-link");
       element.tabIndex = 0;
@@ -3043,7 +3126,110 @@
           sourceIndex
         });
       });
-      return groups.map(renderSemanticBlock).filter(Boolean);
+      const rendered = groups
+        .map((group) => ({ group, block: linkBlock(renderSemanticBlock(group), group) }))
+        .filter(({ block }) => block);
+      return flowRows(rendered);
+    }
+
+    // Short blocks sharing one line on the page (a form's "Label: value" fields) read as
+    // one row, not a stack of one-word paragraphs.
+    const ROW_KINDS = new Set(["paragraph", "text", "line", "field", "handwriting"]);
+
+    function flowRows(rendered) {
+      const out = [];
+      let row = null;
+      rendered.forEach(({ group, block }) => {
+        const box = group.region.bounding_box;
+        const inline = ROW_KINDS.has(semanticKind(group.region))
+          && box && !String(group.text || "").includes("\n");
+        if (inline && row && sameRow(row.box, box)) {
+          row.element.append(block);
+          row.box = { ...row.box, top: Math.min(row.box.top, box.top), bottom: Math.max(row.box.bottom, box.bottom) };
+          return;
+        }
+        if (inline) {
+          const element = document.createElement("div");
+          element.className = "block-row";
+          element.append(block);
+          row = { element, box };
+          out.push(element);
+          return;
+        }
+        row = null;
+        out.push(block);
+      });
+      // A row of one block is just that block.
+      return out.map((element) =>
+        element.classList?.contains("block-row") && element.childElementCount === 1
+          ? element.firstElementChild : element
+      );
+    }
+
+    function sameRow(first, second) {
+      const overlap = Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top);
+      return overlap > 0.5 * Math.min(first.bottom - first.top, second.bottom - second.top);
+    }
+
+    function linkBlock(block, group) {
+      if (!block) return block;
+      const ids = [group.region.id, ...(group.region.structure?.child_evidence_ids || [])];
+      block.dataset.evidenceIds = ids.join(" ");
+      const evidenceId = ids[1] || ids[0];
+      block.addEventListener("pointerenter", () => {
+        if (state.pinnedConfidence) return;
+        state.activeEvidenceId = evidenceId;
+        drawPage();
+      });
+      block.addEventListener("pointerleave", () => {
+        if (state.pinnedConfidence || state.activeEvidenceId !== evidenceId) return;
+        state.activeEvidenceId = null;
+        drawPage();
+      });
+      block.addEventListener("click", (event) => {
+        if (event.target.closest("a, button, input, select")) return;
+        scrollPageTo(evidenceId);
+      });
+      return block;
+    }
+
+    function scrollPageTo(evidenceId) {
+      const region = pageOverlays().find((item) => item.id === evidenceId)
+        || currentRegions().find((item) => item.id === evidenceId);
+      const wrap = canvas.parentElement;
+      if (!region || !wrap || !canvas.width) return;
+      const scale = canvas.getBoundingClientRect().width / canvas.width;
+      const box = region.bounding_box;
+      wrap.scrollTo({
+        top: Math.max(0, canvas.offsetTop + box.top * scale - wrap.clientHeight / 3),
+        left: Math.max(0, canvas.offsetLeft + box.left * scale - 24),
+        behavior: "smooth"
+      });
+    }
+
+    // Hovering a box lights its text; clicking one (scroll = true) also brings it into view.
+    function linkTextTo(evidenceId, scroll = false) {
+      const panel = byId("panel-rendered");
+      panel.querySelector(".semantic-block.linked")?.classList.remove("linked");
+      if (!evidenceId) return;
+      const block = [...panel.querySelectorAll("[data-evidence-ids]")].find((element) =>
+        element.dataset.evidenceIds.split(" ").includes(evidenceId)
+      );
+      if (!block) return;
+      block.classList.add("linked");
+      if (!scroll) return;
+      // Scroll the text panel only: the window stays where the reader put it.
+      const top = block.getBoundingClientRect().top - panel.getBoundingClientRect().top + panel.scrollTop;
+      if (top < panel.scrollTop || top + block.offsetHeight > panel.scrollTop + panel.clientHeight) {
+        panel.scrollTo({ top: Math.max(0, top - panel.clientHeight / 3), behavior: "smooth" });
+      }
+      // Web Animations, not a restarted CSS class: its forced reflow cancels the scroll.
+      if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        block.animate(
+          [{ outline: "3px solid color-mix(in srgb, var(--accent) 45%, transparent)" }, { outline: "3px solid transparent" }],
+          { duration: 700, easing: "cubic-bezier(0.2, 0, 0, 1)" }
+        );
+      }
     }
 
     function renderSemanticBlock(group) {
@@ -3142,8 +3328,10 @@
           decorateConfidence(block, source.confidence, false, {
             id: source.id,
             provider: source.provider,
+            textLayer: textLayerSource(source),
             scope: confidenceScope(source),
-            confidenceKind: confidenceKind(source)
+            confidenceKind: confidenceKind(source),
+            calibration: confidenceCalibration(source)
           });
           block.classList.add("confidence-host");
           block.tabIndex = 0;
@@ -3179,7 +3367,7 @@
       block.dataset.resolution = region.resolution || "resolved";
       block.tabIndex = 0;
       block.setAttribute("aria-describedby", "confidence-inspector");
-      const native = ["learned_checkbox_detection", "decoded_ballot_glyph_promotion"].includes(region.text_provenance?.method);
+      const native = ["pdf_text_layer", "learned_checkbox_detection", "decoded_ballot_glyph_promotion"].includes(region.text_provenance?.method);
       const state = region.structure?.state || "ambiguous";
       const chip = document.createElement("span");
       chip.className = "control-state";
@@ -3192,7 +3380,7 @@
         || ({ selected: "✓", unselected: "", ambiguous: "?" }[state] ?? "?");
       if (annotation) chip.dataset.state = "annotation";
       chip.setAttribute("aria-label", `${state} control`);
-      decorateConfidence(chip, native ? region.structure?.state_confidence : region.structure?.state_confidence ?? region.confidence, true, {
+      decorateConfidence(chip, displayConfidence(region).value, true, {
         id: region.id,
         provider: region.provider,
         scope: "control state",
@@ -3702,24 +3890,24 @@
       if (!state.image) return;
       context.clearRect(0, 0, canvas.width, canvas.height);
       context.drawImage(state.image, 0, 0);
-      context.lineWidth = Math.max(2, canvas.width / 800);
       const selectedIndex = selectedRegionIndex();
+      context.lineWidth = Math.max(1.5, canvas.width / 1100);
       currentOverlays().forEach((region, index) => {
         const box = region.bounding_box;
         const selected = index === selectedIndex;
         const color = selected ? actionColor : regionColor(region);
+        const width = box.right - box.left;
+        const height = box.bottom - box.top;
+        // A soft fill per block type reads at a glance; tags on every box hid the page.
+        if (selected) {
+          context.globalAlpha = 0.16;
+          context.fillStyle = color;
+          context.fillRect(box.left, box.top, width, height);
+        }
+        context.globalAlpha = selected ? 1 : 0.5;
         context.strokeStyle = color;
-        context.strokeRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
-        const kind = overlayCategoryLabel(categoryKey(region));
-        const label = selected ? `${index + 1} ${kind}` : kind;
-        const fontSize = Math.max(12, Math.round(canvas.width / 110));
-        context.font = `600 ${fontSize}px system-ui`;
-        const labelWidth = context.measureText(label).width + 10;
-        const labelTop = Math.max(0, box.top - fontSize - 6);
-        context.fillStyle = color;
-        context.fillRect(box.left, labelTop, labelWidth, fontSize + 6);
-        context.fillStyle = neutralColor;
-        context.fillText(label, box.left + 5, labelTop + fontSize + 1);
+        context.strokeRect(box.left, box.top, width, height);
+        context.globalAlpha = 1;
       });
       const linked = pageOverlays().find(
         (region) => region.id === state.activeEvidenceId
@@ -3727,7 +3915,11 @@
       if (!linked) return;
       const box = linked.bounding_box;
       context.save();
-      context.lineWidth = Math.max(3, canvas.width / 500);
+      context.globalAlpha = 0.16;
+      context.fillStyle = actionColor;
+      context.fillRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
+      context.globalAlpha = 1;
+      context.lineWidth = Math.max(2.5, canvas.width / 600);
       context.strokeStyle = actionColor;
       context.strokeRect(box.left, box.top, box.right - box.left, box.bottom - box.top);
       context.restore();
@@ -3761,6 +3953,7 @@
       const key = region ? regionKey(region) : null;
       if (key === state.hoveredRegionKey) return;
       state.hoveredRegionKey = key;
+      linkTextTo(region?.text_provenance?.region_id || region?.id || null);
       if (!region) {
         if (!state.pinnedConfidence) hideConfidenceInspector();
         return;
@@ -3770,13 +3963,17 @@
 
     canvas.addEventListener("pointerleave", () => {
       state.hoveredRegionKey = null;
+      linkTextTo(null);
       if (!state.pinnedConfidence) hideConfidenceInspector();
     });
 
     canvas.addEventListener("click", (event) => {
       const index = canvasRegionIndex(event);
+      const clicked = index >= 0 ? currentOverlays()[index] : null;
       selectRegion(index);
       if (index < 0) dismissConfidenceTooltip();
+      // After the selection re-render, which would otherwise cancel the smooth scroll.
+      if (clicked) requestAnimationFrame(() => linkTextTo(clicked.text_provenance?.region_id || clicked.id, true));
     });
 
     function boxArea(box) {
@@ -3852,8 +4049,8 @@
       const confidence = displayConfidence(region);
       byId("region-confidence-label").textContent = confidence.label;
       byId("region-confidence").textContent = validConfidence(confidence.value)
-        ? `${formatConfidence(confidence.value)} · Uncalibrated`
-        : "Not available";
+        ? `${formatConfidence(confidence.value)} · ${confidence.calibration || "Uncalibrated"}`
+        : confidence.note || "Not available";
       byId("region-provider").textContent = region?.provider || "-";
       const detectorSequence = region?.text_provenance?.reading_order_method === "detector_sequence";
       const spatialOrder = region?.structure?.presentation_order_method === "spatial_sort";

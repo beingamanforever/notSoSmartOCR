@@ -4,19 +4,23 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
+from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .cascade import add_runtime_risk_evidence
-from .cross_page_tables import CrossPageTableStage
 from .contracts import (
     ALTERNATIVE_DECISION_STATES,
     BoundingBox,
@@ -26,17 +30,62 @@ from .contracts import (
     RegionStage,
     TextRegion,
 )
+from .cross_page_tables import CrossPageTableStage
 from .providers import LocalReader, ReaderError
 from .rendering import render_evidence
 
 IMAGE_SUFFIXES = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 DEFAULT_PDF_DPI = 300
 
+RENDER_WORKERS = min(8, os.cpu_count() or 1)
+
 
 @dataclass(frozen=True)
 class _PreparedPages:
     source: Path
     pages: tuple[Path, ...]
+
+
+def _layout_reader(url: str, device: str = "cuda") -> Any:
+    """Falcon regions plus docTR words, so a scan's text no region holds is still read."""
+    from functools import partial
+
+    from .falcon_layout import FalconLayoutReader
+    from .text_detection import detect_words
+
+    return FalconLayoutReader(url, word_detector=partial(detect_words, device=device))
+
+
+def falcon_pipeline(
+    layout_url: str,
+    *,
+    device: str = "cuda",
+    page_workers: int = 4,
+    layout_reader_factory: Callable[[str], Any] | None = None,
+    detector_factory: Callable[..., Any] | None = None,
+) -> tuple[LocalReader, tuple[RegionStage, ...]]:
+    """The served composition: docTR orientation, Heron and Falcon regions, assembly."""
+    from .evidence_layout import EvidenceLayoutStage
+    from .orientation import DocTROrientationDetector, OrientationReader
+    from .risk import EvidenceRiskStage
+
+    layout_reader = (
+        layout_reader_factory(layout_url)
+        if layout_reader_factory
+        else _layout_reader(layout_url, device)
+    )
+    layout_reader.check_health()
+    reader = OrientationReader(
+        layout_reader,
+        detector=(detector_factory or DocTROrientationDetector)(device=device),
+        defer_restore=True,
+        batch_size=page_workers,
+    )
+    stages = (
+        EvidenceRiskStage(),
+        EvidenceLayoutStage(),
+    )
+    return reader, stages
 
 
 def process_document(
@@ -656,38 +705,79 @@ def _prepare_pages(
                 max_pixels=max_pixels,
             )
         else:
-            _validate_image_limits(
-                source,
-                max_pages,
-                max_page_pixels,
-                max_pixels,
-            )
-            pages = [_normalize_exif_orientation(source, temporary_dir)]
+            _validate_image_limits(source, max_pages, max_pixels)
+            pages = [_canonical_image_page(source, temporary_dir, max_page_pixels)]
         return _PreparedPages(source.resolve(), tuple(pages))
     if pdf_dpi <= 0:
         raise PipelineError("render", "invalid_dpi", "PDF DPI must be positive")
+    if shutil.which(pdftoppm_executable) is None:
+        raise PipelineError(
+            "render", "renderer_unavailable", f"{pdftoppm_executable} not found"
+        )
 
-    page_count = _validate_pdf_limits(
-        source,
-        pdf_dpi,
-        max_pages,
-        max_page_pixels,
-        max_pixels,
-    )
+    page_count = _validate_pdf_limits(source, pdf_dpi, max_pages, max_pixels)
+    if page_count is None:
+        page_count = _pdf_page_count(source)
+    # pdftoppm renders one page at a time, so contiguous page ranges render in
+    # parallel processes: 44 contract pages took 60 s serially and 13 s eight-way.
+    workers = max(1, min(RENDER_WORKERS, page_count))
+    bounds = [page_count * worker // workers for worker in range(workers + 1)]
+    ranges = [(start + 1, end) for start, end in pairwise(bounds) if end > start]
+    with ThreadPoolExecutor(len(ranges)) as pool:
+        list(
+            pool.map(
+                lambda pages: _render_pdf_pages(
+                    pdftoppm_executable, pdf_dpi, source, temporary_dir / "page", pages
+                ),
+                ranges,
+            )
+        )
 
-    output_prefix = temporary_dir / "page"
+    numbered_pages = []
+    for page_path in temporary_dir.glob("page-*.png"):
+        match = re.fullmatch(r"page-(\d+)\.png", page_path.name)
+        if match:
+            numbered_pages.append((int(match.group(1)), page_path))
+    if not numbered_pages:
+        raise PipelineError("render", "no_pages", "pdftoppm produced no pages")
+
+    numbered_pages.sort(key=lambda item: item[0])
+    for _, page_path in numbered_pages:
+        with Image.open(page_path) as image:
+            canonical = (
+                None
+                if _is_canonical(image, max_page_pixels)
+                else _canonical_page(image, max_page_pixels)
+            )
+        if canonical is not None:
+            canonical.save(page_path, format="PNG")
+    pages = [page_path for _, page_path in numbered_pages]
+    from .text_layer import write_cell_sidecars
+
+    try:
+        write_cell_sidecars(source, pages)
+    except Exception as error:
+        raise PipelineError("render", "text_layer_failed", str(error)) from error
+    return _PreparedPages(source.resolve(), tuple(pages))
+
+
+def _render_pdf_pages(
+    executable: str, dpi: int, source: Path, prefix: Path, pages: tuple[int, int]
+) -> None:
     command = [
-        pdftoppm_executable,
+        executable,
+        "-cropbox",
         "-r",
-        str(pdf_dpi),
+        str(dpi),
         "-png",
+        "-f",
+        str(pages[0]),
+        "-l",
+        str(pages[1]),
     ]
-    if page_count is not None:
-        command.extend(["-f", "1", "-l", str(page_count)])
-    command.extend([str(source), str(output_prefix)])
     try:
         completed = subprocess.run(
-            command,
+            [*command, str(source), str(prefix)],
             capture_output=True,
             text=True,
             timeout=180,
@@ -699,24 +789,18 @@ def _prepare_pages(
         raise PipelineError(
             "render", "renderer_timeout", "pdftoppm exceeded 180 seconds"
         ) from error
-
     if completed.returncode != 0:
         message = completed.stderr.strip() or "pdftoppm returned no error message"
         raise PipelineError("render", "renderer_failed", message)
 
-    numbered_pages = []
-    for page_path in temporary_dir.glob("page-*.png"):
-        match = re.fullmatch(r"page-(\d+)\.png", page_path.name)
-        if match:
-            numbered_pages.append((int(match.group(1)), page_path))
-    if not numbered_pages:
-        raise PipelineError("render", "no_pages", "pdftoppm produced no pages")
 
-    numbered_pages.sort(key=lambda item: item[0])
-    return _PreparedPages(
-        source.resolve(),
-        tuple(page_path for _, page_path in numbered_pages),
-    )
+def _pdf_page_count(source: Path) -> int:
+    match = re.search(r"^Pages:\s+(\d+)\s*$", _pdfinfo(source), re.MULTILINE)
+    if match is None or int(match.group(1)) < 1:
+        raise PipelineError(
+            "render", "metadata_failed", "pdfinfo did not report a page count"
+        )
+    return int(match.group(1))
 
 
 def _validate_resource_limits(
@@ -735,15 +819,12 @@ def _validate_resource_limits(
 def _validate_image_limits(
     source: Path,
     max_pages: int | None,
-    max_page_pixels: int | None,
     max_pixels: int | None,
 ) -> None:
     try:
         with Image.open(source) as image:
             _check_page_limit(1, max_pages)
-            page_pixels = image.width * image.height
-            _check_pixel_limit(page_pixels, max_page_pixels, "Page")
-            _check_pixel_limit(page_pixels, max_pixels, "Document")
+            _check_pixel_limit(image.width * image.height, max_pixels, "Document")
     except Image.DecompressionBombError as error:
         raise PipelineError(
             "ingest",
@@ -758,10 +839,9 @@ def _validate_pdf_limits(
     source: Path,
     pdf_dpi: int,
     max_pages: int | None,
-    max_page_pixels: int | None,
     max_pixels: int | None,
 ) -> int | None:
-    if max_pages is None and max_page_pixels is None and max_pixels is None:
+    if max_pages is None and max_pixels is None:
         return None
 
     summary = _pdfinfo(source)
@@ -776,7 +856,7 @@ def _validate_pdf_limits(
     if page_count < 1:
         raise PipelineError("render", "no_pages", "PDF contained no pages")
     _check_page_limit(page_count, max_pages)
-    if max_page_pixels is None and max_pixels is None:
+    if max_pixels is None:
         return page_count
 
     details = _pdfinfo(source, page_count)
@@ -796,8 +876,6 @@ def _validate_pdf_limits(
         math.ceil(float(width) * scale) * math.ceil(float(height) * scale)
         for width, height in sizes
     ]
-    for page_pixels in page_pixel_counts:
-        _check_pixel_limit(page_pixels, max_page_pixels, "Page")
     _check_pixel_limit(sum(page_pixel_counts), max_pixels, "Document")
     return page_count
 
@@ -864,22 +942,9 @@ def _prepare_tiff_pages(
             decoded_pixels = 0
             for index in range(image.n_frames):
                 image.seek(index)
-                page_pixels = image.width * image.height
-                _check_pixel_limit(page_pixels, max_page_pixels, "Page")
-                decoded_pixels += page_pixels
+                decoded_pixels += image.width * image.height
                 _check_pixel_limit(decoded_pixels, max_pixels, "Document")
-                frame = ImageOps.exif_transpose(image.copy())
-                if frame.mode not in {
-                    "1",
-                    "L",
-                    "LA",
-                    "P",
-                    "RGB",
-                    "RGBA",
-                    "I",
-                    "I;16",
-                }:
-                    frame = frame.convert("RGB")
+                frame = _canonical_page(image.copy(), max_page_pixels)
                 output = temporary_dir / f"page-{index + 1}.png"
                 frame.save(output, format="PNG")
                 pages.append(output)
@@ -896,21 +961,50 @@ def _prepare_tiff_pages(
     return pages
 
 
-def _normalize_exif_orientation(source: Path, temporary_dir: Path) -> Path:
+def _canonical_image_page(
+    source: Path, temporary_dir: Path, max_page_pixels: int | None
+) -> Path:
     try:
         with Image.open(source) as image:
-            orientation = image.getexif().get(274, 1)
-            if orientation not in range(2, 9):
+            if _is_canonical(image, max_page_pixels):
                 return source
+            page = _canonical_page(image, max_page_pixels)
+    except (OSError, UnidentifiedImageError) as error:
+        raise PipelineError("image", "invalid_image", str(error)) from error
+    output = temporary_dir / "page-1.png"
+    page.save(output, format="PNG")
+    return output
 
-            normalized = ImageOps.exif_transpose(image)
-            if normalized.mode not in {"1", "L", "LA", "P", "RGB", "RGBA", "I", "I;16"}:
-                normalized = normalized.convert("RGB")
-            output = temporary_dir / "page-1.png"
-            normalized.save(output, format="PNG")
-            return output
-    except (OSError, UnidentifiedImageError):
-        return source
+
+def _is_canonical(image: Image.Image, max_page_pixels: int | None) -> bool:
+    return (
+        image.mode in {"RGB", "L"}
+        and image.getexif().get(274, 1) not in range(2, 9)
+        and (max_page_pixels is None or image.width * image.height <= max_page_pixels)
+    )
+
+
+def _canonical_page(image: Image.Image, max_page_pixels: int | None) -> Image.Image:
+    """One 8-bit RGB page raster, so every stage reads the same upright pixels."""
+    page = ImageOps.exif_transpose(image)
+    if page.mode in {"I;16", "I;16B", "I;16L", "I", "F"}:
+        page = page.convert("F") if page.mode == "F" else page.convert("I")
+        top = page.getextrema()[1] or 1
+        # Rescale deep grayscale by its bit depth instead of clipping it to white.
+        scale = 255 / (65535 if top <= 65535 else top) if top > 255 else 1
+        page = page.point(lambda value: value * scale).convert("L")
+    if page.mode in {"RGBA", "LA", "PA"} or (
+        page.mode == "P" and "transparency" in page.info
+    ):
+        rgba = page.convert("RGBA")
+        page = Image.alpha_composite(Image.new("RGBA", rgba.size, "white"), rgba)
+    page = page.convert("RGB")
+    pixels = page.width * page.height
+    if max_page_pixels is not None and pixels > max_page_pixels:
+        scale = math.sqrt(max_page_pixels / pixels)
+        size = (max(1, int(page.width * scale)), max(1, int(page.height * scale)))
+        page = page.resize(size, Image.Resampling.LANCZOS)
+    return page
 
 
 def _source_kind(source: Path) -> str:

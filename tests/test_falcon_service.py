@@ -13,19 +13,14 @@ from pathlib import Path
 from PIL import Image
 import pytest
 
-from experiments import serve_falcon_layout, serve_falcon_ocr
-from ocr_pipeline import falcon as falcon_module
+from experiments import serve_falcon_layout
 from ocr_pipeline.falcon import (
     FALCON_MODEL_ID,
     FALCON_MODEL_LICENSE,
     FALCON_MODEL_ORIGIN,
     FALCON_MODEL_REVISION,
-    FalconOCRReader,
-    FalconOCRServiceReader,
 )
-from ocr_pipeline.providers import ReaderError
 from ocr_pipeline.contracts import BoundingBox, TextRegion
-from ocr_pipeline.fused_reader import FusedReader
 
 
 class FakeResponse:
@@ -69,242 +64,27 @@ def _generation_config(max_new_tokens: int = 1536) -> dict[str, object]:
     }
 
 
-def test_falcon_service_initializes_model_before_binding(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    reader = FalconOCRReader()
-    calls: list[str] = []
-    monkeypatch.setattr(
-        reader,
-        "_initialize_model",
-        lambda: calls.append("initialize") or object(),
-    )
-
-    class FakeServer:
-        daemon_threads = False
-
-        def __init__(self, address: object, handler: object) -> None:
-            del address, handler
-            calls.append("bind")
-
-    monkeypatch.setattr(serve_falcon_ocr, "ThreadingHTTPServer", FakeServer)
-
-    serve_falcon_ocr.create_server(reader, "127.0.0.1", 8085)
-
-    assert calls == ["initialize", "bind"]
-
-
-def test_service_reader_batches_categories_and_preserves_raw_text(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    requests = []
-
-    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
-        requests.append((request, timeout))
-        return FakeResponse(
-            {
-                "texts": ["  Heading\n", "<table><tr><td>1</td></tr></table>"],
-                "provenance": _provenance(),
-                "generation_config": _generation_config(3072),
-            }
-        )
-
-    monkeypatch.setattr(falcon_module, "urlopen", fake_urlopen)
-    reader = FalconOCRServiceReader("http://127.0.0.1:8085", timeout_seconds=19)
-    images = [Image.new("RGB", (2, 3)), Image.new("RGB", (4, 5))]
-
-    texts = reader.transcribe_crops(images, ["section-header", "table"])
-
-    assert texts == ["  Heading\n", "<table><tr><td>1</td></tr></table>"]
-    request, timeout = requests[0]
-    assert timeout == 19
-    payload = json.loads(request.data)
-    assert payload["categories"] == ["section-header", "table"]
-    assert len(payload["images"]) == 2
-    assert request.full_url == "http://127.0.0.1:8085/generate"
-    assert reader.provenance == {**_provenance(), "source": "loopback_service"}
-    assert reader.generation == {
-        "category": "plain",
-        "max_new_tokens": 3072,
-        "temperature": 0.0,
-        "max_dimension": 1536,
-        "compile": False,
-    }
-
-
-def test_service_reader_health_requires_ready_initialized_service(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    requests = []
-
-    def fake_urlopen(request: object, timeout: float) -> FakeResponse:
-        requests.append((request, timeout))
-        return FakeResponse(
-            {
-                "status": "ready",
-                "provenance": _provenance(),
-                "generation_config": _generation_config(),
-            }
-        )
-
-    monkeypatch.setattr(falcon_module, "urlopen", fake_urlopen)
-    reader = FalconOCRServiceReader("http://127.0.0.1:8085", timeout_seconds=19)
-
-    reader.check_health()
-
-    request, timeout = requests[0]
-    assert request.full_url == "http://127.0.0.1:8085/health"
-    assert timeout == 19
-    assert reader.provenance == {**_provenance(), "source": "loopback_service"}
-    assert reader.generation["max_new_tokens"] == 1536
-
-
-def test_service_reader_rejects_false_ready_health(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        falcon_module,
-        "urlopen",
-        lambda request, timeout: FakeResponse(
-            {
-                "status": "starting",
-                "provenance": _provenance(),
-                "generation_config": {},
-            }
-        ),
-    )
-
-    with pytest.raises(ReaderError, match="not ready"):
-        FalconOCRServiceReader("http://127.0.0.1:8085").check_health()
-
-
-def test_service_reader_full_page_region_keeps_service_provenance(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    image_path = tmp_path / "page.png"
-    Image.new("RGB", (20, 10)).save(image_path)
-    monkeypatch.setattr(
-        falcon_module,
-        "urlopen",
-        lambda request, timeout: FakeResponse(
-            {
-                "texts": ["raw page"],
-                "provenance": _provenance(),
-                "generation_config": _generation_config(100),
-            }
-        ),
-    )
-
-    region = FalconOCRServiceReader("http://localhost:8085", category="text").read(
-        image_path, 4
-    )[0]
-
-    assert region.text == "raw page"
-    assert region.bounding_box.__dict__ == {
-        "left": 0,
-        "top": 0,
-        "right": 20,
-        "bottom": 10,
-    }
-    assert region.text_provenance["model"]["source"] == "loopback_service"
-    assert region.text_provenance["output_validation"] == {
-        "raw_response_preserved": True,
-        "nonempty": True,
-        "exact_repetition_loop": False,
-        "termination_observable": False,
-        "truncation_observable": False,
-    }
-
-
-@pytest.mark.parametrize(
-    "url",
-    ["https://127.0.0.1:8085", "http://gpu.internal:8085", "file:///tmp/service"],
-)
-def test_service_reader_rejects_nonloopback_url(url: str) -> None:
-    with pytest.raises(ValueError, match="loopback"):
-        FalconOCRServiceReader(url)
-
-
-def test_service_reader_rejects_invalid_response(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        falcon_module,
-        "urlopen",
-        lambda request, timeout: FakeResponse(
-            {
-                "texts": ["value"],
-                "provenance": {
-                    **_provenance(),
-                    "id": None,
-                    "identity_verified": False,
-                },
-                "generation_config": _generation_config(),
-            }
-        ),
-    )
-
-    with pytest.raises(ReaderError, match="did not return a valid result"):
-        FalconOCRServiceReader("http://127.0.0.1:8085").transcribe_crops(
-            [Image.new("RGB", (1, 1))],
-            ["text"],
-        )
-
-
-@pytest.mark.parametrize(
-    "generation_config",
-    ({}, {**_generation_config(), "temperature": float("inf")}),
-)
-def test_service_reader_rejects_invalid_generation_contract(
-    monkeypatch: pytest.MonkeyPatch,
-    generation_config: dict[str, object],
-) -> None:
-    monkeypatch.setattr(
-        falcon_module,
-        "urlopen",
-        lambda request, timeout: FakeResponse(
-            {
-                "texts": ["value"],
-                "provenance": _provenance(),
-                "generation_config": generation_config,
-            }
-        ),
-    )
-
-    with pytest.raises(ReaderError, match="did not return a valid result"):
-        FalconOCRServiceReader("http://127.0.0.1:8085").transcribe_crops(
-            [Image.new("RGB", (1, 1))],
-            ["text"],
-        )
-
-
-def test_service_reader_enforces_batch_limit() -> None:
-    reader = FalconOCRServiceReader(
-        "http://127.0.0.1:8085",
-        max_batch_items=1,
-    )
-
-    with pytest.raises(ValueError, match="batch exceeded"):
-        reader.transcribe_crops(
-            [Image.new("RGB", (1, 1)), Image.new("RGB", (1, 1))],
-            ["text", "text"],
-        )
-
-
 # --- Falcon-Perception layout service: repetition-loop retry ladder ---
 
 
-def test_decoder_cycle_requires_a_long_near_complete_token_run() -> None:
+def test_reserved_vocabulary_slots_are_not_text() -> None:
+    ids, scores = serve_falcon_layout._without_reserved(
+        [273, 11, 273, 12], [0.9, 0.8, 0.7, 0.6], frozenset({273})
+    )
+    assert (ids, scores) == ([11, 12], [0.8, 0.6])
+
+
+def test_decoder_cycle_requires_a_long_trailing_repeat_of_any_short_period() -> None:
     detect = serve_falcon_layout._decoder_cycle
     assert detect([2006, 638] * 125 + [2006] * 6)
     assert not detect([2006, 638] * 10)
     assert not detect(list(range(300)))
     assert not detect([2006, 638] * 100 + list(range(100)))
     assert detect(list(range(100)) + [2006, 638] * 200)
-    state = (None, None, 0, 0)
-    for token in [2006, 638] * 128:
-        state = serve_falcon_layout._cycle_step(state, token)
-    assert max(state[2:]) == 256
+    row = [11, 12, 13, 14, 15, 16, 17]
+    assert detect(list(range(40)) + row * 40)
+    assert not detect(row * 30)
+    assert detect(list(range(500)) + list(range(1000, 1060)) * 6)
 
 
 def test_form_proposal_needs_unowned_source_pixels() -> None:
@@ -333,7 +113,11 @@ class FakeLayoutEngine:
     def generate_with_layout(
         self, images: list[Image.Image], **options: object
     ) -> list[list[dict[str, object]]]:
-        return [self.elements]
+        if "temperature" not in options:
+            return [self.elements]
+        self.retry_calls.append(options)
+        text = self.plain_by_temperature[round(float(options["temperature"]), 2)]
+        return [[{**item, "text": text} for item in options["detections"][0]]]
 
     def generate_plain(self, images: list[Image.Image], **options: object) -> list[str]:
         if "category" not in options:
@@ -365,172 +149,7 @@ def _post_layout_read(server, image: Image.Image) -> dict[str, object]:
         return json.loads(reply.read())
 
 
-def _route_model(action: str) -> dict[str, object]:
-    names = list(serve_falcon_layout.HERON_ROUTE_FEATURE_NAMES)
-    return {
-        "version": 1,
-        "id": "test-falcon-mode-router",
-        "status": "calibrated",
-        "training_actions": {
-            "layout": "layout_selective_qwen",
-            "plain": "plain_falcon",
-        },
-        "feature_names": names,
-        "coefficients": [0.0] * len(names),
-        "means": [0.0] * len(names),
-        "scales": [1.0] * len(names),
-        "intercept": 10.0 if action == "plain" else -10.0,
-        "threshold": 0.5,
-        "cost_tradeoff": 0.0,
-        "cost_head": {"coefficients": [0.0] * len(names), "intercept": 0.0},
-        "extractor": _route_extractor(),
-    }
-
-
-def _route_extractor() -> dict[str, object]:
-    return {
-        "version": serve_falcon_layout.ROUTE_EXTRACTOR_VERSION,
-        "heron_model_id": "ds4sd/docling-layout-heron-101",
-        "heron_model_revision": "2e4993cf6bb211112084a2f80938f26138008917",
-        "layout_score_threshold": 0.3,
-    }
-
-
-def _region_role_model(*, selected: bool = True) -> dict[str, object]:
-    names = list(serve_falcon_layout.HERON_REGION_ROLE_FEATURE_NAMES)
-    return {
-        "version": 1,
-        "id": "test-heron-region-role",
-        "status": "calibrated",
-        "feature_names": names,
-        "coefficients": [0.0] * len(names),
-        "means": [0.0] * len(names),
-        "scales": [1.0] * len(names),
-        "intercept": 10.0 if selected else -10.0,
-        "threshold": 0.5,
-        "extractor": _route_extractor(),
-    }
-
-
-def _full_class_scores() -> dict[str, float]:
-    return {label: 0.0 for label in serve_falcon_layout.HERON_ROUTE_CLASSES}
-
-
-def test_route_model_loader_rejects_non_visual_features(tmp_path: Path) -> None:
-    path = tmp_path / "router.json"
-    path.write_text(json.dumps(_route_model("layout")))
-    assert serve_falcon_layout.load_route_model(path)["id"] == (
-        "test-falcon-mode-router"
-    )
-
-    model = _route_model("layout")
-    model["feature_names"] = ["document_id"]
-    path.write_text(json.dumps(model))
-    with pytest.raises(ValueError, match="schema"):
-        serve_falcon_layout.load_route_model(path)
-
-    model = _route_model("layout")
-    model["threshold"] = -0.25
-    path.write_text(json.dumps(model))
-    assert serve_falcon_layout.load_route_model(path)["threshold"] == -0.25
-
-
-def test_route_model_loader_rejects_development_artifact(tmp_path: Path) -> None:
-    path = tmp_path / "router.json"
-    model = _route_model("layout")
-    model["status"] = "development_only_optional_separate_calibration_required"
-    path.write_text(json.dumps(model))
-
-    with pytest.raises(ValueError, match="schema"):
-        serve_falcon_layout.load_route_model(path)
-
-
-def test_learned_models_require_matching_extractor_metadata() -> None:
-    model = _route_model("layout")
-    engine = FakeLayoutEngine([])
-
-    def detect(images):
-        return [{"raw": [], "layout": []}]
-
-    server = serve_falcon_layout.create_server(
-        engine,
-        "127.0.0.1",
-        0,
-        model={"id": "test"},
-        detect_route=detect,
-        route_model=model,
-        extractor_metadata=_route_extractor(),
-    )
-    server.server_close()
-
-    mismatched = {**_route_extractor(), "layout_score_threshold": 0.4}
-    with pytest.raises(ValueError, match="extractor does not match"):
-        serve_falcon_layout.create_server(
-            engine,
-            "127.0.0.1",
-            0,
-            model={"id": "test"},
-            detect_route=detect,
-            route_model=model,
-            extractor_metadata=mismatched,
-        )
-
-    with pytest.raises(ValueError, match="region role model extractor"):
-        serve_falcon_layout.create_server(
-            engine,
-            "127.0.0.1",
-            0,
-            model={"id": "test"},
-            heron_region_role_model=_region_role_model(),
-            extractor_metadata=mismatched,
-        )
-
-
-def test_route_features_match_measured_heron_schema() -> None:
-    import math
-
-    detections = [
-        {
-            "label": "text",
-            "box": [0, 0, 50, 20],
-            "score": 0.8,
-            "class_scores": {"text": 0.6, "table": 0.2},
-        },
-        {
-            "category": "table",
-            "bbox": [0, 0, 100, 100],
-            "score": 0.9,
-            "class_scores": {"text": 0.1, "table": 0.7},
-        },
-    ]
-    values = serve_falcon_layout.route_feature_values(100, 200, detections)
-    expected = [
-        math.log1p(100),
-        math.log1p(200),
-        0.5,
-        2.0,
-    ]
-    for label in serve_falcon_layout.HERON_ROUTE_CLASSES:
-        expected.extend(
-            {
-                "text": [0.5, 0.8, 0.05, 0.05],
-                "table": [0.5, 0.9, 0.5, 0.5],
-            }.get(label, [0.0, 0.0, 0.0, 0.0])
-        )
-    for label in serve_falcon_layout.HERON_ROUTE_CLASSES:
-        expected.extend(
-            {
-                "text": [0.35, 0.6],
-                "table": [0.45, 0.7],
-            }.get(label, [0.0, 0.0])
-        )
-
-    assert len(expected) == 106
-    assert list(values) == list(serve_falcon_layout.HERON_ROUTE_FEATURE_NAMES)
-    assert list(values.values()) == pytest.approx(expected)
-
-
-def test_route_detection_preserves_raw_form_and_key_value_proposals() -> None:
+def test_route_detection_excludes_key_value_region_when_form_covers_it() -> None:
     proposals = [
         {"label": "key_value_region", "box": (0, 0, 10, 10), "score": 0.8},
         {"label": "form", "box": (0, 0, 20, 20), "score": 0.9},
@@ -538,662 +157,7 @@ def test_route_detection_preserves_raw_form_and_key_value_proposals() -> None:
 
     detection = serve_falcon_layout._route_detection(proposals)
 
-    assert [item["label"] for item in detection["raw"]] == [
-        "key_value_region",
-        "form",
-    ]
-    assert [item["category"] for item in detection["layout"]] == ["form"]
-
-
-def test_region_role_appends_form_companion_without_changing_table() -> None:
-    scores = _full_class_scores()
-    table = {
-        "label": "table",
-        "box": (1, 2, 30, 40),
-        "score": 0.9,
-        "query_id": 7,
-        "class_scores": scores,
-    }
-
-    detection = serve_falcon_layout._route_detection([table], _region_role_model())
-
-    assert detection["layout"][0] == {
-        "category": "table",
-        "bbox": [1, 2, 30, 40],
-        "score": 0.9,
-        "query_id": 7,
-        "class_scores": scores,
-    }
-    assert detection["layout"][1] == {
-        **detection["layout"][0],
-        "category": "form",
-        "region_role": {
-            "action": "add_form_source",
-            "model": {"id": "test-heron-region-role", "version": 1},
-            "score": pytest.approx(0.99995, abs=1e-5),
-            "threshold": 0.5,
-            "source_query_id": 7,
-        },
-    }
-    assert detection["raw"] == [
-        {
-            "label": "table",
-            "box": [1, 2, 30, 40],
-            "score": 0.9,
-            "query_id": 7,
-            "class_scores": scores,
-        }
-    ]
-    engine = FakeLayoutEngine([{**detection["layout"][1], "text": ""}])
-    server = _start_layout_server(engine)
-    try:
-        element = _post_layout_read(server, Image.new("RGB", (40, 40)))["elements"][0]
-    finally:
-        server.shutdown()
-        server.server_close()
-    assert element["region_role"] == detection["layout"][1]["region_role"]
-
-
-def test_region_role_companion_keeps_canonical_table_ownership(tmp_path: Path) -> None:
-    from ocr_pipeline.falcon_layout import FalconLayoutReader
-
-    role = {
-        "action": "add_form_source",
-        "model": {"id": "test-heron-region-role", "version": 1},
-        "score": 0.9,
-        "threshold": 0.5,
-        "source_query_id": 7,
-    }
-    engine = FakeLayoutEngine(
-        [
-            {
-                "category": "table",
-                "bbox": [1, 2, 30, 40],
-                "score": 0.9,
-                "query_id": 7,
-                "class_scores": _full_class_scores(),
-                "text": "<table><tr><td>Dose</td></tr></table>",
-            },
-            {
-                "category": "form",
-                "bbox": [1, 2, 30, 40],
-                "score": 0.9,
-                "query_id": 7,
-                "class_scores": _full_class_scores(),
-                "region_role": role,
-                "text": "",
-            },
-        ]
-    )
-    server = _start_layout_server(engine)
-    image_path = tmp_path / "page.png"
-    Image.new("RGB", (40, 40), "white").save(image_path)
-    try:
-        regions = FalconLayoutReader(f"http://127.0.0.1:{server.server_port}").read(
-            image_path, 1
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
-
-    table = next(region for region in regions if region.kind == "table")
-    form = next(
-        region
-        for region in regions
-        if (region.structure or {}).get("role") == "form_source"
-    )
-    assert table.text == "Dose"
-    assert form.structure["owner_region_id"] == table.id
-    assert form.text_provenance["layout_detection"]["region_role"] == role
-
-
-def test_region_role_below_threshold_keeps_current_output() -> None:
-    proposals = [
-        {
-            "label": "table",
-            "box": (0, 0, 20, 20),
-            "score": 0.8,
-            "query_id": 1,
-            "class_scores": _full_class_scores(),
-        }
-    ]
-
-    assert serve_falcon_layout._route_detection(
-        proposals, _region_role_model(selected=False)
-    ) == serve_falcon_layout._route_detection(proposals)
-
-
-@pytest.mark.parametrize(
-    "class_scores",
-    [
-        {"table": 0.9},
-        {**_full_class_scores(), "table": float("nan")},
-    ],
-)
-def test_region_role_malformed_features_abstain(
-    class_scores: dict[str, float],
-) -> None:
-    proposals = [
-        {
-            "label": "table",
-            "box": (0, 0, 20, 20),
-            "score": 0.8,
-            "query_id": 1,
-            "class_scores": class_scores,
-        }
-    ]
-
-    assert serve_falcon_layout._route_detection(
-        proposals, _region_role_model()
-    ) == serve_falcon_layout._route_detection(proposals)
-
-
-def test_region_role_suppresses_only_contained_companions() -> None:
-    proposals = [
-        {
-            "label": "table",
-            "box": box,
-            "score": 0.8,
-            "query_id": query_id,
-            "class_scores": _full_class_scores(),
-        }
-        for query_id, box in enumerate(
-            ((0, 0, 100, 100), (1, 1, 99, 99), (0, 0, 100, 100))
-        )
-    ]
-
-    layout = serve_falcon_layout._route_detection(proposals, _region_role_model())[
-        "layout"
-    ]
-
-    assert [item["category"] for item in layout] == [
-        "table",
-        "table",
-        "table",
-        "form",
-    ]
-    assert [item["query_id"] for item in layout[:3]] == [0, 1, 2]
-    assert layout[3]["region_role"]["source_query_id"] == 0
-
-
-def test_region_role_leaves_native_form_unchanged() -> None:
-    form = {
-        "label": "form",
-        "box": (0, 0, 20, 20),
-        "score": 0.8,
-        "query_id": 1,
-        "class_scores": _full_class_scores(),
-    }
-
-    detection = serve_falcon_layout._route_detection([form], _region_role_model())
-
-    assert detection["layout"] == [
-        {
-            "category": "form",
-            "bbox": [0, 0, 20, 20],
-            "score": 0.8,
-            "query_id": 1,
-            "class_scores": form["class_scores"],
-        }
-    ]
-
-
-def test_region_role_reuses_matching_native_form() -> None:
-    scores = _full_class_scores()
-    proposals = [
-        {
-            "label": "table",
-            "box": (0, 0, 20, 20),
-            "score": 0.9,
-            "query_id": 1,
-            "class_scores": scores,
-        },
-        {
-            "label": "form",
-            "box": (0, 0, 20, 20),
-            "score": 0.8,
-            "query_id": 2,
-            "class_scores": scores,
-        },
-    ]
-
-    layout = serve_falcon_layout._route_detection(proposals, _region_role_model())[
-        "layout"
-    ]
-
-    assert [item["category"] for item in layout] == ["table", "form"]
-    assert layout[1]["query_id"] == 2
-    assert layout[1]["region_role"]["source_query_id"] == 1
-
-
-def test_region_role_ownership_is_independent_of_element_order(tmp_path: Path) -> None:
-    from ocr_pipeline.falcon_layout import FalconLayoutReader
-
-    scores = _full_class_scores()
-    proposals = [
-        {
-            "label": "form",
-            "box": (0, 0, 20, 20),
-            "score": 0.9,
-            "query_id": 2,
-            "class_scores": scores,
-        },
-        {
-            "label": "table",
-            "box": (0, 0, 20, 20),
-            "score": 0.8,
-            "query_id": 1,
-            "class_scores": scores,
-        },
-    ]
-    layout = serve_falcon_layout._route_detection(proposals, _region_role_model())[
-        "layout"
-    ]
-    engine = FakeLayoutEngine(
-        [
-            {**layout[0], "text": ""},
-            {
-                **layout[1],
-                "text": "<table><tr><td>Dose</td></tr></table>",
-            },
-        ]
-    )
-    server = _start_layout_server(engine)
-    image_path = tmp_path / "page.png"
-    Image.new("RGB", (40, 40), "white").save(image_path)
-    try:
-        regions = FalconLayoutReader(f"http://127.0.0.1:{server.server_port}").read(
-            image_path, 1
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
-
-    table = next(region for region in regions if region.kind == "table")
-    form = next(
-        region
-        for region in regions
-        if (region.structure or {}).get("role") == "form_source"
-    )
-    assert form.structure["owner_region_id"] == table.id
-
-
-def test_region_role_omits_owner_for_dropped_empty_table(tmp_path: Path) -> None:
-    from ocr_pipeline.falcon_layout import FalconLayoutReader
-
-    role = {
-        "action": "add_form_source",
-        "model": {"id": "test-heron-region-role", "version": 1},
-        "score": 0.9,
-        "threshold": 0.5,
-        "source_query_id": 7,
-    }
-    engine = FakeLayoutEngine(
-        [
-            {
-                "category": "table",
-                "bbox": [1, 2, 30, 40],
-                "score": 0.9,
-                "query_id": 7,
-                "class_scores": _full_class_scores(),
-                "text": "",
-            },
-            {
-                "category": "form",
-                "bbox": [1, 2, 30, 40],
-                "score": 0.9,
-                "query_id": 8,
-                "class_scores": _full_class_scores(),
-                "region_role": role,
-                "text": "",
-            },
-        ]
-    )
-    server = _start_layout_server(engine)
-    image_path = tmp_path / "page.png"
-    Image.new("RGB", (40, 40), "white").save(image_path)
-    try:
-        regions = FalconLayoutReader(f"http://127.0.0.1:{server.server_port}").read(
-            image_path, 1
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
-
-    assert not any(region.kind == "table" for region in regions)
-    form = next(
-        region
-        for region in regions
-        if (region.structure or {}).get("role") == "form_source"
-    )
-    assert "owner_region_id" not in form.structure
-
-
-def test_region_role_loader_rejects_development_artifact(tmp_path: Path) -> None:
-    path = tmp_path / "region-role.json"
-    model = _region_role_model()
-    model["development"] = {"grouped_validation": {"sources": 12}}
-    path.write_text(json.dumps(model))
-
-    assert serve_falcon_layout.load_heron_region_role_model(path)["id"] == (
-        "test-heron-region-role"
-    )
-
-    model["unknown"] = True
-    path.write_text(json.dumps(model))
-    with pytest.raises(ValueError, match="schema"):
-        serve_falcon_layout.load_heron_region_role_model(path)
-
-    model.pop("unknown")
-    model["status"] = "development"
-    path.write_text(json.dumps(model))
-
-    with pytest.raises(ValueError, match="schema"):
-        serve_falcon_layout.load_heron_region_role_model(path)
-
-
-def test_router_threshold_uses_total_quality_before_page_win_count() -> None:
-    import numpy as np
-
-    from experiments.train_falcon_mode_router import _threshold, _totals
-
-    values = np.asarray([0.9, 0.8, 0.7, 0.6])
-    qualities = np.asarray(
-        [
-            [100.0, 0.0],
-            [1.0, 1.1],
-            [1.0, 1.1],
-            [1.0, 1.1],
-        ]
-    )
-    costs = np.zeros((4, 2))
-    threshold = _threshold(values, qualities, costs)
-    selected = values > threshold
-
-    assert selected.tolist() == [False, False, False, False]
-    assert _totals(selected, qualities, costs)["quality"] == 103.0
-
-
-def test_router_trainer_replays_named_cached_features() -> None:
-    import warnings
-
-    import numpy as np
-
-    from experiments.train_falcon_mode_router import _fit, _predict, _training_arrays
-
-    names = list(serve_falcon_layout.HERON_ROUTE_FEATURE_NAMES)
-    rows = []
-    for group, layout_quality, plain_quality in (
-        ("a", 2.0, 1.0),
-        ("b", 1.0, 2.0),
-    ):
-        rows.append(
-            {
-                "split": "development",
-                "source_group": group,
-                "feature_values": {name: 0.0 for name in names},
-                "layout_quality": layout_quality,
-                "plain_quality": plain_quality,
-                "layout_expert_cost": 0.1,
-                "plain_expert_cost": 0.0,
-            }
-        )
-    matrix, targets, groups, qualities, costs = _training_arrays(rows, names)
-
-    assert matrix.shape == (2, 106)
-    assert targets.tolist() == [-1.0, 1.0]
-    assert groups.tolist() == ["a", "b"]
-    assert np.array_equal(qualities, [[2.0, 1.0], [1.0, 2.0]])
-    assert np.array_equal(costs, [[0.1, 0.0], [0.1, 0.0]])
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        scaler, estimator = _fit(matrix, targets)
-        replay = _predict(scaler.transform(matrix), estimator)
-    assert not caught
-    assert estimator.solver == "lsqr"
-    assert estimator.alpha == 100.0
-    assert np.isfinite(replay).all()
-
-    rows[0]["feature_values"].pop(names[-1])
-    with pytest.raises(ValueError, match="exact named"):
-        _training_arrays(rows, names)
-
-
-def test_cost_head_can_choose_lower_cost_quality_preserving_nonprefix_policy() -> None:
-    import numpy as np
-
-    from experiments.train_falcon_mode_router import _select_policy
-
-    quality_predictions = np.asarray([0.2, 0.1])
-    cost_predictions = np.asarray([0.0, 1.0])
-    qualities = np.asarray([[10.0, 0.0], [5.0, 5.0]])
-    costs = np.asarray([[0.0, 0.0], [1.0, 0.0]])
-
-    tradeoff, threshold = _select_policy(
-        quality_predictions, cost_predictions, qualities, costs
-    )
-
-    selected = quality_predictions + tradeoff * cost_predictions > threshold
-    assert selected.tolist() == [False, True]
-
-
-def test_nested_development_policy_does_not_tune_on_outer_group_labels() -> None:
-    import numpy as np
-
-    from experiments.train_falcon_mode_router import _nested_grouped_policy
-
-    matrix = np.zeros((6, len(serve_falcon_layout.HERON_ROUTE_FEATURE_NAMES)))
-    matrix[:, 0] = np.arange(6)
-    groups = np.asarray(["a", "a", "b", "b", "c", "c"])
-    qualities = np.asarray(
-        [[2.0, 1.0], [1.0, 2.0], [3.0, 1.0], [1.0, 3.0], [4.0, 1.0], [1.0, 4.0]]
-    )
-    costs = np.asarray([[1.0, 0.0]] * 6)
-    quality_targets = qualities[:, 1] - qualities[:, 0]
-    cost_targets = costs[:, 0] - costs[:, 1]
-
-    original = _nested_grouped_policy(
-        matrix, quality_targets, cost_targets, groups, qualities, costs
-    )
-    changed_qualities = qualities.copy()
-    changed_qualities[:2] = [[0.0, 1000.0], [1000.0, 0.0]]
-    changed_targets = changed_qualities[:, 1] - changed_qualities[:, 0]
-    changed = _nested_grouped_policy(
-        matrix, changed_targets, cost_targets, groups, changed_qualities, costs
-    )
-
-    assert changed[:2].tolist() == original[:2].tolist()
-
-
-def test_global_development_selection_can_be_optimistic() -> None:
-    import numpy as np
-
-    from experiments.train_falcon_mode_router import (
-        _grouped_predictions,
-        _nested_grouped_policy,
-        _select_policy,
-        _totals,
-    )
-
-    matrix = np.asarray([[-0.33], [-0.88], [-0.66], [-0.67], [0.38], [-0.11]])
-    groups = np.asarray(["a", "a", "b", "b", "c", "c"])
-    qualities = np.asarray(
-        [[5.0, 4.0], [4.0, 4.0], [8.0, 5.0], [3.0, 9.0], [8.0, 3.0], [2.0, 2.0]]
-    )
-    costs = np.asarray(
-        [[0.0, 2.0], [2.0, 2.0], [3.0, 3.0], [2.0, 2.0], [0.0, 1.0], [3.0, 3.0]]
-    )
-    quality_targets = qualities[:, 1] - qualities[:, 0]
-    cost_targets = costs[:, 0] - costs[:, 1]
-    quality_oof, cost_oof = _grouped_predictions(
-        matrix, quality_targets, cost_targets, groups
-    )
-    tradeoff, threshold = _select_policy(quality_oof, cost_oof, qualities, costs)
-    globally_selected = quality_oof + tradeoff * cost_oof > threshold
-    nested_selected = _nested_grouped_policy(
-        matrix, quality_targets, cost_targets, groups, qualities, costs
-    )
-
-    assert _totals(globally_selected, qualities, costs)["quality"] == 30.0
-    assert _totals(nested_selected, qualities, costs)["quality"] == 24.0
-
-
-@pytest.mark.parametrize("action", ["layout", "plain"])
-def test_learned_mode_router_runs_heron_once_and_exactly_one_decoder(
-    action: str,
-) -> None:
-    calls = {"detect": 0, "layout": 0, "plain": 0}
-
-    class Engine(FakeLayoutEngine):
-        def generate_with_layout(self, images, **options):
-            calls["layout"] += 1
-            assert len(options["detections"]) == 1
-            return super().generate_with_layout(images, **options)
-
-        def generate_plain(self, images, **options):
-            calls["plain"] += 1
-            return [
-                serve_falcon_layout.DecodedText(
-                    "full page", {"stop_token_seen": True, "temperature": 0.0}
-                )
-            ]
-
-    def detect(images):
-        calls["detect"] += 1
-        return [
-            {
-                "raw": [
-                    {
-                        "label": "text",
-                        "box": [1, 1, 39, 39],
-                        "score": 0.9,
-                        "query_id": 7,
-                        "class_scores": {"text": 0.9, "table": 0.1},
-                    }
-                ],
-                "layout": [
-                    {
-                        "category": "text",
-                        "bbox": [1, 1, 39, 39],
-                        "score": 0.9,
-                        "query_id": 7,
-                        "class_scores": {"text": 0.9, "table": 0.1},
-                    }
-                ],
-            }
-        ]
-
-    engine = Engine(
-        [{"category": "text", "bbox": [1, 1, 39, 39], "score": 0.9, "text": "crop"}]
-    )
-    server = _start_layout_server(
-        engine,
-        detect_route=detect,
-        route_model=_route_model(action),
-        extractor_metadata=_route_extractor(),
-    )
-    try:
-        body = _post_layout_read(server, Image.new("RGB", (40, 40), "white"))
-    finally:
-        server.shutdown()
-        server.server_close()
-
-    assert calls == {
-        "detect": 1,
-        "layout": int(action == "layout"),
-        "plain": int(action == "plain"),
-    }
-    assert body["routing"]["action"] == action
-    assert (
-        body["routing"]["training_action"]
-        == {
-            "layout": "layout_selective_qwen",
-            "plain": "plain_falcon",
-        }[action]
-    )
-    assert body["routing"]["model"] == {
-        "id": "test-falcon-mode-router",
-        "version": 1,
-    }
-    assert [element["category"] for element in body["elements"]] == [
-        "page_text" if action == "plain" else "text"
-    ]
-
-
-def test_plain_route_failure_is_visible_without_layout_fallback() -> None:
-    calls = {"detect": 0, "layout": 0, "plain": 0}
-
-    class Engine(FakeLayoutEngine):
-        def generate_with_layout(self, images, **options):
-            calls["layout"] += 1
-            return super().generate_with_layout(images, **options)
-
-        def generate_plain(self, images, **options):
-            calls["plain"] += 1
-            raise RuntimeError("plain decoder failed")
-
-    def detect(images):
-        calls["detect"] += 1
-        return [
-            {
-                "raw": [{"label": "text", "box": [0, 0, 40, 40], "score": 0.9}],
-                "layout": [{"category": "text", "bbox": [0, 0, 40, 40], "score": 0.9}],
-            }
-        ]
-
-    server = _start_layout_server(
-        Engine([]),
-        detect_route=detect,
-        route_model=_route_model("plain"),
-        extractor_metadata=_route_extractor(),
-    )
-    try:
-        with pytest.raises(urllib.error.HTTPError) as failure:
-            _post_layout_read(server, Image.new("RGB", (40, 40), "white"))
-        assert failure.value.code == 422
-        assert json.loads(failure.value.read()) == {"error": "falcon_layout_failed"}
-    finally:
-        server.shutdown()
-        server.server_close()
-    assert calls == {"detect": 1, "layout": 0, "plain": 1}
-
-
-def test_plain_route_reader_returns_page_region_with_router_provenance(
-    tmp_path: Path,
-) -> None:
-    from ocr_pipeline.falcon_layout import FalconLayoutReader
-
-    engine = FakeLayoutEngine([])
-    engine.generate_plain = lambda **options: [
-        serve_falcon_layout.DecodedText(
-            "# Full page", {"stop_token_seen": True, "temperature": 0.0}
-        )
-    ]
-    server = _start_layout_server(
-        engine,
-        detect_route=lambda images: [{"raw": [], "layout": []}],
-        route_model=_route_model("plain"),
-        extractor_metadata=_route_extractor(),
-    )
-    image_path = tmp_path / "page.png"
-    Image.new("RGB", (40, 60), "white").save(image_path)
-    try:
-        regions = FalconLayoutReader(f"http://127.0.0.1:{server.server_port}").read(
-            image_path, 3
-        )
-    finally:
-        server.shutdown()
-        server.server_close()
-
-    assert len(regions) == 1
-    assert regions[0].kind == "page_text"
-    assert regions[0].text == "Full page"
-    assert regions[0].bounding_box.right == 40
-    assert regions[0].bounding_box.bottom == 60
-    assert regions[0].text_provenance["method"] == "falcon_perception_plain_ocr"
-    assert regions[0].text_provenance["routing"]["model"]["id"] == (
-        "test-falcon-mode-router"
-    )
+    assert [item["category"] for item in detection] == ["form"]
 
 
 def test_nonterminated_table_read_retries_and_retains_original_evidence() -> None:
@@ -1229,6 +193,7 @@ def test_nonterminated_table_read_retries_and_retains_original_evidence() -> Non
     element = body["elements"][0]
     assert element["text"] == clean_text
     assert element["truncated"] is False
+    # The 0.5 reading is kept only once the 0.8 reading agrees with it.
     assert element["retries"] == 3
     assert engine.retry_calls[0]["min_image_size"] == 256
     assert "looped" not in element
@@ -1272,8 +237,8 @@ def test_nonterminated_table_retains_failed_attempt_evidence() -> None:
     element = body["elements"][0]
     assert element["text"] == looped_text
     assert element["truncated"] is True
-    assert element["retries"] == 4
-    assert len(element["read_attempts"]) == 5
+    assert element["retries"] == 3
+    assert len(element["read_attempts"]) == 4
     assert all(
         not attempt["generation"]["stop_token_seen"]
         for attempt in element["read_attempts"]
@@ -1310,8 +275,8 @@ def test_eos_decoder_cycle_rereads_and_quarantines_unrecovered_text() -> None:
             region = page["regions"][0]
             assert region["resolution"] == "unreadable"
             assert region["text"] == original.strip()
-            assert region["text_provenance"]["read_retries"] == 4
-            assert len(region["text_provenance"]["read_attempts"]) == 5
+            assert region["text_provenance"]["read_retries"] == 3
+            assert len(region["text_provenance"]["read_attempts"]) == 4
             assert page["route"] == "review"
             markdown = client.get(
                 f"/api/sessions/{payload['session_id']}/result.md"
@@ -1332,14 +297,9 @@ def test_exclusive_form_is_visible_as_unresolved_source_crop(tmp_path: Path) -> 
     )
     server = _start_layout_server(
         engine,
-        detect_route=lambda images: [
-            {
-                "raw": [{"label": "form", "box": [2, 2, 38, 38], "score": 0.8}],
-                "layout": [{"category": "form", "bbox": [2, 2, 38, 38], "score": 0.8}],
-            }
+        detect_layout=lambda images: [
+            [{"category": "form", "bbox": [2, 2, 38, 38], "score": 0.8}]
         ],
-        route_model=_route_model("layout"),
-        extractor_metadata=_route_extractor(),
     )
     image = tmp_path / "form.png"
     Image.new("RGB", (40, 40), "white").save(image)
@@ -1350,19 +310,14 @@ def test_exclusive_form_is_visible_as_unresolved_source_crop(tmp_path: Path) -> 
         assert region.kind == "figure"
         assert region.resolution == "unreadable"
         assert region.text_provenance["layout_category"] == "form"
-        assert region.text_provenance["routing"]["action"] == "layout"
-        assert _crop_groups([asdict(region)], 40, 40)[0]["box"] == {
-            "left": 2,
-            "top": 2,
-            "right": 38,
-            "bottom": 38,
-        }
+        # A form holding no box or ballot mark is not read for controls.
+        assert _crop_groups([asdict(region)], 40, 40) == []
     finally:
         server.shutdown()
         server.server_close()
 
 
-def test_checkbox_region_keeps_router_provenance(tmp_path: Path) -> None:
+def test_checkbox_region_reads_via_detected_layout(tmp_path: Path) -> None:
     from ocr_pipeline.falcon_layout import FalconLayoutReader
 
     engine = FakeLayoutEngine(
@@ -1377,26 +332,9 @@ def test_checkbox_region_keeps_router_provenance(tmp_path: Path) -> None:
     )
     server = _start_layout_server(
         engine,
-        detect_route=lambda images: [
-            {
-                "raw": [
-                    {
-                        "label": "checkbox_selected",
-                        "box": [2, 2, 20, 20],
-                        "score": 0.9,
-                    }
-                ],
-                "layout": [
-                    {
-                        "category": "checkbox-selected",
-                        "bbox": [2, 2, 20, 20],
-                        "score": 0.9,
-                    }
-                ],
-            }
+        detect_layout=lambda images: [
+            [{"category": "checkbox-selected", "bbox": [2, 2, 20, 20], "score": 0.9}]
         ],
-        route_model=_route_model("layout"),
-        extractor_metadata=_route_extractor(),
     )
     image = tmp_path / "checkbox.png"
     Image.new("RGB", (40, 40), "white").save(image)
@@ -1409,13 +347,11 @@ def test_checkbox_region_keeps_router_provenance(tmp_path: Path) -> None:
         server.server_close()
 
     assert region.kind == "checkbox"
-    assert region.text_provenance["routing"]["action"] == "layout"
 
 
 def test_form_only_upload_preserves_crop_and_reports_unresolved_page() -> None:
     from fastapi.testclient import TestClient
 
-    from ocr_pipeline.contracts import BoundingBox, TextRegion
     from ocr_pipeline.demo import create_app
     from ocr_pipeline.falcon_layout import FalconLayoutReader
 
@@ -1497,7 +433,7 @@ def test_eos_decoder_cycle_keeps_successful_reread_as_alternative() -> None:
     )
     engine = FakeLayoutEngine(
         [{"category": "text", "bbox": [0, 0, 40, 40], "score": 0.9, "text": original}],
-        {0.0: original, 0.2: recovered},
+        {0.0: original, 0.2: recovered, 0.5: recovered},
     )
     server = _start_layout_server(engine, category_by_layout={"text": "text"})
     try:
@@ -1510,8 +446,43 @@ def test_eos_decoder_cycle_keeps_successful_reread_as_alternative() -> None:
     assert "looped" not in element
     assert [item["text"] for item in element["read_attempts"]] == [
         original,
-        original,
         recovered,
+        recovered,
+    ]
+
+
+def test_disagreeing_sampled_reads_are_evidence_not_the_reading() -> None:
+    # A faint line read as a loop, then three different sampled inventions.
+    original = serve_falcon_layout.DecodedText(
+        "<th></th>" * 300, {"stop_token_seen": True, "decoder_cycle": True}
+    )
+    inventions = {
+        temperature: serve_falcon_layout.DecodedText(
+            text, {"stop_token_seen": True, "temperature": temperature}
+        )
+        for temperature, text in (
+            (0.2, " ".join(str(n) for n in range(1, 400))),
+            (0.5, "SOLD\tSOLD\tSOLD"),
+            (0.8, "South Windsor 2701 Tamarack Ave"),
+        )
+    }
+    engine = FakeLayoutEngine(
+        [{"category": "text", "bbox": [0, 0, 40, 40], "score": 0.9, "text": original}],
+        {0.0: original, **inventions},
+    )
+    server = _start_layout_server(engine, category_by_layout={"text": "text"})
+    try:
+        element = _post_layout_read(server, Image.new("RGB", (40, 40)))["elements"][0]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert element["text"] == original
+    assert element["looped"] is True
+    assert element["retries"] == 3
+    assert [item["text"] for item in element["read_attempts"]] == [
+        original,
+        *inventions.values(),
     ]
 
 
@@ -1560,10 +531,11 @@ def test_crop_endpoint_reports_decoder_cycle_without_claiming_success() -> None:
 
 
 @pytest.mark.parametrize("category", ["text", "checkbox-selected"])
-def test_upload_keeps_completed_retries_under_review(category):
+def test_upload_shows_completed_retries_and_sends_them_to_review(category):
     from fastapi.testclient import TestClient
     from ocr_pipeline.demo import create_app
     from ocr_pipeline.falcon_layout import FalconLayoutReader
+    from ocr_pipeline.risk import EvidenceRiskStage
 
     original = serve_falcon_layout.DecodedText(
         "unfinished read", {"stop_token_seen": False, "temperature": 0.0}
@@ -1580,14 +552,14 @@ def test_upload_keeps_completed_retries_under_review(category):
                 "text": original,
             }
         ],
-        {0.0: retry},
+        {0.2: retry, 0.5: retry},
     )
     server = _start_layout_server(engine, category_by_layout={category: "text"})
     buffer = io.BytesIO()
     Image.new("RGB", (40, 40), "white").save(buffer, format="PNG")
     try:
         reader = FalconLayoutReader(f"http://127.0.0.1:{server.server_port}")
-        with TestClient(create_app(reader)) as client:
+        with TestClient(create_app(reader, stages=(EvidenceRiskStage(),))) as client:
             response = client.post(
                 "/api/process",
                 files={"file": ("page.png", buffer.getvalue(), "image/png")},
@@ -1597,10 +569,10 @@ def test_upload_keeps_completed_retries_under_review(category):
             page = payload["result"]["pages"][0]
             region = page["regions"][0]
             assert region["text"] == retry
-            assert region["resolution"] == "conflicting"
+            assert region["resolution"] == "resolved"
             assert page["route"] == "review"
             attempts = region["text_provenance"]["read_attempts"]
-            assert [item["text"] for item in attempts] == [original, retry]
+            assert [item["text"] for item in attempts] == [original, retry, retry]
             exported = client.get(
                 f"/api/sessions/{payload['session_id']}/result.json"
             ).json()
@@ -1608,11 +580,8 @@ def test_upload_keeps_completed_retries_under_review(category):
             markdown = client.get(
                 f"/api/sessions/{payload['session_id']}/result.md"
             ).text
-            assert retry not in markdown
-            assert retry not in page["text"]["value"]
-            if category == "checkbox-selected":
-                assert "[x] [unresolved text]" in markdown
-                assert "[x] [unresolved text]" in page["text"]["value"]
+            assert retry in markdown and retry in page["text"]["value"]
+            assert "[unresolved text]" not in markdown
     finally:
         server.shutdown()
         server.server_close()
@@ -1648,28 +617,7 @@ def test_upload_promotes_only_one_leading_decoded_ballot_mark() -> None:
     buffer = io.BytesIO()
     Image.new("RGB", (40, 40), "white").save(buffer, format="PNG")
     try:
-
-        class Geometry:
-            def read_with_merge_level(
-                self, image_path: Path, page_number: int, merge_level: str
-            ) -> list[TextRegion]:
-                del image_path, merge_level
-                return [
-                    TextRegion(
-                        id="word-wheezes",
-                        kind="word",
-                        text="Wheezes",
-                        confidence=0.95,
-                        bounding_box=BoundingBox(4, 1, 36, 9),
-                        reading_order=0,
-                        provider="geometry-reader",
-                    )
-                ]
-
-        reader = FusedReader(
-            FalconLayoutReader(f"http://127.0.0.1:{server.server_port}"),
-            Geometry(),
-        )
+        reader = FalconLayoutReader(f"http://127.0.0.1:{server.server_port}")
         with TestClient(create_app(reader)) as client:
             response = client.post(
                 "/api/process",
@@ -1691,16 +639,9 @@ def test_upload_promotes_only_one_leading_decoded_ballot_mark() -> None:
             assert checkbox["structure"]["state"] == "unselected"
             assert checkbox["structure"]["label"] == "Wheezes"
             assert checkbox["structure"]["label_evidence_ids"] == []
-            assert [
-                word["text"] for word in checkbox["structure"]["word_evidence"]
-            ] == ["Wheezes"]
             assert checkbox["text_provenance"]["raw_text"] == readings[0]
             assert checkbox["text_provenance"]["generation"] == generation
             assert checkbox["confidence"] == 0.9
-            assert checkbox["text_provenance"]["confidence_meaning"] == (
-                "decoder token score, from the text reader"
-            )
-            assert checkbox["text_provenance"]["recognition_confidence_mean"] == 0.95
             assert (
                 checkbox["text_provenance"]["method"]
                 == "decoded_ballot_glyph_promotion"
@@ -1714,7 +655,6 @@ def test_upload_promotes_only_one_leading_decoded_ballot_mark() -> None:
             ).text
             assert markdown.count("[ ] Wheezes") == 1
             assert markdown.count("Wheezes") == 1
-            assert "Geometry recognition score" in client.get("/").text
     finally:
         server.shutdown()
         server.server_close()
@@ -1898,7 +838,8 @@ def test_layout_http_preserves_overlapping_modalities_and_tiny_text(
         end_of_query_token_id=2,
         decode=lambda ids: "I:",
         _tok=SimpleNamespace(
-            encode=lambda text, **kwargs: SimpleNamespace(ids=[1], offsets=[(0, 2)])
+            get_added_tokens_decoder=dict,
+            encode=lambda text, **kwargs: SimpleNamespace(ids=[1], offsets=[(0, 2)]),
         ),
     )
     crop_sizes = []
@@ -1996,24 +937,23 @@ def test_layout_http_preserves_overlapping_modalities_and_tiny_text(
     finally:
         server.shutdown()
         server.server_close()
+    # Host timings differ per call; everything else must be identical.
+    assert all(output.pop("timings")["crops"] == 2 for output in outputs)
     assert outputs[0] == outputs[1] == outputs[2]
     elements = outputs[0]["elements"]
-    assert [item["category"] for item in elements] == [
-        "picture",
-        "text",
-        "text",
-        "checkbox-selected",
-    ]
-    assert [item["text"] for item in elements] == ["", "I:", "I:", "I:"]
-    assert elements[2]["bbox"] == [1, 1, 5, 9]
-    assert elements[2]["generation"]["token_score"] == pytest.approx(0.75)
-    assert elements[2]["generation"]["tokens"] == [
+    # The page-sized picture is dropped and the nested text is read by its container,
+    # while the checkbox inside the text keeps its own control reading.
+    assert [item["category"] for item in elements] == ["text", "checkbox-selected"]
+    assert [item["text"] for item in elements] == ["I:", "I:"]
+    assert elements[0]["bbox"] == [0, 0, 80, 40]
+    assert elements[1]["bbox"] == [70, 1, 79, 10]
+    assert elements[0]["generation"]["token_score"] == pytest.approx(0.75)
+    assert elements[0]["generation"]["tokens"] == [
         {"start": 0, "end": 2, "score": 0.75}
     ]
-    assert elements[0]["generation"] == {}
-    assert [element["query_id"] for element in elements] == [0, 1, 2, 3]
-    assert elements[1]["class_scores"]["picture"] == pytest.approx(0.85)
-    assert elements[1]["class_scores"]["text"] == pytest.approx(0.9)
+    assert [element["query_id"] for element in elements] == [1, 3]
+    assert elements[0]["class_scores"]["picture"] == pytest.approx(0.85)
+    assert elements[0]["class_scores"]["text"] == pytest.approx(0.9)
     assert all(min(size) >= 16 for size in crop_sizes)
 
     engines[0].layout_detector._detector = lambda image: [
@@ -2021,10 +961,9 @@ def test_layout_http_preserves_overlapping_modalities_and_tiny_text(
     ]
     with Image.new("RGB", (80, 40)) as image:
         result = engines[0].generate_with_layout([image])
-    assert result == [
-        [{"category": "picture", "bbox": [0, 0, 80, 40], "score": 0.8, "text": ""}]
-    ]
-    assert len(crop_sizes) == 9
+    # Docling drops a picture covering the whole page.
+    assert result == [[]]
+    assert len(crop_sizes) == 6
 
 
 @pytest.mark.parametrize("route", ["generate", "read", "retry"])
@@ -2111,7 +1050,7 @@ def test_layout_http_recovers_failed_generation_before_closing_images(
                 serve_falcon_layout.DecodedText(
                     "unfinished", {"stop_token_seen": False}
                 )
-                if route == "retry"
+                if route == "retry" and "temperature" not in options
                 else self.read(images[0])
             )
             return [
@@ -2166,12 +1105,142 @@ def test_layout_http_recovers_failed_generation_before_closing_images(
             assert first_body["error"] == "falcon_engine_unavailable"
         else:
             assert first_status == 422 and second_status == health_status == 200
-            assert engine.erased == [1, 2] and engine.calls == 2
+            # The retry route reads twice more: a sampled read is kept once another agrees.
+            assert engine.erased == [1, 2]
+            assert engine.calls == (3 if route == "retry" else 2)
             assert engine.paged_kv_cache.capacity == [0, 0, 0]
             assert not engine._input_pos.any() and not engine._rope_pos_t.any()
             assert engine._token_ids_ready is None and engine._token_ids_count == 0
     finally:
         allow_tokenization.set()
         pool.shutdown(wait=True, cancel_futures=True)
+        server.shutdown()
+        server.server_close()
+
+
+def test_born_digital_cells_reach_layout_detection_and_bad_cells_are_rejected() -> None:
+    seen = []
+
+    def detect_layout(images, cells=None):
+        seen.append(cells)
+        return [[]]
+
+    server = _start_layout_server(FakeLayoutEngine([]), detect_layout=detect_layout)
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 30), "white").save(buffer, format="PNG")
+    image = base64.b64encode(buffer.getvalue()).decode()
+
+    def post(cells):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_address[1]}/read",
+            data=json.dumps({"image": image, "cells": cells}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as reply:
+                return reply.status
+        except urllib.error.HTTPError as error:
+            return error.code
+
+    try:
+        assert post([{"text": "Yes", "bbox": [0, 0, 10, 10]}]) == 200
+        assert post([{"text": "Yes", "bbox": [0, 0, 10]}]) == 400
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert seen == [[[{"text": "Yes", "bbox": [0.0, 0.0, 10.0, 10.0]}]]]
+
+
+@pytest.mark.parametrize("on_engine", [False, True])
+def test_a_gpu_layout_detector_runs_inside_the_engine_context(on_engine) -> None:
+    import torch
+
+    seen = []
+
+    def detect_layout(images, cells=None):
+        seen.append(torch.is_inference_mode_enabled())
+        return [[]]
+
+    server = _start_layout_server(
+        FakeLayoutEngine([]), detect_layout=detect_layout, detect_on_engine=on_engine
+    )
+    try:
+        _post_layout_read(server, Image.new("RGB", (40, 30), "white"))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert seen == [on_engine]
+
+
+def test_a_born_digital_table_takes_tableformer_structure_not_a_pixel_read() -> None:
+    calls = []
+
+    def table_reader(image, box, cells):
+        calls.append((box, cells))
+        return "<table><tr><td>Difficulty with ADLs</td><td>☑</td></tr></table>"
+
+    engine = FakeLayoutEngine([])
+    detections = [
+        {"category": "table", "bbox": [0, 0, 30, 20], "score": 0.9, "cell_text": "x"}
+    ]
+    engine.generate_with_layout = lambda images, **options: [
+        [
+            {**item, "text": item.get("cell_text", "")}
+            for item in options["detections"][0]
+        ]
+    ]
+    server = _start_layout_server(
+        engine,
+        detect_layout=lambda images, cells=None: [detections],
+        table_reader=table_reader,
+    )
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 30), "white").save(buffer, format="PNG")
+    cells = [{"text": "☑", "bbox": [20, 5, 25, 10]}]
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_address[1]}/read",
+        data=json.dumps(
+            {"image": base64.b64encode(buffer.getvalue()).decode(), "cells": cells}
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as reply:
+            element = json.loads(reply.read())["elements"][0]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert calls == [([0, 0, 30, 20], [{"text": "☑", "bbox": [20.0, 5.0, 25.0, 10.0]}])]
+    assert element["text"].startswith("<table>")
+    assert element["text_source"] == "pdf_text_layer"
+    assert element["table_source"] == "tableformer"
+
+
+def test_a_crop_floor_above_the_crop_ceiling_is_rejected() -> None:
+    server = _start_layout_server(FakeLayoutEngine([]))
+    buffer = io.BytesIO()
+    Image.new("RGB", (20, 20), "white").save(buffer, format="PNG")
+    image = base64.b64encode(buffer.getvalue()).decode()
+
+    def post(options):
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_address[1]}/read",
+            data=json.dumps({"image": image, **options}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=5) as reply:
+                return reply.status
+        except urllib.error.HTTPError as error:
+            return error.code
+
+    try:
+        assert post({"min_image_size": 128}) == 200
+        assert post({"min_image_size": 2048}) == 400
+        assert post({"min_image_size": 0}) == 400
+    finally:
         server.shutdown()
         server.server_close()

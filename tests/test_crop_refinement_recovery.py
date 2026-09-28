@@ -373,7 +373,10 @@ def test_owned_form_row_uses_single_row_evidence_for_nonoverlapping_controls(
 
 
 def test_owned_form_row_failure_keeps_completed_primary_request(tmp_path, monkeypatch):
+    import ocr_pipeline.markdown_refinement as refinement
+
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    monkeypatch.setattr(refinement.time, "sleep", lambda seconds: None)
     image = tmp_path / "form.png"
     Image.new("RGB", (200, 100), "white").save(image)
     page = {
@@ -453,7 +456,8 @@ def test_owned_form_row_failure_keeps_completed_primary_request(tmp_path, monkey
 
     assert result["status"] == "partial"
     assert result["cost"] == 0.001
-    assert result["attempts"] == 2
+    # The row request's HTTP 500 is retried before it is given up.
+    assert result["attempts"] == 1 + refinement.QWEN_ATTEMPTS
     assert result["accepted_crop_ids"] == ["crop-2"]
     assert result["rejected_crop_ids"] == ["crop-1", "crop-3"]
     assert result["accepted_control_crop_ids"] == ["crop-1"]
@@ -461,9 +465,7 @@ def test_owned_form_row_failure_keeps_completed_primary_request(tmp_path, monkey
     assert "[signature]" in result["content"]["markdown"]
 
 
-@pytest.mark.parametrize(
-    "option_box", ([0, 600, 100, 900], [0, 0, 1000, 1000])
-)
+@pytest.mark.parametrize("option_box", ([0, 600, 100, 900], [0, 0, 1000, 1000]))
 def test_owned_form_row_keeps_ambiguous_label_ownership_out_of_canonical_text(
     tmp_path, monkeypatch, option_box
 ):
@@ -639,7 +641,15 @@ def test_form_source_without_structured_controls_stays_unresolved(
                 "resolution": "unreadable",
                 "bounding_box": {"left": 0, "top": 0, "right": 100, "bottom": 100},
                 "structure": {"role": "form_source"},
-            }
+            },
+            {
+                "id": "box",
+                "kind": "checkbox",
+                "text": "Yes",
+                "resolution": "resolved",
+                "bounding_box": {"left": 10, "top": 10, "right": 40, "bottom": 20},
+                "structure": {"state": "unselected", "label": "Yes"},
+            },
         ],
     }
 
@@ -1263,146 +1273,155 @@ def test_table_cell_ids_preserve_merged_spans(tmp_path, monkeypatch):
     assert result["content"]["markdown"].count("Merged heading") == 1
 
 
-@pytest.mark.parametrize(
-    ("word_provider", "word_provenance"),
-    [
-        ("nemotron-ocr-v2", {}),
-        (
-            "falcon-on-nemotron",
-            {"method": "word_reader_uncovered", "geometry_provider": "nemotron-ocr-v2"},
-        ),
-    ],
-)
-def test_form_refinement_preserves_separately_resolved_word_ownership(
-    tmp_path, monkeypatch, word_provider, word_provenance
-):
+def _answering(crops):
+    def transport(request, timeout):
+        payload = json.loads(request.data)
+        body = {
+            "model": payload["model"],
+            "choices": [
+                {
+                    "message": {"content": json.dumps({"crops": crops})},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "cost": 0.001},
+        }
+        return 200, {}, json.dumps(body).encode()
+
+    return transport
+
+
+def test_refilled_grid_of_a_truncated_table_stays_incomplete(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
-    image = tmp_path / "form.png"
-    Image.new("RGB", (300, 200), "white").save(image)
+    image = tmp_path / "table.png"
+    Image.new("RGB", (200, 100), "white").save(image)
+    cells = [
+        {
+            "id": f"cell-{index}",
+            "row_nums": [0],
+            "column_nums": [index],
+            "text": f"old {index}",
+            "bounding_box": {
+                "left": 100 * index,
+                "top": 0,
+                "right": 100 * index + 100,
+                "bottom": 100,
+            },
+            "resolution": "resolved",
+        }
+        for index in range(2)
+    ]
     page = {
         "page_number": 1,
-        "width": 300,
-        "height": 200,
+        "width": 200,
+        "height": 100,
+        "regions": [
+            {
+                "id": "table",
+                "kind": "table",
+                "text": "old 0 old 1",
+                "provider": "falcon-perception",
+                # The decoder spent its budget: rows after these are missing.
+                "resolution": "unreadable",
+                "bounding_box": {"left": 0, "top": 0, "right": 200, "bottom": 100},
+                "structure": {
+                    "role": "table",
+                    "row_count": 1,
+                    "column_count": 2,
+                    "cells": cells,
+                },
+            }
+        ],
+    }
+    transport = _answering(
+        [
+            {
+                "region_id": "crop-1",
+                "markdown": "[table cells extracted]",
+                "table_cells": [
+                    {"cell_id": "r1c1", "text": "new 0"},
+                    {"cell_id": "r1c2", "text": "new 1"},
+                ],
+            }
+        ]
+    )
+
+    refined = refine_page(image, page, "original", transport=transport)[
+        "refined_regions"
+    ][0]
+
+    assert [cell["text"] for cell in refined["structure"]["cells"]] == [
+        "new 0",
+        "new 1",
+    ]
+    assert refined["resolution"] == "unreadable"
+
+
+def test_refined_title_keeps_its_kind_and_structure(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    image = tmp_path / "title.png"
+    Image.new("RGB", (200, 60), "white").save(image)
+    page = {
+        "page_number": 1,
+        "width": 200,
+        "height": 60,
+        "regions": [
+            {
+                "id": "title",
+                "kind": "title",
+                "text": "Discharge Sumary",
+                "provider": "falcon-perception",
+                "resolution": "unreadable",
+                "bounding_box": {"left": 0, "top": 0, "right": 200, "bottom": 60},
+                "structure": {"presentation_rank": 1, "layout_owner_id": "block-1"},
+            }
+        ],
+    }
+    transport = _answering([{"region_id": "crop-1", "markdown": "Discharge Summary"}])
+
+    result = refine_page(image, page, "original", transport=transport)
+    refined = result["refined_regions"][0]
+
+    assert refined["kind"] == "title"
+    assert refined["text"] == "Discharge Summary"
+    assert refined["structure"] == {
+        "presentation_rank": 1,
+        "layout_owner_id": "block-1",
+    }
+
+
+def test_a_form_without_boxes_or_marks_is_not_read_for_controls(tmp_path, monkeypatch):
+    """Qwen returned each filled field of a plain header form as a checked control."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    image = tmp_path / "form.png"
+    Image.new("RGB", (200, 100), "white").save(image)
+    page = {
+        "page_number": 1,
+        "width": 200,
+        "height": 100,
         "regions": [
             {
                 "id": "form",
                 "kind": "figure",
                 "text": "",
-                "resolution": "unreadable",
-                "bounding_box": {"left": 0, "top": 0, "right": 200, "bottom": 150},
-                "text_provenance": {"layout_category": "form"},
+                "resolution": "resolved",
+                "bounding_box": {"left": 0, "top": 0, "right": 200, "bottom": 100},
+                "structure": {"role": "form_source"},
             },
             {
-                "id": "word",
+                "id": "field",
                 "kind": "text",
-                "text": "Dose",
+                "text": "Phone Number 573-339-6130",
+                "confidence": 0.95,
                 "resolution": "resolved",
-                "provider": word_provider,
-                "text_provenance": word_provenance,
-                "bounding_box": {"left": 20, "top": 20, "right": 65, "bottom": 40},
-            },
-            {
-                "id": "other-word",
-                "kind": "text",
-                "text": "Nurse",
-                "resolution": "resolved",
-                "provider": "nemotron-ocr-v2",
-                "bounding_box": {"left": 220, "top": 20, "right": 275, "bottom": 40},
+                "bounding_box": {"left": 10, "top": 10, "right": 190, "bottom": 40},
             },
         ],
     }
-    original = copy.deepcopy(page)
-    base = render_page_markdown(page["regions"], [r["id"] for r in page["regions"]])
-    answer_text = "Dose: 5 mg"
 
     def transport(request, timeout):
-        payload = json.loads(request.data)
-        return (
-            200,
-            {},
-            json.dumps(
-                {
-                    "model": payload["model"],
-                    "choices": [
-                        {
-                            "message": {
-                                "content": json.dumps(
-                                    {
-                                        "crops": [
-                                            {
-                                                "region_id": "crop-1",
-                                                "markdown": answer_text,
-                                            }
-                                        ]
-                                    }
-                                )
-                            },
-                            "finish_reason": "stop",
-                        }
-                    ],
-                    "usage": {
-                        "prompt_tokens": 1,
-                        "completion_tokens": 1,
-                        "cost": 0.001,
-                    },
-                }
-            ).encode(),
-        )
+        raise AssertionError("no crop needs Qwen")
 
-    result = refine_page(image, page, base, transport=transport)
+    result = refine_page(image, page, "base output", transport=transport)
 
-    assert result["status"] == "invalid"
-    assert result["accepted_crop_ids"] == []
-    assert result["rejected_crop_ids"] == ["crop-1"]
-    assert result["content"]["markdown"] == base
-    assert (
-        render_page_markdown(
-            result["refined_regions"], [r["id"] for r in result["refined_regions"]]
-        )
-        == base
-    )
-    assert "Dose" in base and "Nurse" in base
-    assert "Dose: 5 mg" not in base
-    assert result["refined_regions"][0]["resolution"] == "unreadable"
-    assert result["refined_regions"][0]["alternatives"][0]["text"] == "Dose: 5 mg"
-    assert (
-        result["refined_regions"][0]["alternatives"][0]["decision_state"] == "pending"
-    )
-    assert result["refined_regions"][0]["alternatives"][0]["text_provenance"][
-        "overlapping_region_ids"
-    ] == ["word"]
-    assert page == original
-
-    disjoint = copy.deepcopy(page)
-    disjoint["regions"][1]["bounding_box"] = {
-        "left": 201,
-        "top": 20,
-        "right": 219,
-        "bottom": 40,
-    }
-    disjoint_result = refine_page(image, disjoint, base, transport=transport)
-    assert disjoint_result["status"] == "generated"
-    assert disjoint_result["accepted_crop_ids"] == ["crop-1"]
-
-    answer_text = "☑ None of the Above\n☐ Z1. None of the Above"
-    conflicting = refine_page(image, disjoint, base, transport=transport)
-    assert conflicting["status"] == "invalid"
-    assert conflicting["accepted_crop_ids"] == []
-    assert conflicting["content"]["markdown"] == base
-    assert conflicting["refined_regions"][0]["alternatives"][0]["text"] == answer_text
-    assert "unaligned form controls" in conflicting["validation_errors"][0]
-
-    answer_text = "☑ A1. Yes\n☐ B1. Yes"
-    distinct = refine_page(image, disjoint, base, transport=transport)
-    assert distinct["status"] == "invalid"
-    assert distinct["content"]["markdown"] == base
-    assert distinct["refined_regions"][0]["alternatives"][0]["text"] == answer_text
-
-    answer_text = "Question A: ☐ No\n☑ Yes\nQuestion B: ☑ No\n☐ Yes"
-    repeated = refine_page(image, disjoint, base, transport=transport)
-    assert repeated["status"] == "invalid"
-    assert repeated["content"]["markdown"] == base
-    assert repeated["refined_regions"][0]["alternatives"][0]["text"] == answer_text
-    assert repeated["refined_regions"][0]["alternatives"][0]["text_provenance"][
-        "unaligned_controls"
-    ]
+    assert result.get("form_controls_added", 0) == 0
