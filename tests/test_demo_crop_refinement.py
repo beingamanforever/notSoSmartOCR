@@ -244,3 +244,162 @@ def test_rotated_form_crops_and_returned_controls_share_source_coordinates(
         assert page["refinement"]["rotation_degrees"] == angle
         control = next(r for r in page["regions"] if r["text"] == "New option")
         assert list(control["bounding_box"].values()) == expected_box
+
+
+@pytest.mark.parametrize("failed_page", [None, 2])
+def test_parallel_refinement_preserves_requests_outputs_and_failure_order(
+    monkeypatch, tmp_path, failed_page
+):
+    import copy
+    import threading
+
+    from ocr_pipeline.contracts import DocumentResult, PageResult
+    from ocr_pipeline.openrouter import OpenRouterError
+    from ocr_pipeline.rendering import render_evidence
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    document = DocumentResult("three-pages", {"kind": "image"}, "success")
+    paths = []
+    for number, color in enumerate(("red", "green", "blue"), 1):
+        path = tmp_path / f"page-{number}.png"
+        Image.new("RGB", (120, 80), color).save(path)
+        paths.append(path)
+        regions = [
+            TextRegion(
+                f"note-{number}",
+                "handwriting",
+                f"Initial {number}",
+                None,
+                BoundingBox(0, 0, 120, 80),
+                1,
+                "fixture",
+            )
+        ]
+        document.pages.append(
+            PageResult(
+                number,
+                120,
+                80,
+                "fixture",
+                "read",
+                render_evidence(regions),
+                regions,
+            )
+        )
+    requests = []
+    barrier = threading.Barrier(3)
+    concurrent = False
+    seen = []
+
+    def transport(request, timeout):
+        if concurrent:
+            number = requests.index(request.data) + 1
+            seen.append(number)
+            barrier.wait(timeout=3)
+        else:
+            requests.append(request.data)
+            number = len(requests)
+        if number == failed_page:
+            raise OpenRouterError("Unavailable", attempts=1)
+        answer = {"crops": [{"region_id": "crop-1", "markdown": "Corrected note"}]}
+        return (
+            200,
+            {},
+            json.dumps(
+                {
+                    "model": QWEN_37_FLASH_MODEL,
+                    "choices": [
+                        {
+                            "finish_reason": "stop",
+                            "message": {"content": json.dumps(answer)},
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 10,
+                        "cost": 0.001,
+                    },
+                }
+            ).encode(),
+        )
+
+    serial = copy.deepcopy(document)
+    refine_document(serial, paths, transport=transport, workers=1)
+    concurrent = True
+    parallel = copy.deepcopy(document)
+    refine_document(parallel, paths, transport=transport, workers=3)
+    assert sorted(seen) == [1, 2, 3]
+    for result in (serial, parallel):
+        for page in result.pages:
+            page.refinement.pop("elapsed_seconds")
+            page.refinement.pop("latency_ms", None)
+    assert serial.to_dict() == parallel.to_dict()
+    if failed_page:
+        assert parallel.failures[0].page_number == failed_page
+        assert parallel.pages[failed_page - 1].text.value == f"Initial {failed_page}"
+
+
+@pytest.mark.parametrize("unknown_charge", [False, True])
+def test_parallel_budget_waits_for_reservations_and_retains_unknown_costs(
+    monkeypatch, tmp_path, unknown_charge
+):
+    import sqlite3
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from urllib.request import Request
+
+    from ocr_pipeline import openrouter
+
+    database = tmp_path / "parallel.sqlite"
+    entered = threading.Event()
+    release = threading.Event()
+    waiting = threading.Event()
+    original_wait = openrouter._budget_condition.wait
+
+    def observe_wait(*args, **kwargs):
+        waiting.set()
+        return original_wait(*args, **kwargs)
+
+    monkeypatch.setattr(openrouter._budget_condition, "wait", observe_wait)
+    calls = []
+
+    def transport(request, timeout):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(3)
+            if unknown_charge:
+                raise OSError("connection lost after send")
+        return 200, {}, b'{"usage":{"cost":0.001}}'
+
+    call = partial(
+        budgeted_transport,
+        Request("https://example.invalid"),
+        2,
+        database=database,
+        budget_usd=0.26,
+        transport=transport,
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(call)
+        assert entered.wait(3)
+        second = pool.submit(call)
+        try:
+            assert waiting.wait(3)
+            assert not second.done()
+        finally:
+            release.set()
+        if unknown_charge:
+            with pytest.raises(OSError):
+                first.result()
+            with pytest.raises(openrouter.OpenRouterError, match="budget exhausted"):
+                second.result()
+        else:
+            assert first.result()[0] == second.result()[0] == 200
+    with sqlite3.connect(database) as ledger:
+        rows = ledger.execute(
+            "SELECT amount, actual FROM charges ORDER BY id"
+        ).fetchall()
+    assert rows == (
+        [(0.25, None)] if unknown_charge else [(0.001, 0.001), (0.001, 0.001)]
+    )

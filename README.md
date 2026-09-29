@@ -75,7 +75,9 @@ Source pixels and canonical evidence are retained, with local KaTeX for math.
 The demo composition endpoint reports the configuration of each running service.
 
 Image-decode reuse, lighter response transfer, and overlapping local OCR with hosted refinement reduce overhead while preserving original OCR inputs and canonical exports.
-These component improvements do not establish a measured full-document latency gain.
+Parallel page rereads and CPU layout tiles reduced one warm three-page run from 84.6 to 52.5 seconds on an A10G, with partial results retained.
+Four paired native OCR comparisons preserved the complete response except timing metadata.
+Single-page hosted latency remains a bottleneck; see the [measurements and preservation limits](docs/walkthroughs/latency-preservation.md).
 The UI loads source crops on demand; downloaded JSON retains their original PNG data.
 
 ## Walkthroughs

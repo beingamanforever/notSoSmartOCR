@@ -7,6 +7,7 @@ import io
 import json
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -224,11 +225,16 @@ def refine_document(
     *,
     zero_data_retention: bool = True,
     transport: Transport | None = None,
+    workers: int = 1,
 ) -> None:
     """Apply the benchmark crop reader to canonical pages before UI and export."""
     if len(document.pages) != len(image_paths):
         raise ValueError("Refinement requires the source image for every page")
-    for page, image_path in zip(document.pages, image_paths, strict=True):
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        raise ValueError("Refinement workers must be a positive integer")
+
+    def read_page(item):
+        page, image_path = item
         raw = asdict(page)
         markdown = render_page_markdown(
             raw["regions"], page.text.evidence_ids, fallback=page.text.value
@@ -252,48 +258,63 @@ def refine_document(
                 transport=transport,
                 rotation_degrees=orientation.get("angle", 0),
             )
-            refined = result.pop("refined_regions", None)
-            if refined is not None:
-                page.regions = [
-                    TextRegion(
-                        **{
-                            k: v
-                            for k, v in region.items()
-                            if k not in {"bounding_box", "alternatives"}
-                        },
-                        bounding_box=BoundingBox(**region["bounding_box"]),
-                        alternatives=[
-                            TextAlternative(**item)
-                            for item in region.get("alternatives", [])
-                        ],
-                    )
-                    for region in refined
-                ]
-                page.text = render_evidence(page.regions)
-            page.refinement = {
-                k: v
-                for k, v in result.items()
-                if k not in {"original_markdown", "content", "canonical_unchanged"}
-            }
-            page.refinement["canonical_unchanged"] = not bool(
-                result.get("accepted_crop_ids") or result.get("form_controls_added")
-            )
-            errors = result.get("validation_errors", [])
-            if errors:
-                _refinement_failure(
-                    document, page, "crop_refinement_unresolved", "; ".join(errors)
-                )
+            return result, time.perf_counter() - started
         except (OpenRouterError, ReaderError, ValueError, OSError) as error:
-            page.refinement = {
-                "model": QWEN_37_FLASH_MODEL,
-                "status": "failed",
-                "canonical_unchanged": True,
-                "attempts": getattr(error, "attempts", None),
-                "cost": None,
-                "error": str(error),
-            }
-            _refinement_failure(document, page, "crop_refinement_failed", str(error))
-        page.refinement["elapsed_seconds"] = time.perf_counter() - started
+            return error, time.perf_counter() - started
+
+    # Calls overlap; canonical changes and failure IDs stay in source-page order.
+    with ThreadPoolExecutor(
+        max_workers=min(workers, max(1, len(document.pages)))
+    ) as pool:
+        outcomes = pool.map(read_page, zip(document.pages, image_paths, strict=True))
+        for page, (result, elapsed) in zip(document.pages, outcomes, strict=True):
+            try:
+                if isinstance(result, Exception):
+                    raise result
+                refined = result.pop("refined_regions", None)
+                if refined is not None:
+                    page.regions = [
+                        TextRegion(
+                            **{
+                                k: v
+                                for k, v in region.items()
+                                if k not in {"bounding_box", "alternatives"}
+                            },
+                            bounding_box=BoundingBox(**region["bounding_box"]),
+                            alternatives=[
+                                TextAlternative(**item)
+                                for item in region.get("alternatives", [])
+                            ],
+                        )
+                        for region in refined
+                    ]
+                    page.text = render_evidence(page.regions)
+                page.refinement = {
+                    k: v
+                    for k, v in result.items()
+                    if k not in {"original_markdown", "content", "canonical_unchanged"}
+                }
+                page.refinement["canonical_unchanged"] = not bool(
+                    result.get("accepted_crop_ids") or result.get("form_controls_added")
+                )
+                errors = result.get("validation_errors", [])
+                if errors:
+                    _refinement_failure(
+                        document, page, "crop_refinement_unresolved", "; ".join(errors)
+                    )
+            except (OpenRouterError, ReaderError, ValueError, OSError) as error:
+                page.refinement = {
+                    "model": QWEN_37_FLASH_MODEL,
+                    "status": "failed",
+                    "canonical_unchanged": True,
+                    "attempts": getattr(error, "attempts", None),
+                    "cost": None,
+                    "error": str(error),
+                }
+                _refinement_failure(
+                    document, page, "crop_refinement_failed", str(error)
+                )
+            page.refinement["elapsed_seconds"] = elapsed
     if document.failures:
         document.status = (
             "partial" if any(p.text.value.strip() for p in document.pages) else "failed"
@@ -534,26 +555,9 @@ def refine_page(
         completed_crops = []
         failed_crops = []
         request_errors = []
+        requests = []
         if primary_crops:
-            results.append(
-                _call_openrouter(
-                    model,
-                    primary_messages,
-                    _crop_response_schema(primary_crops),
-                    "page_crops",
-                    16384,
-                    None,
-                    180,
-                    QWEN_ATTEMPTS,
-                    strict,
-                    transport or _default_transport,
-                    time.sleep,
-                    zero_data_retention=zero_data_retention,
-                    reasoning_enabled=False,
-                    session_id=session_id,
-                )
-            )
-            completed_crops.extend(primary_crops)
+            requests.append((primary_crops, primary_messages, "page_crops"))
         if owned_row_crops:
             row_messages = [
                 {
@@ -597,40 +601,51 @@ def refine_page(
                         _image_content(panel),
                     ]
                 )
-            try:
-                results.append(
-                    _call_openrouter(
-                        model,
-                        row_messages,
-                        _crop_response_schema(owned_row_crops),
-                        "owned_form_rows",
-                        16384,
-                        None,
-                        180,
-                        QWEN_ATTEMPTS,
-                        strict,
-                        transport or _default_transport,
-                        time.sleep,
-                        zero_data_retention=zero_data_retention,
-                        reasoning_enabled=False,
-                        session_id=session_id,
+            requests.append((owned_row_crops, row_messages, "owned_form_rows"))
+
+        def read_crops(request):
+            requested_crops, messages, schema_name = request
+            return _call_openrouter(
+                model,
+                messages,
+                _crop_response_schema(requested_crops),
+                schema_name,
+                16384,
+                None,
+                180,
+                QWEN_ATTEMPTS,
+                strict,
+                transport or _default_transport,
+                time.sleep,
+                zero_data_retention=zero_data_retention,
+                reasoning_enabled=False,
+                session_id=session_id,
+            )
+
+        # These requests have independent prompts and source crops. Keep their
+        # original merge order and primary-failure behavior while overlapping I/O.
+        with ThreadPoolExecutor(max_workers=len(requests)) as pool:
+            futures = [pool.submit(read_crops, request) for request in requests]
+            for (requested_crops, _, schema_name), future in zip(
+                requests, futures, strict=True
+            ):
+                try:
+                    results.append(future.result())
+                    completed_crops.extend(requested_crops)
+                except OpenRouterError as error:
+                    if not results:
+                        raise
+                    failed_crops.extend(requested_crops)
+                    request_errors.append(
+                        {
+                            "request": schema_name,
+                            "crop_ids": [crop["region_id"] for crop in requested_crops],
+                            "code": error.code,
+                            "error": str(error),
+                            "attempts": error.attempts or 0,
+                            "latency_ms": error.latency_ms or 0,
+                        }
                     )
-                )
-                completed_crops.extend(owned_row_crops)
-            except OpenRouterError as error:
-                if not results:
-                    raise
-                failed_crops.extend(owned_row_crops)
-                request_errors.append(
-                    {
-                        "request": "owned_form_rows",
-                        "crop_ids": [crop["region_id"] for crop in owned_row_crops],
-                        "code": error.code,
-                        "error": str(error),
-                        "attempts": error.attempts or 0,
-                        "latency_ms": error.latency_ms or 0,
-                    }
-                )
         result = _combine_openrouter_results(results)
         if request_errors:
             result = OpenRouterResult(
@@ -1310,9 +1325,7 @@ def _same_form_control(first, second):
         return True
     # The same label on an overlapping box is the same control: Qwen's option boxes sit
     # a little off the printed ones, and a copy took its form's place in reading order.
-    return intersection > 0 and " ".join(
-        first["label"].casefold().split()
-    ) == " ".join(
+    return intersection > 0 and " ".join(first["label"].casefold().split()) == " ".join(
         str((second.get("structure") or {}).get("label") or second.get("text") or "")
         .casefold()
         .split()

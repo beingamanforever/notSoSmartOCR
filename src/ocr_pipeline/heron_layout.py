@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import threading
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from typing import Any
 
@@ -325,9 +326,17 @@ class HeronTableDetector:
         device: str = "cuda",
         score_threshold: float = 0.5,
         detector: Detector | None = None,
+        slice_workers: int = 1,
     ) -> None:
         if not 0 <= score_threshold <= 1:
             raise ValueError("score_threshold must be from 0 to 1")
+        if (
+            isinstance(slice_workers, bool)
+            or not isinstance(slice_workers, int)
+            or slice_workers < 1
+        ):
+            raise ValueError("slice_workers must be a positive integer")
+        self.slice_workers = slice_workers
         self.model_id = model_id
         self.revision = revision
         self.device = device
@@ -344,13 +353,17 @@ class HeronTableDetector:
 
     def detect_elements(self, image: Image.Image) -> list[Detection]:
         """Return all learned layout classes using the same detector pass."""
-        width, height = image.size
         with self._lock:
-            detector = self._get_detector()
-            try:
-                detections = detector(image)
-            except Exception as error:
-                raise ReaderError("heron_detect_failed", str(error)) from error
+            return self._detect_elements(image, self._get_detector())
+
+    def _detect_elements(
+        self, image: Image.Image, detector: Detector
+    ) -> list[Detection]:
+        width, height = image.size
+        try:
+            detections = detector(image)
+        except Exception as error:
+            raise ReaderError("heron_detect_failed", str(error)) from error
 
         boxes = []
         for item in detections:
@@ -399,28 +412,53 @@ class HeronTableDetector:
         step = 1 - overlap
         tile_width = width / (grid - (grid - 1) * overlap)
         tile_height = height / (grid - (grid - 1) * overlap)
-        found = []
+        tiles = []
         for row in range(grid):
             for column in range(grid):
-                left, top = int(column * tile_width * step), int(row * tile_height * step)
+                left, top = (
+                    int(column * tile_width * step),
+                    int(row * tile_height * step),
+                )
                 right = min(width, int(left + tile_width))
                 bottom = min(height, int(top + tile_height))
                 if regions is not None and not any(
-                    box[0] < right and box[2] > left and box[1] < bottom and box[3] > top
+                    box[0] < right
+                    and box[2] > left
+                    and box[1] < bottom
+                    and box[3] > top
                     for box in regions
                 ):
                     continue
-                for item in self.detect_elements(image.crop((left, top, right, bottom))):
-                    if item["label"] not in CONTROL_LABELS:
-                        continue
-                    x0, y0, x1, y1 = item["box"]
-                    box = (x0 + left, y0 + top, x1 + left, y1 + top)
-                    if any(
-                        _overlap_of_smaller(box, other["box"]) >= SAME_CONTROL_OVERLAP
-                        for other in page_controls
-                    ):
-                        continue
-                    found.append({**item, "box": box})
+                tiles.append((left, top, right, bottom))
+        if not tiles:
+            return []
+
+        # Keep individual batch-one inference and merge order unchanged. Holding
+        # the page lock bounds CPU concurrency across simultaneous documents.
+        with self._lock:
+            detector = self._get_detector()
+
+            def read_tile(tile):
+                with image.crop(tile) as crop:
+                    return self._detect_elements(crop, detector)
+
+            with ThreadPoolExecutor(
+                max_workers=min(self.slice_workers, len(tiles))
+            ) as pool:
+                results = list(pool.map(read_tile, tiles))
+        found = []
+        for (left, top, _, _), detections in zip(tiles, results, strict=True):
+            for item in detections:
+                if item["label"] not in CONTROL_LABELS:
+                    continue
+                x0, y0, x1, y1 = item["box"]
+                box = (x0 + left, y0 + top, x1 + left, y1 + top)
+                if any(
+                    _overlap_of_smaller(box, other["box"]) >= SAME_CONTROL_OVERLAP
+                    for other in page_controls
+                ):
+                    continue
+                found.append({**item, "box": box})
         return found
 
     def model_provenance(self) -> dict[str, Any]:

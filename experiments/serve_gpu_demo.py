@@ -92,6 +92,7 @@ def create_verified_app(
     if args.qwen_crops:
         app_options["crop_refiner"] = partial(
             refine_document,
+            workers=args.page_workers,
             zero_data_retention=not args.qwen_allow_non_zdr,
             transport=partial(
                 budgeted_transport,

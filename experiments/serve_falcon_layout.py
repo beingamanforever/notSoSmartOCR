@@ -949,6 +949,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(
             f"--max-image-size must be a multiple of 16 up to {FALCON_MAX_IMAGE_SIZE}"
         )
+    if args.layout_workers < 1:
+        parser.error("--layout-workers must be positive")
     if args.control_slices == 1 or args.control_slices < 0:
         parser.error("--control-slices must be 0 (off) or at least 2")
     if args.min_image_size > args.max_image_size:
@@ -1263,6 +1265,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         revision=layout_revision,
         device=args.layout_device,
         score_threshold=args.layout_threshold,
+        slice_workers=args.layout_workers if args.layout_device == "cpu" else 1,
     )
     server = create_server(
         engine,
@@ -1362,6 +1365,7 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_MODEL_REVISION,
     )
     parser.add_argument("--layout-device", default="cpu")
+    parser.add_argument("--layout-workers", type=int, default=4)
     parser.add_argument(
         "--max-image-size", type=_positive_int, default=FALCON_MAX_IMAGE_SIZE
     )

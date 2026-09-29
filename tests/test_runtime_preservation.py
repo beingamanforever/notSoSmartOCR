@@ -350,3 +350,97 @@ def test_stacked_table_token_offsets_follow_trimmed_text() -> None:
     assert parts[0]["generation"]["tokens"][0]["start"] == 0
     assert parts[0]["generation"]["tokens"][-1]["end"] == len(parts[0]["text"])
     assert parts[1]["generation"]["tokens"] == [{"start": 0, "end": 5, "score": 0.6}]
+
+
+def test_feedback_keeps_original_document_and_each_judged_revision(tmp_path):
+    """Both votes survive session cleanup with the complete input and edited output."""
+    image = Image.new("RGB", (120, 80), "white")
+    data = io.BytesIO()
+    image.save(data, format="TIFF", save_all=True, append_images=[image])
+    source = data.getvalue()
+    feedback = tmp_path / "feedback"
+    app = create_app(ControlledReader(), feedback_root=feedback)
+    with TestClient(app) as client:
+        initial = client.post(
+            "/api/process", files={"file": ("two-pages.tiff", source, "image/tiff")}
+        ).json()
+        url = f"/api/sessions/{initial['session_id']}"
+        edited = client.post(
+            url + "/corrections",
+            json={
+                "page_number": 1,
+                "region_id": initial["result"]["pages"][0]["regions"][0]["id"],
+                "revision": 1,
+                "request_id": "feedback-edit",
+                "action": "edit",
+                "text": "Corrected output",
+            },
+        ).json()
+        markdown = client.get(url + "/result.md").text
+        records = []
+        for verdict in ("good", "problem"):
+            response = client.post(
+                url + "/feedback",
+                json={
+                    "verdict": verdict,
+                    "reason": "other",
+                    "revision": edited["revision"],
+                    "page_number": 1,
+                    "filename": "untrusted-name.png",
+                },
+            )
+            assert response.status_code == 200
+            record = response.json()
+            assert record["filename"] == "two-pages.tiff"
+            records.append(record)
+        assert (
+            client.post(
+                url + "/feedback",
+                json={"verdict": "good", "revision": 1, "page_number": 1},
+            ).status_code
+            == 409
+        )
+        session = app.state.sessions.get(initial["session_id"])
+        import shutil
+
+        shutil.rmtree(session["directory"])
+        for record in records:
+            folder = feedback / record["id"]
+            assert (folder / "input.tiff").read_bytes() == source
+            assert (folder / "result.md").read_text() == markdown
+            result = json.loads((folder / "result.json").read_text())["result"]
+            assert result["pages"][0]["text"]["value"] == "Corrected output"
+            assert len(result["pages"]) == 2
+            assert (
+                json.loads((folder / "record.json").read_text())["verdict"]
+                == record["verdict"]
+            )
+            assert Image.open(folder / "page.png").size == image.size
+
+
+def test_parallel_layout_tiles_preserve_scores_boxes_and_order():
+    from ocr_pipeline.heron_layout import HeronTableDetector
+
+    barrier = threading.Barrier(4)
+    image = Image.new("RGB", (120, 80), "white")
+
+    def detect(crop):
+        return [
+            {
+                "label": "checkbox_selected",
+                "score": 0.875,
+                "box": (1, 2, 9, 10),
+                "query_id": 7,
+            }
+        ]
+
+    def concurrent(crop):
+        barrier.wait(timeout=5)
+        return detect(crop)
+
+    baseline = HeronTableDetector(detector=detect).detect_sliced_controls(image, 2)
+    actual = HeronTableDetector(
+        detector=concurrent, slice_workers=4
+    ).detect_sliced_controls(image, 2)
+    assert actual == baseline
+    assert len(actual) == 4

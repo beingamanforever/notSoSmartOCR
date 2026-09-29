@@ -1026,6 +1026,7 @@ def create_app(
                 {
                     "directory": session_dir,
                     "document": document,
+                    "source": source,
                     "pages": preview_paths,
                     "response": response,
                     "revision": 1,
@@ -1376,6 +1377,7 @@ def create_app(
             record["page_number"] = page_number
             record["created_at"] = datetime.now(UTC).isoformat()
             record["revision"] = session["revision"]
+            record["filename"] = session["response"]["filename"]
             try:
                 record["stored"] = _store_feedback(feedback_dir, record, session)
             except OSError as error:
@@ -1723,11 +1725,16 @@ def _store_feedback(
     keep: int = FEEDBACK_RETENTION,
 ) -> dict[str, Any]:
     """Copy the judged page image and its output next to the verdict."""
-    stored = {"page_image": True, "result": True}
+    stored = {"page_image": True, "result": True, "source_file": True, "markdown": True}
     feedback_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     target = feedback_dir / str(record["id"])
     with tempfile.TemporaryDirectory(prefix=".pending-", dir=feedback_dir) as temporary:
         pending = Path(temporary)
+        source = session["source"]
+        shutil.copyfile(source, pending / f"input{source.suffix.lower()}")
+        (pending / "result.md").write_text(
+            _result_markdown(session["response"]), encoding="utf-8"
+        )
         (pending / "result.json").write_text(
             json.dumps(session["response"], indent=2, sort_keys=True, default=str),
             encoding="utf-8",

@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Not So Smart OCR</title>
+  <link rel="icon" type="image/png" href="/assets/logo.png">
   __OCR_KATEX_ASSETS__
   <style>
     :root {
@@ -73,14 +74,14 @@
       margin-bottom: 14px;
     }
     .brand { display: inline-flex; align-items: center; gap: 10px; text-align: left; }
-    .brand-logo { width: 44px; height: 44px; object-fit: contain; flex: 0 0 auto; }
-    .has-document .brand-logo { width: 32px; height: 32px; }
+    .brand-logo { width: 72px; height: 72px; object-fit: contain; flex: 0 0 auto; }
+    .has-document .brand-logo { width: 48px; height: 48px; }
     h1 { margin: 3px 0 1px; font-size: clamp(1.65rem, 3vw, 2.2rem); letter-spacing: -.04em; }
     .subtitle { margin: 0; color: var(--muted); }
-    .credit { margin: 6px 0 0; color: var(--muted); font-size: .78rem; }
+    .credit { margin: 20px 0 0; padding-top: 16px; border-top: 1px solid var(--line); text-align: center; color: var(--muted); font-size: .82rem; line-height: 1.5; }
+    .credit strong { color: var(--text); font-weight: 600; }
     .credit a { color: inherit; text-decoration-color: var(--line); text-underline-offset: 3px; }
     .credit a:hover { color: var(--accent); }
-    .has-document .credit { margin: 0 0 0 auto; }
     .has-document .examples { display: none; }
     .has-document header { text-align: left; display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
     .has-document h1 { font-size: 1.25rem; }
@@ -844,8 +845,7 @@
           <p class="subtitle">Evidence-linked document extraction.</p>
         </div>
       </div>
-      <p class="credit">Built by Aman Behera · For any issues reach out at
-        <a href="mailto:aman.behera@hilabs.com">aman.behera@hilabs.com</a></p>
+
     </header>
     <form class="toolbar" id="upload-form">
       <label class="file-field" for="source-file">
@@ -1091,8 +1091,8 @@
     <div class="confidence-inspector" id="confidence-inspector" role="tooltip" hidden>
       <strong id="confidence-inspector-score"></strong>
       <span id="confidence-inspector-source"></span>
-      <span>Confidence is not correctness.</span>
     </div>
+    <footer class="credit">Built by <strong>Aman Behera</strong> · <a href="mailto:aman.behera@hilabs.com">Contact</a></footer>
   </main>
 
   <script>
@@ -1325,6 +1325,7 @@
     });
 
     byId("feedback-up").addEventListener("click", () => sendFeedback("good"));
+    byId("feedback-down").addEventListener("click", () => sendFeedback("problem", "other", "", true));
     byId("feedback-send").addEventListener("click", () =>
       sendFeedback("problem", selectedReason(), byId("feedback-note").value)
     );
@@ -1953,12 +1954,17 @@
       byId("feedback-down").toggleAttribute("data-sent", verdict === "problem");
     }
 
-    async function sendFeedback(verdict, reason = null, note = "") {
+    const pendingFeedback = new Set();
+
+    async function sendFeedback(verdict, reason = null, note = "", keepOpen = false) {
       if (!state.response) return;
       const sessionId = state.response.session_id;
       const page = state.response.result?.pages?.[state.pageIndex];
       const key = `${state.response.revision}:${page?.page_number}`;
-      if (state.feedbackSent[key] === verdict) return;
+      if (state.feedbackSent[key] === verdict && (verdict === "good" || keepOpen)) return;
+      const pendingKey = `${sessionId}:${key}:${verdict}:${reason}:${note}`;
+      if (pendingFeedback.has(pendingKey)) return;
+      pendingFeedback.add(pendingKey);
       try {
         const response = await fetch(
           `/api/sessions/${state.response.session_id}/feedback`,
@@ -1979,12 +1985,12 @@
         if (state.response?.session_id !== sessionId) return;
         state.feedbackSent[key] = verdict;
         renderFeedback();
-        byId("feedback-problem").open = false;
-        setCopyStatus(
-          verdict === "good" ? "Saved with this page image." : "Feedback and page image saved."
-        );
+        if (!keepOpen) byId("feedback-problem").open = false;
+        setCopyStatus("Feedback saved with the original input and output.");
       } catch (error) {
         setCopyStatus(error.message, true);
+      } finally {
+        pendingFeedback.delete(pendingKey);
       }
     }
 
@@ -2039,7 +2045,7 @@
             sampled_retry_read: "The initial read needed a retry"
           }[reason] || reason.replaceAll("_", " "))).join(". ");
           const refined = source.text_provenance?.method === "qwen_crop_refinement";
-          notes.set(source.id, { text: `${reasons}. ${refined ? "A refined reading is shown; no calibrated score is available." : "Compare this region with the source."}`, refined });
+          notes.set(source.id, { text: `${reasons}. ${refined ? "Routed to LLM." : "Compare this region with the source."}`, refined });
         }));
         content.querySelectorAll("[data-evidence-id]").forEach((marker) => {
           const id = marker.dataset.evidenceId;
@@ -2067,7 +2073,7 @@
             source.textContent = note ? (note.refined ? "Refined" : "Check source")
               : validConfidence(confidence.value) ? formatConfidence(confidence.value) : "Source";
             source.title = note?.text || (validConfidence(confidence.value)
-              ? `${confidence.label} · ${confidence.calibration || "Uncalibrated"}. Locate source.` : "Locate source");
+              ? `Confidence: ${formatConfidence(confidence.value)}. Locate source.` : "Locate source");
             source.addEventListener("click", (event) => {
               event.stopPropagation();
               selectEvidenceTarget(target);
@@ -2422,9 +2428,9 @@
         ? TEXT_LAYER_NOTE
         : percent === "Unknown"
         ? target.dataset.confidenceProvider.startsWith("qwen/")
-          ? "Qwen reread accepted · Calibrated confidence unavailable"
+          ? "Routed to LLM · Confidence unavailable"
           : "Confidence: Not available"
-        : `${target.dataset.confidenceKind}: ${percent} · ${target.dataset.confidenceCalibration}`;
+        : `Confidence: ${percent}`;
       byId("confidence-inspector-source").textContent = [target.dataset.confidenceScope, target.dataset.evidenceNote].filter(Boolean).join(" · ");
       renderedView.querySelector(".confidence-active")?.classList.remove("confidence-active");
       target.classList.add("confidence-active");
@@ -2492,7 +2498,7 @@
       const inspector = byId("confidence-inspector");
       const confidence = displayConfidence(region);
       byId("confidence-inspector-score").textContent = validConfidence(confidence.value)
-        ? `${confidence.label}: ${formatConfidence(confidence.value)} · ${confidence.calibration || "Uncalibrated"}`
+        ? `Confidence: ${formatConfidence(confidence.value)}`
         : confidence.note || `${confidence.label}: Not available`;
       byId("confidence-inspector-source").textContent = confidence.scope;
       inspector.hidden = false;
@@ -4103,11 +4109,11 @@
       byId("region-category-row").hidden = !category;
       byId("region-category").textContent = category || "-";
       const confidence = displayConfidence(region);
-      byId("region-confidence-label").textContent = confidence.label;
+      byId("region-confidence-label").textContent = "Confidence";
       byId("region-confidence").textContent = validConfidence(confidence.value)
-        ? `${formatConfidence(confidence.value)} · ${confidence.calibration || "Uncalibrated"}`
+        ? formatConfidence(confidence.value)
         : confidence.note || "Not available";
-      byId("region-provider").textContent = region?.provider || "-";
+      byId("region-provider").textContent = String(region?.provider || "").startsWith("qwen/") ? "Routed to LLM" : region?.provider || "-";
       const detectorSequence = region?.text_provenance?.reading_order_method === "detector_sequence";
       const spatialOrder = region?.structure?.presentation_order_method === "spatial_sort";
       byId("region-order-label").textContent = detectorSequence ? "Detector sequence"
