@@ -1364,7 +1364,8 @@ def _parser() -> argparse.ArgumentParser:
         type=_model_revision,
         default=DEFAULT_MODEL_REVISION,
     )
-    parser.add_argument("--layout-device", default="cpu")
+    # Full-fp32 GPU layout matches CPU (see heron_layout._full_fp32) at 25x the speed.
+    parser.add_argument("--layout-device", default="cuda")
     parser.add_argument("--layout-workers", type=int, default=4)
     parser.add_argument(
         "--max-image-size", type=_positive_int, default=FALCON_MAX_IMAGE_SIZE

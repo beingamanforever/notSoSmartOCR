@@ -5,6 +5,11 @@ checkboxes `checkbox_selected` / `checkbox_unselected` (by transcribed mark), an
 paired label and field one `key_value_region`. The original Heron labels the other
 classes; its form and key-value boxes are replaced, and its `picture` boxes over
 handwriting are dropped (keep_old_label).
+
+A checkbox box spans the box and its paired label, as Heron draws one (the pipeline reads
+the label from that crop); a checkbox with no paired label is left out. With
+`checkboxes`, NAF gives only the checkboxes and Heron labels every other class
+(self-distillation), so a fine-tune learns pen marks without moving the other classes.
 """
 
 import json
@@ -16,10 +21,11 @@ from heron_labels import HeronLabeler
 from PIL import Image
 
 ROOT = Path(sys.argv[1])
+CHECKBOXES_ONLY = sys.argv[2:] == ["checkboxes"]
 NAF = ROOT / "NAF_dataset"
 MAX_SIDE = 1650
 FILLED = {1: "text", 2: "text", 4: "signature"}
-REPLACED = {"key_value_region", "form"}
+REPLACED = set() if CHECKBOXES_ONLY else {"key_value_region", "form"}
 label = HeronLabeler()
 
 
@@ -28,11 +34,22 @@ def box(item, scale):
     return [min(xs) * scale, min(ys) * scale, max(xs) * scale, max(ys) * scale]
 
 
+def union(a, b):
+    return [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])]
+
+
 def truth(annotation, scale):
     fields = {item["id"]: item for item in annotation["fieldBBs"]}
     texts = {item["id"]: item for item in annotation["textBBs"]}
+    labels = {}
+    for first, second in annotation["pairs"]:
+        for field_id, text_id in ((first, second), (second, first)):
+            if field_id in fields and text_id in texts:
+                labels.setdefault(field_id, texts[text_id])
     for item in fields.values():
         if item["type"] == "fieldCheckBox":
+            if item["id"] not in labels:
+                continue
             # isBlank marks unticked boxes as filled too; the transcription ("X") is the state.
             mark = annotation.get("transcriptions", {}).get(item["id"])
             ticked = (
@@ -40,24 +57,24 @@ def truth(annotation, scale):
             )
             yield (
                 ("checkbox_selected" if ticked else "checkbox_unselected"),
-                box(item, scale),
+                union(box(item, scale), box(labels[item["id"]], scale)),
             )
+        elif CHECKBOXES_ONLY:
+            continue
         elif item.get("isBlank") in FILLED:
             yield FILLED[item["isBlank"]], box(item, scale)
-    for first, second in annotation["pairs"]:
+    for first, second in [] if CHECKBOXES_ONLY else annotation["pairs"]:
         label_box, field = (
             texts.get(first) or texts.get(second),
             fields.get(second) or fields.get(first),
         )
         if label_box and field and field["type"] in {"field", "fieldP"}:
             a, b = box(label_box, scale), box(field, scale)
-            yield (
-                "key_value_region",
-                [min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3])],
-            )
+            yield "key_value_region", union(a, b)
 
 
-splits = json.loads((NAF / "train_valid_test_split.json").read_text())
+# Template-disjoint split: a form type is never in two splits.
+splits = json.loads((NAF / "simple_train_valid_test_split.json").read_text())
 out = ROOT / "naf"
 out.mkdir(exist_ok=True)
 for split, groups in splits.items():
@@ -110,5 +127,6 @@ for split, groups in splits.items():
                             "iscrowd": 0,
                         }
                     )
-    (ROOT / f"labels_naf_{split}.json").write_text(json.dumps(coco))
+    suffix = "_checkboxes" if CHECKBOXES_ONLY else ""
+    (ROOT / f"labels_naf{suffix}_{split}.json").write_text(json.dumps(coco))
     print(split, len(coco["images"]), len(coco["annotations"]), flush=True)

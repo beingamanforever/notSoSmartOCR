@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import inspect
 import io
 import json
 import logging
@@ -16,6 +17,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -96,6 +98,10 @@ MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 FEEDBACK_RETENTION = 1000
 # Finished sessions kept in memory; the oldest is dropped with its files beyond this.
 SESSION_RETENTION = 32
+# Bounds the background pool that runs deferred LLM refinement jobs.
+REFINEMENT_WORKERS = 4
+# Long-poll ceiling for GET .../refinement; the hosted call itself is far shorter.
+REFINEMENT_WAIT_SECONDS = 300
 FEEDBACK_REASONS = frozenset(
     {"missing_text", "wrong_text", "reading_order", "table", "handwriting", "other"}
 )
@@ -117,6 +123,7 @@ EXAMPLE_FILES = {
     "fax-cover": "artifacts/demo/fax_cover.png",
     "provider-roster": "artifacts/demo/provider_roster.png",
     "provider-agreement": "artifacts/demo/provider_agreement.png",
+    "contracts": "artifacts/demo/signature_page.png",
 }
 TABLE_EXAMPLE_NAME = "clinical-table"
 PRESENTATION_CATEGORIES = {
@@ -681,13 +688,20 @@ def create_app(
     # Keep hosted calls within the existing serial reservation budget.
     refine_lock = threading.Lock()
     state_lock = threading.Lock()
+    refinement_previews: dict[str, dict[int, dict[str, str]]] = {}
     recovery_lock = threading.Lock()
+    # Runs deferred LLM refinement jobs off the request thread; bounded so a burst of
+    # uploads cannot spawn unbounded hosted-call concurrency.
+    refinement_executor = ThreadPoolExecutor(
+        max_workers=REFINEMENT_WORKERS, thread_name_prefix="ocr-refine"
+    )
 
     @asynccontextmanager
     async def handle_lifespan(_: Any):
         try:
             yield
         finally:
+            refinement_executor.shutdown(wait=True, cancel_futures=True)
             sessions.cleanup()
             temporary_root.cleanup()
 
@@ -696,6 +710,7 @@ def create_app(
     app.state.sessions = sessions
     app.state.prepare_lock = prepare_lock
     app.state.process_lock = process_lock
+    app.state.refinement_executor = refinement_executor
     app.state.state_lock = state_lock
     app.state.recovery_lock = recovery_lock
     app.state.composition = active_composition
@@ -783,7 +798,11 @@ def create_app(
                 image.thumbnail((480, 480))
                 buffer = io.BytesIO()
                 image.convert("RGB").save(buffer, format="JPEG", quality=85)
-            return Response(buffer.getvalue(), media_type="image/jpeg")
+            return Response(
+                buffer.getvalue(),
+                media_type="image/jpeg",
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
         return FileResponse(
             example,
             filename=example.name,
@@ -795,6 +814,7 @@ def create_app(
         request: Request,
         file: UploadFile | None = File(None),
         defer_presentation: bool = False,
+        defer_refinement: bool = False,
         compact: bool = False,
         example: str | None = None,
     ) -> Any:
@@ -869,170 +889,269 @@ def create_app(
                     for page in document.pages
                     if callable(reader_review) and reader_review(page.page_number)
                 ]
-            with refine_lock:
-                if crop_refiner is not None and document.pages:
-                    refinement_started = time.perf_counter()
-                    crop_refiner(document, preview_paths)
-                    pipeline_timings["stage.qwen-crop-refinement"] = (
-                        time.perf_counter() - refinement_started
-                    )
-                    for page in document.pages:
-                        refinement = page.refinement or {}
-                        stage_execution.append(
-                            {
-                                "stage": "qwen-crop-refinement",
-                                "page_number": page.page_number,
-                                "status": (
-                                    "failed"
-                                    if refinement.get("status")
-                                    in {"failed", "partial", "invalid"}
-                                    else "productive"
-                                    if refinement.get("accepted_crop_ids")
-                                    else "fired"
-                                ),
-                                "elapsed_seconds": refinement.get("elapsed_seconds", 0),
-                                "cost_usd": refinement.get("cost"),
-                                "attempts": refinement.get("attempts"),
-                                "accepted_crop_ids": refinement.get(
-                                    "accepted_crop_ids", []
-                                ),
-                                "rejected_crop_ids": refinement.get(
-                                    "rejected_crop_ids", []
-                                ),
-                            }
-                        )
-            with (
-                process_lock
-                if cross_page_table_stage is not None or presentation_reader is not None
-                else nullcontext()
-            ):
-                if crop_refiner is not None and cross_page_table_stage is not None:
-                    execution, continuation_seconds = _apply_cross_page_tables(
-                        document,
-                        preview_paths,
-                        cross_page_table_stage,
-                    )
-                    stage_execution.append(execution)
-                    pipeline_timings[f"stage.{cross_page_table_stage.name}"] = (
-                        continuation_seconds
-                    )
-                presentations = {}
-                if not defer_presentation:
-                    presentation_started = time.perf_counter()
-                    presentations = _read_presentations(
-                        document.pages,
-                        preview_paths,
-                        presentation_reader,
-                        max_pages=max_presentation_pages,
-                        stage_execution=stage_execution,
-                    )
-                    if presentation_reader is not None:
-                        pipeline_timings["stage.presentation"] = (
-                            time.perf_counter() - presentation_started
-                        )
-            elapsed_seconds = time.perf_counter() - started
-            result = _sanitize_result(document.to_dict(), session_root)
-            result["document_id"] = Path(original_name).stem
-            result["source"]["name"] = original_name
-            result["revision"] = 1
-            total_seconds = time.perf_counter() - total_started
-            # The review draft never changes canonical evidence, and its generation is
-            # the longest step on text-heavy pages. A deferring client gets the result
-            # first and asks for the draft once it has something to show.
-            deferred = defer_presentation and presentation_reader is not None
-            presentation_payload = (
-                {"schema_version": 2, "status": "pending", "pages": []}
-                if deferred
-                else _sanitize_result(
-                    {
-                        "schema_version": 2,
-                        "pages": [
-                            {"page_number": page_number, **presentation}
-                            for page_number, presentation in sorted(
-                                presentations.items()
+            refinement_applied = False
+
+            def run_refinement_stage() -> None:
+                nonlocal refinement_applied
+                with refine_lock:
+                    if crop_refiner is not None and document.pages:
+                        refinement_started = time.perf_counter()
+                        # Crops answered so far, shown while the reply is still streaming.
+                        previews = refinement_previews.setdefault(session_id, {})
+
+                        def preview(page_number: int, updates: dict[str, str]) -> None:
+                            with state_lock:
+                                previews.setdefault(page_number, {}).update(updates)
+
+                        streams = "on_partial" in inspect.signature(crop_refiner).parameters
+                        try:
+                            crop_refiner(
+                                document,
+                                preview_paths,
+                                **({"on_partial": preview} if streams else {}),
                             )
-                        ],
-                    },
-                    session_root,
+                        finally:
+                            with state_lock:
+                                refinement_previews.pop(session_id, None)
+                        pipeline_timings["stage.qwen-crop-refinement"] = (
+                            time.perf_counter() - refinement_started
+                        )
+                        for page in document.pages:
+                            refinement = page.refinement or {}
+                            stage_execution.append(
+                                {
+                                    "stage": "qwen-crop-refinement",
+                                    "page_number": page.page_number,
+                                    "status": (
+                                        "failed"
+                                        if refinement.get("status")
+                                        in {"failed", "partial", "invalid"}
+                                        else "productive"
+                                        if refinement.get("accepted_crop_ids")
+                                        else "fired"
+                                    ),
+                                    "elapsed_seconds": refinement.get(
+                                        "elapsed_seconds", 0
+                                    ),
+                                    "cost_usd": refinement.get("cost"),
+                                    "attempts": refinement.get("attempts"),
+                                    "accepted_crop_ids": refinement.get(
+                                        "accepted_crop_ids", []
+                                    ),
+                                    "rejected_crop_ids": refinement.get(
+                                        "rejected_crop_ids", []
+                                    ),
+                                }
+                            )
+                refinement_applied = True
+
+            presentations: dict[int, dict[str, Any]] = {}
+
+            def run_cross_page_and_presentation() -> None:
+                nonlocal presentations
+                with (
+                    process_lock
+                    if cross_page_table_stage is not None
+                    or presentation_reader is not None
+                    else nullcontext()
+                ):
+                    # Continuations are stitched from refined crops, so they only make
+                    # sense once refinement has actually run.
+                    if (
+                        crop_refiner is not None
+                        and refinement_applied
+                        and cross_page_table_stage is not None
+                    ):
+                        execution, continuation_seconds = _apply_cross_page_tables(
+                            document,
+                            preview_paths,
+                            cross_page_table_stage,
+                        )
+                        stage_execution.append(execution)
+                        pipeline_timings[f"stage.{cross_page_table_stage.name}"] = (
+                            continuation_seconds
+                        )
+                    presentations = {}
+                    if not defer_presentation:
+                        presentation_started = time.perf_counter()
+                        presentations = _read_presentations(
+                            document.pages,
+                            preview_paths,
+                            presentation_reader,
+                            max_pages=max_presentation_pages,
+                            stage_execution=stage_execution,
+                        )
+                        if presentation_reader is not None:
+                            pipeline_timings["stage.presentation"] = (
+                                time.perf_counter() - presentation_started
+                            )
+
+            def build_response(
+                revision: int, refinement_payload: dict[str, Any] | None
+            ) -> dict[str, Any]:
+                elapsed_seconds = time.perf_counter() - started
+                result = _sanitize_result(document.to_dict(), session_root)
+                result["document_id"] = Path(original_name).stem
+                result["source"]["name"] = original_name
+                result["revision"] = revision
+                total_seconds = time.perf_counter() - total_started
+                # The review draft never changes canonical evidence, and its generation
+                # is the longest step on text-heavy pages. A deferring client gets the
+                # result first and asks for the draft once it has something to show.
+                presentation_deferred = (
+                    defer_presentation and presentation_reader is not None
                 )
-            )
-            response = {
-                "session_id": session_id,
-                "revision": 1,
-                "filename": original_name,
-                "source_bytes": source.stat().st_size,
-                "backend": active_reader.name,
-                "backend_version": backend_version,
-                "composition": composition_payload,
-                "pipeline_stages": [
-                    *(stage.name for stage in active_stages),
-                    *(["qwen-crop-refinement"] if crop_refiner is not None else []),
-                    *(
-                        [cross_page_table_stage.name]
-                        if cross_page_table_stage is not None
-                        else []
-                    ),
-                ],
-                "stage_execution": [
-                    {
-                        **run,
-                        "elapsed_seconds": round(
-                            float(run.get("elapsed_seconds", 0.0)),
-                            3,
-                        ),
-                    }
-                    for run in stage_execution
-                ],
-                "page_execution": [
-                    {
-                        **run,
-                        "queue_seconds": round(float(run["queue_seconds"]), 3),
-                        "execution_seconds": round(float(run["execution_seconds"]), 3),
-                        "steps": {
-                            name: round(float(seconds), 3)
-                            for name, seconds in dict(run["steps"]).items()
+                presentation_payload = (
+                    {"schema_version": 2, "status": "pending", "pages": []}
+                    if presentation_deferred
+                    else _sanitize_result(
+                        {
+                            "schema_version": 2,
+                            "pages": [
+                                {"page_number": page_number, **presentation}
+                                for page_number, presentation in sorted(
+                                    presentations.items()
+                                )
+                            ],
                         },
-                    }
-                    for run in page_execution
-                ],
-                "elapsed_seconds": round(elapsed_seconds, 3),
-                "timing": {
-                    "receive_seconds": round(receive_seconds, 3),
-                    "save_seconds": round(save_seconds, 3),
-                    "preview_queue_seconds": round(preview_queue_seconds, 3),
-                    "queue_seconds": round(queue_seconds, 3),
-                    "pipeline_seconds": round(elapsed_seconds, 3),
-                    "preview_seconds": round(preview_seconds, 3),
-                    "total_seconds": round(total_seconds, 3),
-                    "pipeline_steps": {
-                        name: round(seconds, 3)
-                        for name, seconds in pipeline_timings.items()
+                        session_root,
+                    )
+                )
+                response: dict[str, Any] = {
+                    "session_id": session_id,
+                    "revision": revision,
+                    "filename": original_name,
+                    "source_bytes": source.stat().st_size,
+                    "backend": active_reader.name,
+                    "backend_version": backend_version,
+                    "composition": composition_payload,
+                    "pipeline_stages": [
+                        *(stage.name for stage in active_stages),
+                        *(
+                            ["qwen-crop-refinement"]
+                            if crop_refiner is not None
+                            else []
+                        ),
+                        *(
+                            [cross_page_table_stage.name]
+                            if cross_page_table_stage is not None
+                            else []
+                        ),
+                    ],
+                    "stage_execution": [
+                        {
+                            **run,
+                            "elapsed_seconds": round(
+                                float(run.get("elapsed_seconds", 0.0)),
+                                3,
+                            ),
+                        }
+                        for run in stage_execution
+                    ],
+                    "page_execution": [
+                        {
+                            **run,
+                            "queue_seconds": round(float(run["queue_seconds"]), 3),
+                            "execution_seconds": round(
+                                float(run["execution_seconds"]), 3
+                            ),
+                            "steps": {
+                                name: round(float(seconds), 3)
+                                for name, seconds in dict(run["steps"]).items()
+                            },
+                        }
+                        for run in page_execution
+                    ],
+                    "elapsed_seconds": round(elapsed_seconds, 3),
+                    "timing": {
+                        "receive_seconds": round(receive_seconds, 3),
+                        "save_seconds": round(save_seconds, 3),
+                        "preview_queue_seconds": round(preview_queue_seconds, 3),
+                        "queue_seconds": round(queue_seconds, 3),
+                        "pipeline_seconds": round(elapsed_seconds, 3),
+                        "preview_seconds": round(preview_seconds, 3),
+                        "total_seconds": round(total_seconds, 3),
+                        "pipeline_steps": {
+                            name: round(seconds, 3)
+                            for name, seconds in pipeline_timings.items()
+                        },
                     },
-                },
-                "geometry": "pixel coordinates",
-                "coverage_assessment": coverage,
-                "uncertainty": _uncertainty_summary(result),
-                "recovery_outcome": None,
-                "presentation": presentation_payload,
-                "result": result,
-                "page_images": [
-                    f"/api/sessions/{session_id}/pages/{number}"
-                    for number in range(1, len(preview_paths) + 1)
-                ],
-                "preview_failure": preview_failure,
-            }
-            sessions.save(
-                session_id,
-                {
-                    "directory": session_dir,
-                    "document": document,
-                    "source": source,
-                    "pages": preview_paths,
-                    "response": response,
-                    "revision": 1,
-                    "reader_review_pages": reader_review_pages,
-                },
+                    "geometry": "pixel coordinates",
+                    "coverage_assessment": coverage,
+                    "uncertainty": _uncertainty_summary(result),
+                    "recovery_outcome": None,
+                    "presentation": presentation_payload,
+                    "result": result,
+                    "page_images": [
+                        f"/api/sessions/{session_id}/pages/{number}"
+                        for number in range(1, len(preview_paths) + 1)
+                    ],
+                    "preview_failure": preview_failure,
+                }
+                if refinement_payload is not None:
+                    response["refinement"] = refinement_payload
+                return response
+
+            # A deferring client gets the OCR-only result immediately and the refined
+            # one from GET .../refinement once the hosted call finishes in the
+            # background; this keeps a slow hosted call off the request path entirely.
+            deferring_refinement = defer_refinement and crop_refiner is not None
+            if not deferring_refinement:
+                run_refinement_stage()
+            run_cross_page_and_presentation()
+            response = build_response(
+                1, {"status": "pending"} if deferring_refinement else None
             )
+            session_state: dict[str, Any] = {
+                "directory": session_dir,
+                "document": document,
+                "source": source,
+                "pages": preview_paths,
+                "response": response,
+                "revision": 1,
+                "reader_review_pages": reader_review_pages,
+            }
+            if deferring_refinement:
+                session_state["refinement_event"] = threading.Event()
+            sessions.save(session_id, session_state)
+
+            if deferring_refinement:
+                refinement_event = session_state["refinement_event"]
+
+                def finish_deferred_refinement() -> None:
+                    try:
+                        run_refinement_stage()
+                        run_cross_page_and_presentation()
+                        # A partial page keeps its accepted crops (its unresolved ones are
+                        # in document.failures, as on the synchronous path); only a
+                        # refinement that changed no page failed.
+                        failed = all(
+                            (page.refinement or {}).get("status") in {"failed", "invalid"}
+                            for page in document.pages
+                        )
+                        refinement_payload = {"status": "failed" if failed else "complete"}
+                    except Exception as error:
+                        LOGGER.exception("Deferred refinement failed")
+                        refinement_payload = {
+                            "status": "failed",
+                            "message": str(error),
+                        }
+                    refined_response = build_response(2, refinement_payload)
+                    with state_lock:
+                        try:
+                            current = sessions.get(session_id)
+                        except KeyError:
+                            current = None
+                        # ponytail: a concurrent edit landing during refinement is
+                        # discarded rather than merged; the browser keeps editing
+                        # disabled while refinement is pending, so this is rare.
+                        if current is not None and current["revision"] == 1:
+                            current["response"] = refined_response
+                            current["revision"] = 2
+                    refinement_event.set()
+
+                app.state.refinement_executor.submit(finish_deferred_refinement)
+
             return JSONResponse(_display_response(response) if compact else response)
         except HTTPException:
             shutil.rmtree(session_dir, ignore_errors=True)
@@ -1134,6 +1253,26 @@ def create_app(
                     session["response"]["presentation"] = payload
                     session["response"]["stage_execution"].extend(stage_execution)
                 return JSONResponse(session["response"]["presentation"])
+
+    @app.get("/api/sessions/{session_id}/refinement/preview")
+    def handle_refinement_preview(session_id: str) -> Any:
+        """Refined text of each crop answered so far, by page and region id."""
+        with state_lock:
+            _get_session(sessions, session_id)
+            pages = refinement_previews.get(session_id) or {}
+            return {"pages": {str(number): dict(texts) for number, texts in pages.items()}}
+
+    @app.get("/api/sessions/{session_id}/refinement")
+    def handle_refinement(session_id: str, compact: bool = False) -> Any:
+        with state_lock:
+            session = _get_session(sessions, session_id)
+            event = session.get("refinement_event")
+        if event is not None:
+            event.wait(timeout=REFINEMENT_WAIT_SECONDS)
+        with state_lock:
+            session = _get_session(sessions, session_id)
+            response = session["response"]
+            return JSONResponse(_display_response(response) if compact else response)
 
     @app.get("/api/sessions/{session_id}/result.json")
     def handle_json_download(session_id: str, revision: int | None = None) -> Any:
@@ -1354,8 +1493,16 @@ def create_app(
                 400, f"reason must be one of: {', '.join(sorted(FEEDBACK_REASONS))}"
             )
         page_number = payload.get("page_number")
+        # Thumbs-down is recorded on the click; the reason sent after it amends that
+        # record rather than counting the same verdict twice.
+        amended = feedback_dir / str(payload.get("amends") or "-") / "record.json"
+        amends = (
+            _safe_child(feedback_dir, amended)
+            and amended.is_file()
+            and json.loads(amended.read_text()).get("session_id") == session_id
+        )
         record = {
-            "id": secrets.token_urlsafe(8),
+            "id": amended.parent.name if amends else secrets.token_urlsafe(8),
             "session_id": session_id,
             "verdict": verdict,
             "reason": reason,
@@ -1384,6 +1531,17 @@ def create_app(
                 raise HTTPException(
                     500, "Feedback could not be saved; please retry"
                 ) from error
+        # The note can hold patient details, so only its length is logged.
+        LOGGER.info(
+            "feedback %s verdict=%s reason=%s session=%s page=%s revision=%s note_chars=%d",
+            record["id"],
+            record["verdict"],
+            record["reason"],
+            session_id,
+            record["page_number"],
+            record["revision"],
+            len(record["note"] or ""),
+        )
         return {"status": "recorded", **record}
 
     @app.get("/api/feedback")
@@ -1746,6 +1904,7 @@ def _store_feedback(
             json.dumps({**record, "stored": stored}, indent=2, sort_keys=True),
             encoding="utf-8",
         )
+        shutil.rmtree(target, ignore_errors=True)  # an amended record replaces its first version
         pending.rename(target)
     _prune_feedback(feedback_dir, keep)
     return stored

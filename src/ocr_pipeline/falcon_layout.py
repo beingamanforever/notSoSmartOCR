@@ -15,6 +15,7 @@ import math
 from contextlib import ExitStack
 from collections import Counter
 import re
+from difflib import SequenceMatcher
 import unicodedata
 import urllib.error
 import urllib.request
@@ -53,7 +54,7 @@ TABLE_TEXT_BLOCK_TAGS = frozenset(
 )
 HEADING = re.compile(r"^\s*(#{1,6})\s+(.*)$")
 # Only paired asterisks: a lone one is a real footnote mark on many clinical forms.
-EMPHASIS = re.compile(r"\*\*(.+?)\*\*")
+EMPHASIS = re.compile(r"\*\*(.+?)\*\*", re.S)  # bold may span a heading's lines
 # Falcon's single v1.5 prompt picks its own markup, so any region can carry these.
 INLINE_TAG = re.compile(r"</?(?:sup|sub|strong|b|em|i|u|span|p|div|font)\b[^>]*>", re.I)
 LINE_BREAK_TAG = re.compile(r"<br\s*/?>", re.I)
@@ -178,13 +179,20 @@ class FalconLayoutReader:
             raise ReaderError("falcon_crop_failed", "malformed crop payload")
         return texts
 
-    def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+    def read(
+        self,
+        image_path: Path,
+        page_number: int,
+        words: list[list[Any]] | None = None,
+    ) -> list[TextRegion]:
+        """`words` are this image's detected words when the caller already has them."""
         cells = read_cells(image_path)
         # A born-digital page has text cells; a scan sends detected words instead,
         # so text no layout region holds is still read (Docling's orphan clusters).
-        words = (
-            self.word_detector(image_path) if self.word_detector and not cells else []
-        )
+        if cells or not self.word_detector:
+            words = []
+        elif words is None:
+            words = self.word_detector(image_path)
         payload = {
             "image": base64.b64encode(image_path.read_bytes()).decode("ascii"),
             **(
@@ -511,33 +519,69 @@ def calibrated_confidence(token_score: float, layout_score: float) -> float:
     return 1 / (1 + math.exp(-logit))
 
 
-def _attach_second_reader(regions: list[TextRegion], words: list[list[float]]) -> None:
-    """Record the lowest docTR recognition confidence among the words each region holds."""
+def _attach_second_reader(regions: list[TextRegion], words: list[list[Any]]) -> None:
+    """Record, per region, how docTR's reading of the words it holds agrees with Falcon's.
+
+    The lowest recognition confidence marks handwriting docTR cannot read. A word docTR
+    reads surely that Falcon's text lacks marks an omission: Falcon returned "Page __ of
+    __" where docTR read both handwritten 4s at 0.91 and 1.0.
+    """
     for region in regions:
         if region.kind in {"table", "figure"} or region.text_provenance is None:
             continue
         box = region.bounding_box
         held = [
-            word[5]
+            word
             for word in words
-            if len(word) > 5
+            if len(word) > 6
             and box.left <= (word[0] + word[2]) / 2 <= box.right
             and box.top <= (word[1] + word[3]) / 2 <= box.bottom
         ]
         if held:
             region.text_provenance["second_reader"] = {
                 "model": "docTR crnn_vgg16_bn",
-                "min_word_confidence": min(held),
+                "min_word_confidence": min(word[5] for word in held),
                 "words": len(held),
+                "unread_words": [
+                    word[6]
+                    for word in held
+                    if word[5] >= SURE_WORD and _unread(word[6], region.text)
+                ],
             }
 
 
-def _flag_foreign_scripts(regions: list[TextRegion]) -> None:
-    """A script holding a sliver of the page's letters is a misread glyph, not a language.
+# docTR's recognition confidence for a word it read surely.
+SURE_WORD = 0.9
+# Below this similarity to every Falcon word, docTR's word is not a misspelling of one.
+SAME_WORD = 0.75
 
-    Small crops of ticks and boxes decode as CJK characters (a box reads as "电"), and a
-    handwritten "2" as Georgian "ა" in several regions of one page, so "used by no other
-    region" missed repeated misreads.
+
+def _unread(word: str, text: str) -> bool:
+    """Whether Falcon's text lacks a word docTR read.
+
+    Digits are exact (a dropped digit changes an ID), so the word's digits must appear in
+    the text's. Letters tolerate docTR's own misreads of noisy print ("Missquri"): a word
+    of four or more letters counts only when no Falcon word is close to it.
+    """
+    digits = "".join(character for character in word if character.isdigit())
+    if digits:
+        return digits not in "".join(character for character in text if character.isdigit())
+    letters = "".join(character for character in word.casefold() if character.isalpha())
+    if len(letters) < 4 or letters in "".join(filter(str.isalpha, text.casefold())):
+        return False  # too short to judge, or Falcon split docTR's word ("for the")
+    return all(
+        SequenceMatcher(None, letters, other).ratio() < SAME_WORD
+        for other in re.findall(r"[^\W\d_]+", text.casefold())
+    )
+
+
+def _flag_foreign_scripts(regions: list[TextRegion]) -> None:
+    """A script other than the page's own is a misread, not a language, until reread.
+
+    Small crops of ticks and boxes decode as CJK characters (a box reads as "电"), a
+    handwritten "2" as Georgian "ა", and a whole handwritten roster once decoded as
+    Georgian words, too many letters for a share threshold. Flagged regions are reread,
+    never dropped, so a genuinely bilingual page loses nothing.
     """
     counts = [
         Counter() if region.kind == "formula" else _script_letters(region.text)
@@ -546,12 +590,8 @@ def _flag_foreign_scripts(regions: list[TextRegion]) -> None:
     page = sum(counts, Counter())
     if len(page) < 2:
         return
-    total = sum(page.values())
-    minor = {
-        script
-        for script, letters in page.items()
-        if letters < MINOR_SCRIPT_SHARE * total
-    }
+    main = page.most_common(1)[0][0]
+    minor = set(page) - {main}
     for region, letters in zip(regions, counts):
         # PDF characters were extracted, not generated by the crop decoder.
         if (region.text_provenance or {}).get(
@@ -564,9 +604,6 @@ def _flag_foreign_scripts(regions: list[TextRegion]) -> None:
         region.resolution = "conflicting"
         region.text_provenance["foreign_script"] = sorted(foreign)
 
-
-# A page script holds at least this share of the page's letters.
-MINOR_SCRIPT_SHARE = 0.05
 
 
 def _script_letters(text: str) -> Counter:
@@ -995,15 +1032,18 @@ def _plain_text(text: str, kind: str) -> tuple[str, str]:
     structure, so leaving the marker in place double-encodes it: the markdown lane adds
     its own prefix ("### # Title") and the text lane shows the bare marker to a reviewer.
     Table and formula markup is the region's content, so it passes through untouched.
-    A two-dimensional HTML table in any other region becomes a table; other markup
-    flattens to plain text.
+    An HTML table in any other region becomes a table only when its content spans two
+    rows and two columns; Falcon wraps a ruled handwritten line in an empty grid
+    ("FORENSIC TESTING SERVICES" in one cell of a 2 x 2), and other markup flattens to
+    plain text.
     """
     if re.fullmatch(r"(`{3,}|~{3,})[^\n]*\n[\s\S]*\n\1\s*", text):
         return text, "code"
     if kind in {"table", "formula", "code"}:
         return text, kind
     rows = _table_rows(text) if "<table" in text.casefold() else None
-    if rows is not None and len(rows) > 1 and max(map(len, rows)) > 1:
+    filled = [(r, c) for r, row in enumerate(rows or []) for c, cell in enumerate(row) if cell.strip()]
+    if len({r for r, _ in filled}) > 1 and len({c for _, c in filled}) > 1:
         return text, "table"
     text = _unmarked_text(text)
     level = 0
@@ -1013,11 +1053,23 @@ def _plain_text(text: str, kind: str) -> tuple[str, str]:
         if heading:
             level = level or len(heading.group(1))
             line = heading.group(2)
-        lines.append(EMPHASIS.sub(r"\1", line).rstrip())
-    plain = "\n".join(lines).strip()
+        lines.append(line.rstrip())
+    plain = _boxed_date(EMPHASIS.sub(r"\1", "\n".join(lines)).strip())
     if level and kind == "text":
         kind = "title" if level == 1 else "section-header"
     return plain, kind
+
+
+# A date written one part per printed box: "2 | 16 | 09" or "2 16 09".
+BOXED_DATE = re.compile(r"(\d{1,2})[\s|]+(\d{1,2})[\s|]+(\d{2}|\d{4})")
+
+
+def _boxed_date(text: str) -> str:
+    """Join a whole-region month/day/year written in separate boxes as a US date."""
+    match = BOXED_DATE.fullmatch(text)
+    if not match or not (1 <= int(match[1]) <= 12 and 1 <= int(match[2]) <= 31):
+        return text
+    return "/".join(match.groups())
 
 
 def _read_terminated(element: dict[str, Any]) -> str | None:

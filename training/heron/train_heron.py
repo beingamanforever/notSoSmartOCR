@@ -128,22 +128,50 @@ def main() -> None:
         "--workers", type=int, default=2
     )  # each worker decodes pages; RAM is 30 GB
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--original-classes",
+        action="store_true",
+        help="fine-tune Heron's own 17 classes, without the added heads",
+    )
+    parser.add_argument(
+        "--decoder-only",
+        action="store_true",
+        help="freeze the backbone and hybrid encoder: page features stay the original's",
+    )
+    parser.add_argument(
+        "--tile-crops",
+        type=int,
+        default=0,
+        help="also train on crops of this side (px), as the service's control tiles",
+    )
     args = parser.parse_args()
 
     processor = AutoImageProcessor.from_pretrained(
         HERON, revision=REVISION
     )  # 640x640 stretch, as trained
-    model, old = expanded_model()
     train, evaluation = load(args.train), load(args.eval)
-    drift = check_preserved(
-        model, old, processor, [evaluation[i]["image"].convert("RGB") for i in range(4)]
-    )
-    print("old-class logit drift at init", drift, flush=True)
-    assert drift < 1e-4, "head expansion changed the original outputs"
-    del old
+    if args.original_classes:
+        model = AutoModelForObjectDetection.from_pretrained(HERON, revision=REVISION)
+    else:
+        model, old = expanded_model()
+        drift = check_preserved(
+            model, old, processor, [evaluation[i]["image"].convert("RGB") for i in range(4)]
+        )
+        print("old-class logit drift at init", drift, flush=True)
+        assert drift < 1e-4, "head expansion changed the original outputs"
+        del old
+    if args.decoder_only:
+        for part in (model.model.backbone, model.model.encoder, model.model.encoder_input_proj):
+            part.requires_grad_(False)
 
+    tiles = (
+        [A.AtLeastOneBBoxRandomCrop(height=args.tile_crops, width=args.tile_crops, p=0.5)]
+        if args.tile_crops
+        else []
+    )
     augment = A.Compose(
         [
+            *tiles,
             A.Affine(
                 scale=(0.7, 1.0),
                 translate_percent=(-0.05, 0.05),
@@ -159,7 +187,9 @@ def main() -> None:
             A.ToGray(p=0.2),
         ],
         bbox_params=A.BboxParams(
-            format="coco", label_fields=["category"], clip=True, min_area=4
+            format="coco", label_fields=["category"], clip=True, min_area=4,
+            # A tile cutting a box leaves a part the model must not learn as the whole.
+            min_visibility=0.6 if args.tile_crops else 0.0,
         ),
     )
     train = train.with_transform(

@@ -347,6 +347,7 @@ class OrientationReader:
         self._views: dict[int, _PageView] = {}
         self._assessments: dict[int, dict[str, object]] = {}
         self._lock = threading.Lock()
+        self._speculation = ThreadPoolExecutor(max_workers=batch_size)
 
     def read_batch(
         self, image_paths: list[Path], page_numbers: list[int]
@@ -372,6 +373,16 @@ class OrientationReader:
         return results
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        born_digital = sidecar(image_path).is_file()
+        # Scans are nearly always upright, so the reader's word detection starts beside
+        # orientation on the source image and is kept only if no rotation follows.
+        # Same pixels, same model: the words are identical to detecting them afterwards.
+        word_detector = getattr(self.reader, "word_detector", None)
+        words = (
+            self._speculation.submit(word_detector, image_path)
+            if word_detector and not born_digital
+            else None
+        )
         try:
             with Image.open(image_path) as source:
                 page = ImageOps.exif_transpose(source).convert("RGB")
@@ -380,11 +391,7 @@ class OrientationReader:
             raise ReaderError("orientation_image_failed", str(error)) from error
         try:
             # A born-digital page renders upright; its text layer fixes the orientation.
-            orientation = (
-                TEXT_LAYER_UPRIGHT
-                if sidecar(image_path).is_file()
-                else self.detector(page)
-            )
+            orientation = TEXT_LAYER_UPRIGHT if born_digital else self.detector(page)
         except ReaderError as error:
             self._fail(page_number, error.code, str(error))
             raise
@@ -394,7 +401,11 @@ class OrientationReader:
             self._views[page_number] = view
             self._assessments[page_number] = assessment
         with self._view_path(image_path, page, view) as path:
-            regions = self.reader.read(path, page_number)
+            regions = (
+                self.reader.read(path, page_number, words=words.result())
+                if words is not None and view.orientation.rotation == 0
+                else self.reader.read(path, page_number)
+            )
         annotated = [_annotate(region, assessment) for region in regions]
         return (
             annotated

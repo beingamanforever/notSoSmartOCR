@@ -127,10 +127,12 @@ def test_form_source_adds_physically_owned_controls_without_replacing_text(
     }
 
     duplicate_crop = False
+    replies = []
 
     def transport(request, timeout):
         payload = json.loads(request.data)
         assert "form_source" in json.dumps(payload["messages"][1])
+        replies.append(payload)
         answer = {
             "crops": [
                 {
@@ -185,6 +187,7 @@ def test_form_source_adds_physically_owned_controls_without_replacing_text(
         == "qwen_form_option_extraction"
     ]
     assert result["status"] == "generated"
+    assert len(replies) == 1  # one call per page
     assert result["accepted_crop_ids"] == []
     assert result["accepted_control_crop_ids"] == ["crop-1"]
     assert result["form_controls_added"] == 1
@@ -1590,3 +1593,78 @@ def test_thin_form_control_maps_sent_pixels_back_to_source(
     }
     assert control["structure"]["state"] == "selected"
     assert page == original
+
+
+def test_a_reply_that_leaves_a_crop_out_still_refines_the_others(tmp_path, monkeypatch):
+    # Without structured outputs Qwen once returned 1 of 5 crops. The crop left out
+    # keeps its OCR text; the answered one is used, with no second call.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    image = tmp_path / "two-lines.png"
+    Image.new("RGB", (400, 300), "white").save(image)
+    page = {
+        "page_number": 1,
+        "width": 400,
+        "height": 300,
+        "regions": [
+            {
+                "id": f"line-{index}",
+                "kind": "handwriting",
+                "text": f"old {index}",
+                "resolution": "unreadable",
+                "bounding_box": {"left": 20, "top": top, "right": 380, "bottom": top + 40},
+            }
+            for index, top in ((1, 20), (2, 200))
+        ],
+    }
+    calls = []
+
+    def transport(request, timeout):
+        payload = json.loads(request.data)
+        calls.append(payload)
+        answer = {"crops": [{"region_id": "crop-1", "markdown": "new 1"}]}
+        return (200, {}, json.dumps({
+            "model": payload["model"],
+            "choices": [{"message": {"content": json.dumps(answer)}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }).encode())
+
+    result = refine_page(image, page, "old 1\n\nold 2", transport=transport)
+
+    assert len(calls) == 1
+    assert result["accepted_crop_ids"] == ["crop-1"]
+    assert result["rejected_crop_ids"] == ["crop-2"]
+    assert result["content"]["markdown"] == "new 1\n\n[unreadable handwriting]"
+
+
+def test_streamed_crops_preview_as_each_answer_completes(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    image = tmp_path / "two-lines.png"
+    Image.new("RGB", (400, 300), "white").save(image)
+    page = {
+        "page_number": 1, "width": 400, "height": 300,
+        "regions": [
+            {"id": f"line-{index}", "kind": "handwriting", "text": f"old {index}", "resolution": "unreadable",
+             "bounding_box": {"left": 20, "top": top, "right": 380, "bottom": top + 40}}
+            for index, top in ((1, 20), (2, 200))
+        ],
+    }
+    answer = json.dumps({"crops": [
+        {"region_id": "crop-1", "markdown": 'new "1"'},
+        {"region_id": "crop-2", "markdown": "new 2"},
+    ]})
+    previews = []
+
+    def transport(request, timeout):
+        assert json.loads(request.data)["stream"] is True
+        for end in (answer.index('"crop-2"'), len(answer)):  # what the stream has written so far
+            request.on_content(answer[:end])
+        return (200, {}, json.dumps({
+            "model": json.loads(request.data)["model"],
+            "choices": [{"message": {"content": answer}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }).encode())
+
+    streamed = refine_page(image, page, "old 1\n\nold 2", transport=transport, on_partial=previews.append)
+
+    assert previews == [{"line-1": 'new "1"'}, {"line-2": "new 2"}]
+    assert streamed["accepted_crop_ids"] == ["crop-1", "crop-2"]

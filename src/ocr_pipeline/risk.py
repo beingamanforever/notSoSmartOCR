@@ -73,6 +73,8 @@ def _risk(region: TextRegion) -> str | None:
     if calibrated and region.confidence is not None and region.confidence < 0.5:
         return REASON
     second = provenance.get("second_reader") or {}
-    if second.get("min_word_confidence", 1.0) < SECOND_READER_DOUBT:
+    if second.get("min_word_confidence", 1.0) < SECOND_READER_DOUBT or second.get(
+        "unread_words"
+    ):
         return SECOND_READER_REASON
     return None

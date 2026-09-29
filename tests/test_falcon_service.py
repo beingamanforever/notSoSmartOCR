@@ -703,7 +703,7 @@ def test_upload_renders_checkbox_label_instead_of_decoder_table_markup():
             assert "<table" not in markdown
             demo = client.get("/").text
             assert "Actual pixels" in demo
-            assert "Routed to LLM · Confidence unavailable" in demo
+            assert "Routed to LLM" in demo
     finally:
         server.shutdown()
         server.server_close()

@@ -485,8 +485,9 @@ def _learned_order(
         holder = _container(region.bounding_box, fields)
         groups.setdefault(holder.id if holder else region.id, []).append(region)
     units = [
-        [region for unit in _rows([[region] for region in members]) for region in unit]
+        [region for unit in _rows([[region] for region in record]) for region in unit]
         for members in groups.values()
+        for record in _records(members)
     ]
     in_form: dict[str, list[list[TextRegion]]] = {}
     for unit in units:
@@ -496,6 +497,34 @@ def _learned_order(
     order = _xy_cut([[region for unit in block for region in unit] for block in blocks])
     by_first = {block[0][0].id: block for block in blocks}
     return [unit for merged in order for unit in by_first[merged[0].id]]
+
+
+def _records(members: list[TextRegion]) -> list[list[TextRegion]]:
+    """A container's side-by-side records, split at the widest clear vertical gutter.
+
+    One detected key-value region can hold two signature blocks ("By: ... Title: ..."
+    for each party); reading it row by row interleaves them ("By: By: Natalie").
+    The gutter is a record boundary only when labels (text ending in ":") sit on both
+    sides; the gap between a label column and its value column has labels on one side,
+    and cutting it would read every label before any value.
+    """
+    spans = sorted(members, key=lambda region: region.bounding_box.left)
+    reach, gutter = spans[0].bounding_box.right, None
+    for region in spans[1:]:
+        gap = region.bounding_box.left - reach
+        if gap > 0 and (gutter is None or gap > gutter[1] - gutter[0]):
+            gutter = (reach, region.bounding_box.left)
+        reach = max(reach, region.bounding_box.right)
+    if gutter is None:
+        return [members]
+    cut = sum(gutter) / 2
+    sides = [
+        [region for region in members if (_horizontal_center(region.bounding_box) < cut) == left]
+        for left in (True, False)
+    ]
+    if not all(any(region.text.rstrip().endswith(":") for region in side) for side in sides):
+        return [members]
+    return [record for side in sides for record in _records(side)]
 
 
 def _container(box: BoundingBox, containers: list[TextRegion]) -> TextRegion | None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import mimetypes
 import math
@@ -10,6 +11,7 @@ import os
 import sqlite3
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from contextlib import closing
 from pathlib import Path
@@ -149,6 +151,36 @@ def repair_image(
     )
 
 
+class ReplyCache:
+    """A transport that answers a byte-identical request with its earlier reply.
+
+    A re-parsed page (a colleague re-running an example, a second Parse click) sends
+    the same crops and prompt; at temperature 0 the stored reply stands in for another
+    paid call. Only HTTP 200 replies are kept, in memory and bounded, so document text
+    never reaches disk and leaves with the process.
+    """
+
+    def __init__(self, transport: Transport, size: int = 256) -> None:
+        self.transport = transport
+        self.size = size
+        self._replies: OrderedDict[str, tuple[int, Mapping[str, str], bytes]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def __call__(self, request: Request, timeout: float) -> tuple[int, Mapping[str, str], bytes]:
+        key = hashlib.sha256(request.data or b"").hexdigest()
+        with self._lock:
+            if key in self._replies:
+                self._replies.move_to_end(key)
+                return self._replies[key]
+        reply = self.transport(request, timeout)
+        if reply[0] == 200:
+            with self._lock:
+                self._replies[key] = reply
+                while len(self._replies) > self.size:
+                    self._replies.popitem(last=False)
+        return reply
+
+
 def budgeted_transport(
     request: Request,
     timeout: float,
@@ -232,7 +264,10 @@ def _call_openrouter(
     zero_data_retention: bool = True,
     reasoning_enabled: bool | None = None,
     session_id: str | None = None,
+    on_content: Callable[[str], None] | None = None,
 ) -> OpenRouterResult:
+    """`on_content` streams the reply: it receives the content written so far, and the
+    result is the same reply a non-streamed call returns."""
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise OpenRouterError("OPENROUTER_API_KEY is not set")
@@ -296,6 +331,8 @@ def _call_openrouter(
         payload["reasoning"] = {"enabled": reasoning_enabled}
     if session_id is not None:
         payload["session_id"] = session_id
+    if on_content is not None:
+        payload["stream"] = True
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     started = time.perf_counter()
 
@@ -310,6 +347,7 @@ def _call_openrouter(
             },
             method="POST",
         )
+        request.on_content = on_content  # read by the default transport when streaming
         try:
             status, headers, response_body = transport(request, timeout_seconds)
         except TimeoutError as error:
@@ -571,12 +609,41 @@ def _error_message(response_body: bytes) -> str:
         return "invalid error response"
 
 
+def _collected_stream(lines: Any, on_content: Callable[[str], None]) -> bytes:
+    """Reassemble OpenRouter's server-sent events into the non-streamed reply body.
+
+    Every consumer (parsing, the spend ledger, the reply cache) then sees one shape;
+    `on_content` gets the content written so far after each piece.
+    """
+    content, reply, choice = "", {}, {}
+    for line in lines:
+        if not line.startswith(b"data: ") or line.strip() == b"data: [DONE]":
+            continue  # comments keep the connection alive
+        event = json.loads(line[6:])
+        if "error" in event:
+            return json.dumps(event).encode()
+        reply.update({key: event[key] for key in ("id", "model", "provider", "usage") if event.get(key)})
+        for item in event.get("choices") or []:
+            choice.update({key: item[key] for key in ("finish_reason", "native_finish_reason") if item.get(key)})
+            piece = (item.get("delta") or {}).get("content")
+            if piece:
+                content += piece
+                on_content(content)
+    return json.dumps({**reply, "choices": [{**choice, "message": {"content": content}}]}).encode()
+
+
 def _default_transport(
     request: Request, timeout_seconds: float
 ) -> tuple[int, Mapping[str, str], bytes]:
+    on_content = getattr(request, "on_content", None)
     try:
         with urlopen(request, timeout=timeout_seconds) as response:
-            return response.status, dict(response.headers.items()), response.read()
+            body = (
+                _collected_stream(response, on_content)
+                if on_content and response.status == 200
+                else response.read()
+            )
+            return response.status, dict(response.headers.items()), body
     except HTTPError as error:
         headers = dict(error.headers.items()) if error.headers else {}
         return error.code, headers, error.read()

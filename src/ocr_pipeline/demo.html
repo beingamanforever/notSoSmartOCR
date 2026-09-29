@@ -5,50 +5,101 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Not So Smart OCR</title>
   <link rel="icon" type="image/png" href="/assets/logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap" rel="stylesheet">
   __OCR_KATEX_ASSETS__
   <style>
     :root {
-      color-scheme: light;
-      --background: #f6f7f9;
+      color-scheme: light dark;
+      --background: #fafafa;
       --panel: #ffffff;
-      --panel-raised: #f3f4f6;
-      --line: #e1e5ea;
-      --line-strong: #c4cad3;
-      --text: #172033;
-      --muted: #667085;
-      --accent: #2563eb;
-      --accent-soft: #eff6ff;
-      --confidence-high: #0f766e;
-      --confidence-high-soft: #dcf1e6;
-      --confidence-medium: #b45309;
-      --confidence-medium-soft: #fde7c9;
-      --confidence-low: #b91c1c;
-      --confidence-low-soft: #fbdada;
-      --text-layer-soft: #e2ebf8;
-      --positive: #15803d;
-      --positive-soft: #dcfce7;
-      --negative: var(--confidence-low);
-      --negative-soft: var(--confidence-low-soft);
+      --surface: #fcfcfc;
+      --panel-raised: #f0f0f0;
+      --surface-2: #f5f5f5;
+      --line: #f0f0f0;
+      --line-strong: #e6e6e6;
+      --text: #1f1f1f;
+      --text-2: #3d3d3d;
+      --muted: #666666;
+      --primary: #1f1f1f;
+      --primary-hover: #3d3d3d;
+      --on-primary: #ffffff;
+      --accent: #4250d5;
+      --accent-soft: #e8effc;
+      --accent-faint: #fafcff;
+      --accent-line: #d2dff9;
+      --positive: #496d21;
+      --positive-soft: #eef6e4;
+      --confidence-high: var(--positive);
+      --confidence-high-soft: var(--positive-soft);
+      --confidence-high-strong: #d3e8bd;
+      --warning: #9a4f0a;
+      --warning-soft: #fdf1e3;
+      --warning-strong: #f8d5a3;
+      --confidence-medium: var(--warning);
+      --confidence-medium-soft: var(--warning-soft);
+      --confidence-medium-strong: var(--warning-strong);
+      --danger: #b81514;
+      --danger-soft: #fdecec;
+      --danger-strong: #f7bcbc;
+      --confidence-low: var(--danger);
+      --confidence-low-soft: var(--danger-soft);
+      --confidence-low-strong: var(--danger-strong);
+      --text-layer-soft: #e8effc;
+      --negative: var(--danger);
+      --negative-soft: var(--danger-soft);
+      --frame-a: #fafcff; --frame-b: #d2dff9; --frame-dot: rgb(129 140 248 / .25);
+      --focus: var(--accent);
+      --r-frame: 16px; --r-card: 12px; --r-control: 8px; --r-chip: 4px;
+      --shadow-1: 0 1px 2px rgb(16 24 40 / .05);
+      --shadow-pop: 0 12px 32px -8px rgb(16 24 40 / .2), 0 2px 6px rgb(16 24 40 / .06);
+      --icon-parse: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 8h8M7 12h10M7 16h6'/%3E%3C/svg%3E");
+      --icon-clear: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M18 6 6 18M6 6l12 12'/%3E%3C/svg%3E");
+      --icon-download: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 4v11m-5-5 5 5 5-5M5 20h14'/%3E%3C/svg%3E");
+      --icon-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
       /* One motion system: Material 3 standard easing at a single short duration. */
       --motion: 200ms cubic-bezier(0.2, 0, 0, 1);
+      --motion-fast: 120ms ease;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
         "Segoe UI", sans-serif;
     }
+    :root, :root[data-theme="light"] { color-scheme: light; }
 
     @media (prefers-color-scheme: dark) {
-      :root {
+      :root:not([data-theme="light"]) {
         color-scheme: dark;
-        --background: #0e131b; --panel: #151b25; --panel-raised: #1c2330;
-        --line: #273041; --line-strong: #536078; --text: #e6e9ef; --muted: #a6b0c2;
-        --accent: #85b5ff; --accent-soft: #16233b;
-        --confidence-high: #34d399; --confidence-high-soft: #12352b;
-        --confidence-medium: #fbbf24; --confidence-medium-soft: #3a2a10;
-        --confidence-low: #f87171; --confidence-low-soft: #3b1a1a;
-        --text-layer-soft: #1b2a44; --positive: #4ade80; --positive-soft: #123222;
+        --background: #111113; --panel: #18181b; --surface: #1c1c20; --surface-2: #1f1f23; --panel-raised: #26262b;
+        --line: #2a2a2f; --line-strong: #3a3a40;
+        --text: #f5f5f5; --text-2: #d4d4d8; --muted: #a1a1aa;
+        --primary: #f5f5f5; --primary-hover: #d4d4d8; --on-primary: #18181b;
+        --accent: #9aa6ff; --accent-soft: #262a45; --accent-faint: #1d2033; --accent-line: #353b66;
+        --positive: #8fd16a; --positive-soft: #1e2a17; --confidence-high-strong: #2b3d20;
+        --warning: #f5b35c; --warning-soft: #35260f; --warning-strong: #4a3515;
+        --danger: #ff8a80; --danger-soft: #3a1a1a; --danger-strong: #552424;
+        --text-layer-soft: #262a45;
+        --frame-a: #16182a; --frame-b: #1c2140; --frame-dot: rgb(129 140 248 / .18);
+        --focus: #9aa6ff;
+        --shadow-1: 0 1px 2px rgb(0 0 0 / .4); --shadow-pop: 0 16px 40px -8px rgb(0 0 0 / .6), 0 2px 6px rgb(0 0 0 / .3);
       }
-      .button.primary { color: #0e131b; }
     }
-    .status-line.error { color: var(--negative); border-color: var(--negative); background: var(--negative-soft); }
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --background: #111113; --panel: #18181b; --surface: #1c1c20; --surface-2: #1f1f23; --panel-raised: #26262b;
+      --line: #2a2a2f; --line-strong: #3a3a40;
+      --text: #f5f5f5; --text-2: #d4d4d8; --muted: #a1a1aa;
+      --primary: #f5f5f5; --primary-hover: #d4d4d8; --on-primary: #18181b;
+      --accent: #9aa6ff; --accent-soft: #262a45; --accent-faint: #1d2033; --accent-line: #353b66;
+      --positive: #8fd16a; --positive-soft: #1e2a17; --confidence-high-strong: #2b3d20;
+      --warning: #f5b35c; --warning-soft: #35260f; --warning-strong: #4a3515;
+      --danger: #ff8a80; --danger-soft: #3a1a1a; --danger-strong: #552424;
+      --text-layer-soft: #262a45;
+      --frame-a: #16182a; --frame-b: #1c2140; --frame-dot: rgb(129 140 248 / .18);
+      --focus: #9aa6ff;
+        --shadow-1: 0 1px 2px rgb(0 0 0 / .4); --shadow-pop: 0 16px 40px -8px rgb(0 0 0 / .6), 0 2px 6px rgb(0 0 0 / .3);
+    }
+    .status-line.error { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
+    .status-line.error::before { background: var(--danger); animation: none; }
     .document-table td { font-variant-numeric: tabular-nums; }
 
     * { box-sizing: border-box; }
@@ -69,22 +120,40 @@
     }
 
     .shell { max-width: min(2100px, 96vw); margin: 0 auto; padding: 20px 24px 32px; }
+    body:not(.has-document) .shell { max-width: 1280px; padding-top: max(28px, 7vh); }
+    body:not(.has-document) header { margin-bottom: 24px; }
+    body:not(.has-document) .file-field { min-height: 52px; font-size: .875rem; }
     header {
       text-align: center;
       margin-bottom: 14px;
     }
     .brand { display: inline-flex; align-items: center; gap: 10px; text-align: left; }
     .brand-logo { width: 72px; height: 72px; object-fit: contain; flex: 0 0 auto; }
-    .has-document .brand-logo { width: 48px; height: 48px; }
+    .has-document .brand-logo { width: 36px; height: 36px; }
     h1 { margin: 3px 0 1px; font-size: clamp(1.65rem, 3vw, 2.2rem); letter-spacing: -.04em; }
     .subtitle { margin: 0; color: var(--muted); }
-    .credit { margin: 20px 0 0; padding-top: 16px; border-top: 1px solid var(--line); text-align: center; color: var(--muted); font-size: .82rem; line-height: 1.5; }
+    .credit {
+      padding: 7px 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      text-align: center;
+      color: var(--muted);
+      font-size: .84rem;
+      line-height: 1.5;
+    }
     .credit strong { color: var(--text); font-weight: 600; }
-    .credit a { color: inherit; text-decoration-color: var(--line); text-underline-offset: 3px; }
-    .credit a:hover { color: var(--accent); }
+    .credit .separator { margin: 0 .5em; opacity: .6; }
+    .credit a { color: var(--accent); font-weight: 500; text-decoration: none; }
+    .credit a:hover { text-decoration: underline; text-underline-offset: 3px; }
     .has-document .examples { display: none; }
+    /* With a document open, brand and upload share one bar so the panes get the height. */
+    .has-document .shell { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 20px; align-items: center; }
+    .has-document header { margin: 0; }
+    .has-document .subtitle { display: none; }
+    .has-document .toolbar { margin: 0; }
+    .has-document .workspace { grid-column: 1 / -1; margin-top: 14px; }
     .has-document header { text-align: left; display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
-    .has-document h1 { font-size: 1.25rem; }
+    .has-document h1 { margin: 0; font-size: 1.1rem; white-space: nowrap; }
     .has-document .shell { max-width: 2100px; padding: 16px 20px; }
     .toolbar, .card {
       border: 1px solid var(--line);
@@ -94,10 +163,11 @@
     .toolbar {
       display: flex;
       align-items: center;
-      gap: 12px;
-      padding: 12px;
-      border-radius: 14px;
+      gap: 8px;
+      padding: 6px;
+      border-radius: var(--r-frame);
       margin-bottom: 18px;
+      box-shadow: var(--shadow-1);
     }
     .file-field {
       display: flex;
@@ -105,47 +175,73 @@
       align-items: center;
       flex: 1;
       gap: 12px;
-      padding: 10px 13px;
+      padding: 10px 14px;
       border: 1px dashed var(--line-strong);
-      border-radius: 10px;
+      border-radius: var(--r-card);
       color: var(--muted);
+      font-size: .8125rem;
       cursor: pointer;
+      transition: border-color var(--motion-fast), background-color var(--motion-fast);
     }
-    .file-field:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .file-field:hover { border-color: var(--accent); background: var(--accent-soft); }
+    .file-field:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+    .file-field:hover, .file-field:focus-within, .file-field.dragging { border-color: var(--accent-line); background: var(--accent-faint); }
+    .file-field.dragging { border-color: var(--accent); background: var(--accent-soft); }
     .file-field input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+    .file-field svg { flex: none; width: 16px; height: 16px; stroke: currentColor; stroke-width: 1.7; fill: none; stroke-linecap: round; stroke-linejoin: round; }
     .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-field.has-file .file-name { color: var(--text); font-weight: 525; }
     .button {
-      min-height: 42px;
-      padding: 0 16px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 40px;
+      padding: 0 18px 0 14px;
       border: 1px solid var(--line-strong);
-      border-radius: 10px;
-      background: var(--panel-raised);
+      border-radius: 999px;
+      background: var(--panel);
       color: var(--text);
       cursor: pointer;
-      font-weight: 680;
+      font-size: .8125rem;
+      font-weight: 600;
+      transition: background-color var(--motion-fast), border-color var(--motion-fast), transform var(--motion-fast);
     }
-    .button:hover:not(:disabled) { border-color: var(--muted); }
-    .button.primary { border-color: var(--accent); background: var(--accent); color: var(--panel); }
-    .button:disabled { cursor: not-allowed; opacity: .42; }
+    .button::before {
+      content: "";
+      width: 16px;
+      height: 16px;
+      background: currentColor;
+      -webkit-mask: var(--icon-clear) center / contain no-repeat;
+      mask: var(--icon-clear) center / contain no-repeat;
+    }
+    .button.primary::before { -webkit-mask-image: var(--icon-parse); mask-image: var(--icon-parse); }
+    .button:hover:not(:disabled) { background: var(--panel-raised); }
+    .button:active:not(:disabled) { transform: scale(.97); }
+    .button.primary { border-color: var(--primary); background: var(--primary); color: var(--on-primary); }
+    .button.primary:hover:not(:disabled) { border-color: var(--primary-hover); background: var(--primary-hover); }
+    .button:disabled { cursor: not-allowed; opacity: .4; }
 
-    .activity-line {
-      display: flex;
-      align-items: stretch;
-      gap: 10px;
-      margin-bottom: 18px;
-    }
+    .activity-line { display: flex; flex: none; align-items: center; }
     .status-line {
       display: none;
+      align-items: center;
       flex: 1;
-      padding: 11px 14px;
+      height: 32px;
+      padding: 0 12px;
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: 999px;
+      background: var(--panel);
       color: var(--muted);
+      font-size: .78rem;
+      font-weight: 600;
+      white-space: nowrap;
     }
-    .status-line.visible { display: block; }
-    .status-line.busy { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
-    .status-line.success { color: var(--text); border-color: var(--line-strong); background: var(--panel-raised); }
+    .status-line::before { content: ""; flex: none; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--line-strong); }
+    .status-line.visible { display: flex; }
+    .status-line.busy { color: var(--text-2); border-color: var(--accent-line); background: var(--accent-faint); }
+    .status-line.busy::before { background: var(--accent); animation: status-pulse 1.2s ease-in-out infinite; }
+    .status-line.success { color: var(--muted); border-color: var(--line); background: var(--panel); }
+    .status-line.success::before { background: var(--positive); }
+    @keyframes status-pulse { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
     .client-timer { display: none !important; }
     .client-timer-legacy {
       display: grid;
@@ -172,29 +268,48 @@
       margin: -6px 0 18px;
       padding: 2px;
     }
-    .examples-label { grid-column: 1 / -1; color: var(--muted); font-size: .74rem; font-weight: 700; }
+    .examples-label { grid-column: 1 / -1; color: var(--muted); font-size: .6875rem; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
     .example-button {
       min-width: 0;
       overflow: hidden;
       padding: 0;
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: var(--r-card);
       background: var(--panel);
       color: var(--text);
       cursor: pointer;
       text-align: left;
       font-size: .75rem;
       font-weight: 650;
+      transition: border-color var(--motion), box-shadow var(--motion), transform var(--motion);
     }
-    .example-button:hover { border-color: var(--accent); background: var(--accent-soft); }
-    .example-button:disabled { cursor: wait; opacity: .62; }
-    .example-preview { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; border-bottom: 1px solid var(--line); background: var(--panel-raised); }
-    .example-name { display: block; padding: 8px 9px 2px; }
-    .example-kind { display: block; padding: 0 9px 8px; color: var(--muted); font-size: .68rem; font-weight: 500; }
+    .example-button:hover, .example-button:focus-visible { border-color: var(--line-strong); box-shadow: var(--shadow-pop); transform: translateY(-2px); }
+    .example-button:disabled { cursor: wait; opacity: .6; }
+    .example-button[aria-busy="true"] { box-shadow: inset 0 2px 0 var(--accent); }
+    .example-preview {
+      display: block;
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      object-fit: cover;
+      object-position: top;
+      border-bottom: 1px solid var(--line);
+      background: var(--surface-2);
+      transition: transform 200ms var(--motion);
+    }
+    .example-button:hover .example-preview, .example-button:focus-visible .example-preview { transform: scale(1.02); }
+    .example-name { display: flex; align-items: center; padding: 10px 12px 2px; font-weight: 525; }
+    .example-name::before { content: ""; flex: none; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--muted); }
+    .example-button[data-example="fax-cover"] .example-name::before { background: #0D47A1; }
+    .example-button[data-example="provider-roster"] .example-name::before { background: #E2771A; }
+    .example-button[data-example="provider-agreement"] .example-name::before { background: #3498DB; }
+    .example-button[data-example="academic-paper"] .example-name::before { background: #B1900A; }
+    .example-button[data-example="financial-table"] .example-name::before { background: #E2771A; }
+    .example-button[data-example="contracts"] .example-name::before { background: #E91E63; }
+    .example-kind { display: block; padding: 0 12px 10px; color: var(--muted); font-size: .75rem; font-weight: 500; }
 
     .workspace {
       --split: 50%;
-      height: max(560px, calc(100dvh - 160px));
+      height: max(560px, calc(100dvh - 140px));
       display: grid;
       grid-template-columns: minmax(0, var(--split)) 10px minmax(0, 1fr);
       align-items: stretch;
@@ -209,8 +324,10 @@
     }
     .split-handle:hover, .split-handle.dragging { background-color: var(--accent-soft); }
     .card {
+      position: relative;
       min-width: 0;
-      border-radius: 10px;
+      border-radius: 14px;
+      box-shadow: var(--shadow-1);
       overflow: hidden;
       display: flex;
       flex-direction: column;
@@ -218,43 +335,93 @@
     /* the scrolling body absorbs the height difference so both cards end level */
     .preview-wrap, .tab-panel.active { flex: 1 1 0; min-height: 0; }
     .card-head {
-      min-height: 57px;
+      min-height: 54px;
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 14px;
-      padding: 10px 16px;
+      gap: 10px;
+      padding: 8px 12px 8px 18px;
       border-bottom: 1px solid var(--line);
     }
+    .output-card .card-head { align-items: stretch; padding-block: 0; padding-left: 8px; }
     .card-title { flex: none; white-space: nowrap; font-weight: 720; letter-spacing: -.01em; }
-    .page-controls { display: flex; align-items: center; gap: 8px; }
-    .icon-button {
-      height: 34px;
-      padding: 0 10px;
+    /* Floating page stepper over the page, as in document viewers. */
+    .page-controls {
+      position: absolute;
+      z-index: 6;
+      left: 50%;
+      bottom: 18px;
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      padding: 4px;
       border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel-raised);
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--panel) 92%, transparent);
+      box-shadow: var(--shadow-pop);
+      transform: translateX(-50%);
+      backdrop-filter: blur(10px);
+    }
+    .icon-button {
+      display: inline-grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      padding: 0;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
       color: var(--text);
       cursor: pointer;
+      transition: background-color var(--motion-fast);
     }
-    .icon-button:disabled { opacity: .35; cursor: not-allowed; }
-    .page-count { min-width: 74px; color: var(--muted); text-align: center; font-size: .84rem; }
+    .icon-button:hover:not(:disabled) { background: var(--panel-raised); }
+    .icon-button svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .icon-button:disabled { opacity: .3; cursor: not-allowed; }
+    .page-count { min-width: 58px; color: var(--text); text-align: center; font-size: .8125rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 
-    .categories { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 16px; border-bottom: 1px solid var(--line); }
-    .source-zoom { display: flex; align-items: center; gap: 8px; font-size: .74rem; color: var(--muted); }
-    .source-zoom select { padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); }
+    .categories { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+    /* "Zoom" stays the select's accessible name without taking header space. */
+    .source-zoom { display: flex; font-size: 0; }
+    .source-zoom select, .layers-control > summary {
+      height: 34px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--panel);
+      color: var(--text);
+      cursor: pointer;
+      font-size: .78rem;
+      font-weight: 600;
+      transition: background-color var(--motion-fast);
+    }
+    .source-zoom select {
+      appearance: none;
+      padding: 0 30px 0 13px;
+    }
+    .source-zoom { position: relative; }
+    .source-zoom::after {
+      content: "";
+      position: absolute;
+      right: 11px;
+      top: 50%;
+      width: 13px;
+      height: 13px;
+      background: var(--muted);
+      -webkit-mask: var(--icon-chevron) center / contain no-repeat;
+      mask: var(--icon-chevron) center / contain no-repeat;
+      transform: translateY(-50%);
+      pointer-events: none;
+    }
+    .source-zoom select:hover, .layers-control > summary:hover, .layers-control[open] > summary { background-color: var(--panel-raised); }
     .layers-control { position: relative; }
     .layers-control > summary {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 13px 0 11px;
       list-style: none;
-      padding: 6px 9px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
-      color: var(--muted);
-      cursor: pointer;
-      font-size: .74rem;
-      font-weight: 700;
     }
+    .layers-control > summary svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; }
+    #layer-count { color: var(--muted); font-variant-numeric: tabular-nums; }
     .layers-control > summary::-webkit-details-marker { display: none; }
     .category-list {
       position: absolute;
@@ -266,33 +433,36 @@
       max-height: 280px;
       gap: 5px;
       overflow-y: auto;
-      padding: 8px;
+      padding: 6px;
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: 12px;
       background: var(--panel);
-      box-shadow: 0 10px 28px #17203324;
+      box-shadow: var(--shadow-pop);
     }
     .category-button {
       display: inline-flex;
       width: 100%;
       align-items: center;
       gap: 6px;
-      padding: 5px 8px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: var(--panel-raised);
+      padding: 7px 10px;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
       color: var(--text);
       cursor: pointer;
-      font-size: .74rem;
+      font-size: .78rem;
+      text-transform: capitalize;
     }
-    .category-button[aria-pressed="false"] { color: var(--muted); text-decoration: line-through; }
-    .category-swatch { width: 8px; height: 8px; border-radius: 50%; background: var(--category-color); }
+    .category-button:hover { background: var(--panel-raised); }
+    .category-button[aria-pressed="false"] { color: var(--muted); }
+    .category-button[aria-pressed="false"] .category-swatch { background: transparent; box-shadow: inset 0 0 0 1.5px var(--category-color); }
+    .category-swatch { width: 10px; height: 10px; border-radius: 3px; background: var(--category-color); }
 
     .preview-wrap {
       overflow: auto;
       display: block;
-      padding: 20px;
-      background-color: var(--panel-raised);
+      padding: 24px 24px 72px;
+      background-color: var(--surface-2);
     }
     .preview-wrap:has(> #preview-empty:not([hidden])) {
       display: grid;
@@ -304,9 +474,9 @@
       height: auto;
       max-width: none;
       max-height: none;
-      border-radius: 3px;
+      border-radius: 4px;
       background: var(--panel);
-      box-shadow: 0 10px 34px #17203324;
+      box-shadow: 0 0 0 1px var(--line), var(--shadow-pop);
       cursor: crosshair;
     }
     canvas.visible { display: block; margin-inline: auto; }
@@ -335,12 +505,15 @@
     .icon-only {
       display: inline-grid;
       place-items: center;
-      width: 34px;
+      width: 36px;
       padding: 0;
     }
-    .icon-only svg, .feedback-button svg {
-      width: 16px;
-      height: 16px;
+    #copy-icon { margin-right: -6px; border-radius: 999px 0 0 999px; }
+    #copy-formats { width: 30px; border-left: 0; border-radius: 0 999px 999px 0; }
+    #copy-formats svg { width: 16px; height: 16px; }
+    .icon-only svg, .feedback-button svg, .primary-action svg {
+      width: 18px;
+      height: 18px;
       fill: none;
       stroke: currentColor;
       stroke-width: 1.7;
@@ -350,12 +523,13 @@
     .card-head .elapsed-chip { margin-right: auto; }
     .elapsed-chip[data-state="running"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 
-    .doc-metrics { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .doc-metrics { display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; }
+    .doc-metrics .metric + .metric::before { display: block; content: "·"; margin-right: 3px; color: var(--line-strong); }
     .metric {
       display: inline-flex;
       align-items: center;
       gap: 5px;
-      padding: 3px 4px;
+      padding: 3px 0;
       border: 0;
       border-radius: 0;
       background: transparent;
@@ -366,6 +540,7 @@
     }
     .metric::before {
       display: none;
+      font-size: .78rem;
       content: attr(data-icon);
       color: var(--metric-tint);
       font-size: .78rem;
@@ -377,15 +552,15 @@
     #metric-chars { --metric-tint: var(--positive); }
     #metric-size { --metric-tint: var(--confidence-medium); }
 
-    .feedback { display: inline-flex; gap: 4px; }
+    .feedback { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line-strong); border-radius: 999px; }
     .feedback-button {
       display: inline-grid;
       place-items: center;
-      width: 30px;
+      width: 32px;
       height: 30px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: var(--panel);
+      border: 1px solid transparent;
+      border-radius: 999px;
+      background: transparent;
       color: var(--muted);
       cursor: pointer;
       transition: color var(--motion), border-color var(--motion), background-color var(--motion);
@@ -407,33 +582,47 @@
       background: var(--negative-soft);
     }
 
-    .action-popover.feedback-form { min-width: 232px; gap: 6px; padding: 10px; }
-    .feedback-form-title { color: var(--text); font-size: .74rem; font-weight: 750; }
+    .action-popover.feedback-form { width: 340px; grid-template-columns: 1fr 1fr; gap: 6px; padding: 14px; }
+    .feedback-form-title, .feedback-note, #feedback-send { grid-column: 1 / -1; }
+    .feedback-form-title { margin-bottom: 4px; color: var(--text); font-size: .8125rem; font-weight: 650; }
     .feedback-reason {
+      position: relative;
       display: flex;
       align-items: center;
-      gap: 7px;
-      color: var(--text);
-      font-size: .75rem;
+      min-height: 34px;
+      padding: 0 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      color: var(--text-2);
+      font-size: .76rem;
+      font-weight: 550;
       cursor: pointer;
+      transition: background-color var(--motion-fast), border-color var(--motion-fast), color var(--motion-fast);
     }
-    .feedback-reason input { accent-color: var(--negative); margin: 0; }
+    .feedback-reason:hover { background: var(--panel-raised); }
+    .feedback-reason input { position: absolute; opacity: 0; pointer-events: none; }
+    .feedback-reason:has(input:checked) { border-color: var(--negative); background: var(--negative-soft); color: var(--negative); }
+    .feedback-reason:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
     .feedback-note {
       width: 100%;
-      padding: 6px 8px;
-      border: 1px solid var(--line);
-      border-radius: 7px;
+      height: 36px;
+      margin-top: 4px;
+      padding: 0 12px;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      background: var(--panel);
       color: var(--text);
       font: inherit;
-      font-size: .75rem;
+      font-size: .78rem;
     }
     #feedback-send {
-      border-color: var(--negative);
-      background: var(--negative-soft);
-      color: var(--negative);
-      text-align: center;
+      justify-content: center;
+      min-height: 36px;
+      border-color: var(--primary);
+      background: var(--primary);
+      color: var(--on-primary);
     }
-    #feedback-send:disabled { border-color: var(--line); background: transparent; color: var(--muted); }
+    #feedback-send:disabled { border-color: var(--line); background: var(--panel-raised); color: var(--muted); opacity: 1; }
 
     .empty-state { max-width: 340px; color: var(--muted); text-align: center; line-height: 1.6; }
     /* Centre a placeholder wherever it lives: the panel, or a content container. */
@@ -446,7 +635,7 @@
     .tab-panel > .empty-state { margin: auto; }
     .empty-state strong { display: block; color: var(--text); font-size: 1.02rem; }
 
-    .inspector { padding: 14px 16px 16px; border-top: 1px solid var(--line); }
+    .inspector { padding: 18px; border-top: 1px solid var(--line); }
     .inspector-empty { display: none; color: var(--muted); text-align: center; line-height: 1.55; }
     .inspector.empty .inspector-grid, .inspector.empty .review-actions,
     .inspector.empty .inspector-primary,
@@ -460,7 +649,8 @@
     .inspector.empty:has(.region-list:empty) { min-height: 0; padding: 0; }
     .inspector.empty:has(.region-list:empty) .inspector-head { display: none; }
     .inspector.empty .region-list:empty { display: none; }
-    .inspector-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+    .inspector-head { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-bottom: 12px; }
+    #download-crop::before { content: ""; width: 15px; height: 15px; background: currentColor; -webkit-mask: var(--icon-download) center / contain no-repeat; mask: var(--icon-download) center / contain no-repeat; }
     .inspector-action { flex: 0 0 auto; }
     .reread-status { color: var(--muted); font-size: .72rem; }
     .reread-status:empty { display: none; }
@@ -470,11 +660,7 @@
       align-items: center;
       flex-wrap: wrap;
       gap: 7px;
-      margin: 12px 0;
-      padding: 10px;
-      border: 1px solid var(--line);
-      border-radius: 9px;
-      background: var(--panel-raised);
+      margin: 14px 0;
     }
     .review-actions select {
       min-height: 34px;
@@ -513,68 +699,114 @@
     .region-crop {
       display: block;
       width: 100%;
-      max-height: 118px;
+      max-height: 140px;
+      padding: 8px;
       border: 1px solid var(--line);
-      border-radius: 7px;
-      background: var(--panel-raised);
+      border-radius: 12px;
+      background: var(--surface-2);
       object-fit: contain;
       box-shadow: none;
+      cursor: default;
     }
-    .inspector-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .inspector-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 16px; }
     .datum { min-width: 0; }
-    .label { display: block; color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; }
-    .value { display: block; margin-top: 3px; overflow-wrap: anywhere; font-size: .86rem; }
+    .label { display: block; color: var(--muted); font-size: .72rem; font-weight: 500; }
+    .value { display: block; margin-top: 4px; overflow-wrap: anywhere; font-size: .86rem; font-weight: 550; }
+    #region-resolution { text-transform: capitalize; }
+    #region-confidence[data-level] { justify-self: start; width: fit-content; padding: 1px 9px; border-radius: 999px; background: var(--surface-2); font-weight: 600; }
+    #region-confidence[data-level="high"] { background: var(--confidence-high-soft); color: var(--confidence-high); }
+    #region-confidence[data-level="medium"] { background: var(--confidence-medium-soft); color: var(--confidence-medium); }
+    #region-confidence[data-level="low"] { background: var(--confidence-low-soft); color: var(--confidence-low); }
+    .inspector-grid { padding: 14px; border: 1px solid var(--line); border-radius: 12px; }
     .region-text { grid-column: 1 / -1; padding-top: 8px; border-top: 1px solid var(--line); }
     .region-transcription { margin-bottom: 9px; }
-    .region-transcription .value { font-size: .94rem; line-height: 1.5; white-space: pre-wrap; }
+    .region-transcription .value { font-size: 1.02rem; font-weight: 500; line-height: 1.55; white-space: pre-wrap; }
     .technical-details { grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 8px; }
     .technical-details summary { cursor: pointer; color: var(--muted); font-size: .74rem; font-weight: 700; }
-    .technical-grid { display: grid; gap: 10px; margin-top: 10px; }
+    .technical-grid { display: grid; gap: 12px; margin-top: 10px; }
+    .technical-grid .value {
+      display: grid;
+      max-height: 320px;
+      overflow: auto;
+      margin-top: 6px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      font-size: .76rem;
+    }
+    .detail-row { display: grid; grid-template-columns: minmax(120px, 38%) minmax(0, 1fr); gap: 12px; padding: 7px 12px; font-variant-numeric: tabular-nums; }
+    .detail-row + .detail-row { border-top: 1px solid var(--line); }
+    .detail-key { color: var(--muted); text-transform: capitalize; }
     .region-list {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-      max-height: 148px;
+      position: relative;
+      display: grid;
+      gap: 2px;
+      max-height: 360px;
       overflow-y: auto;
-      margin-top: 12px;
-      padding-bottom: 2px;
+      margin-top: 16px;
+      padding: 6px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
     }
     .region-button {
-      flex: 0 0 auto;
-      max-width: 170px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      border: 1px solid var(--line);
-      border-radius: 7px;
-      background: var(--panel-raised);
-      color: var(--muted);
-      padding: 6px 9px;
+      display: grid;
+      grid-template-columns: 26px 96px minmax(0, 1fr);
+      align-items: center;
+      gap: 10px;
+      min-height: 38px;
+      padding: 0 12px 0 6px;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--text-2);
       cursor: pointer;
-      font-size: .77rem;
+      font-size: .8rem;
+      text-align: left;
+      transition: background-color var(--motion), box-shadow var(--motion);
     }
-    .region-button.active { color: var(--text); border-color: var(--accent); background: var(--accent-soft); }
+    .region-button:hover { background: var(--panel-raised); }
+    .region-index { display: inline-grid; place-items: center; height: 22px; border-radius: 7px; color: var(--muted); font-size: .72rem; font-variant-numeric: tabular-nums; transition: background-color var(--motion), color var(--motion); }
+    .region-kind { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: .72rem; font-weight: 600; text-transform: capitalize; white-space: nowrap; }
+    .region-kind::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: var(--category-color); }
+    .region-snippet { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+    /* The selected row lifts as a card tinted by its block type. */
+    .region-button.active {
+      background: var(--panel);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--category-color) 35%, var(--line)), 0 6px 16px -8px color-mix(in srgb, var(--category-color) 55%, transparent);
+    }
+    .region-button.active .region-index { background: var(--category-color); color: #fff; }
+    .region-button.active .region-snippet { font-weight: 550; }
 
-    .tabs { display: flex; gap: 5px; overflow-x: auto; padding: 10px 12px 0; border-bottom: 1px solid var(--line); }
+    .tabs { display: flex; flex: none; gap: 2px; overflow-x: auto; }
     .tab {
-      padding: 10px 12px;
+      margin-bottom: -1px;
+      padding: 0 12px;
       border: 0;
       border-bottom: 2px solid transparent;
       background: transparent;
       color: var(--muted);
       cursor: pointer;
-      font-weight: 650;
+      font-size: .875rem;
+      font-weight: 600;
+      transition: color var(--motion-fast), border-color var(--motion-fast);
     }
-    .tab[aria-selected="true"] { color: var(--text); border-color: var(--accent); }
+    .tab:hover { color: var(--text); }
+    .tab[aria-selected="true"] { color: var(--text); border-color: var(--text); }
     .rendered-toolbar { gap: 6px; }
     .tab-panel { display: none; overflow: auto; padding: 18px; }
     .tab-panel.active { display: block; }
     .tab-panel.empty-panel.active { display: grid; place-items: center; }
     .rendered-toolbar {
+      position: sticky;
+      z-index: 4;
+      top: -18px;
       display: flex;
       align-items: center;
       justify-content: flex-end;
-      margin-bottom: 10px;
+      margin: -18px -18px 14px;
+      padding: 10px 18px;
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in srgb, var(--panel) 90%, transparent);
+      backdrop-filter: blur(8px);
     }
     .rendered-toolbar[hidden] { display: none; }
     .refining-note {
@@ -586,6 +818,10 @@
       font-size: .78rem;
     }
     .rendered-toolbar.refining .refining-note { display: inline-flex; }
+    #feedback.refinement-pending, #review-actions.refinement-pending {
+      opacity: .5;
+      pointer-events: none;
+    }
     .refining-note::before {
       content: "";
       width: 7px;
@@ -595,21 +831,36 @@
       animation: refining-pulse 1.1s ease-in-out infinite;
     }
     @keyframes refining-pulse { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+    .refinement-preview { border-radius: 4px; background: var(--accent-soft); animation: preview-in 500ms var(--motion); }
+    @keyframes preview-in { from { background: color-mix(in srgb, var(--accent) 30%, transparent); } }
+    /* On/off switches: the track and knob are drawn by the button itself. */
     .confidence-toggle {
-      border: 1px solid var(--line);
-      border-radius: 8px;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 32px;
+      padding: 0 12px 0 7px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
       background: var(--panel);
       color: var(--muted);
-      padding: 7px 10px;
       font: inherit;
-      font-size: .76rem;
-      font-weight: 700;
+      font-size: .78rem;
+      font-weight: 600;
       cursor: pointer;
+      transition: color var(--motion-fast), background-color var(--motion-fast);
     }
-    .confidence-toggle[aria-pressed="true"] {
-      background: var(--accent-soft);
-      color: var(--accent);
+    .confidence-toggle:hover:not(:disabled) { background: var(--panel-raised); }
+    .confidence-toggle::before {
+      content: "";
+      width: 28px;
+      height: 16px;
+      border-radius: 999px;
+      background: radial-gradient(circle at 8px 50%, #fff 5px, transparent 5.5px) var(--line-strong);
+      transition: background-color var(--motion);
     }
+    .confidence-toggle[aria-pressed="true"] { color: var(--text); }
+    .confidence-toggle[aria-pressed="true"]::before { background: radial-gradient(circle at 20px 50%, #fff 5px, transparent 5.5px) var(--accent); }
     .confidence-toggle:disabled { cursor: not-allowed; opacity: .5; }
     .rendered-page-head { margin-bottom: 9px; }
     .rendered-page-head h2 { margin-bottom: 0; }
@@ -628,7 +879,7 @@
     .confidence-review .confidence-evidence[data-confidence-level="medium"] { background: var(--confidence-medium-soft); }
     .confidence-review .confidence-evidence[data-confidence-level="low"] { background: var(--confidence-low-soft); }
     .confidence-review .confidence-evidence[data-confidence-level="text-layer"] { background: var(--text-layer-soft); }
-    .confidence-review .confidence-evidence[data-confidence-level="unknown"] { text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
+    /* No score (an LLM reread) is stated on the section badge, not underlined word by word. */
     .confidence-review .confidence-evidence[data-confidence-level="high"]:hover,
     .confidence-review .confidence-evidence[data-confidence-level="high"].confidence-active { background: color-mix(in srgb, var(--confidence-high) 30%, var(--panel)); }
     .confidence-review .confidence-evidence[data-confidence-level="medium"]:hover,
@@ -640,6 +891,7 @@
     .confidence-review .presentation-source-link.confidence-active { background: transparent; }
     .presentation-source-link:hover,
     .presentation-source-link.confidence-active { outline: 2px solid var(--accent); outline-offset: 2px; }
+    #confidence-inspector-source:empty { display: none; }
     .confidence-inspector {
       position: fixed;
       z-index: 20;
@@ -661,26 +913,47 @@
     .visual-panel { padding: 0; }
     .visual-panel .inspector { min-height: 560px; border-top: 0; }
     .markdown-source { min-height: 520px; }
-    .markdown-lines { margin: 0; padding-left: 4.25rem; font: .78rem/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; }
-    .markdown-lines li { min-height: 1.65em; padding-left: 10px; border-left: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; }
-    .markdown-lines li::marker { color: var(--muted); }
+    /* An editor-like source view: gutter numbers, line hover, light syntax colour. */
+    .markdown-lines {
+      margin: 0;
+      padding: 12px 12px 12px 3.9rem;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface);
+      font: .78rem/1.75 ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    .markdown-lines { list-style: none; counter-reset: line; }
+    .markdown-lines li { position: relative; min-height: 1.75em; padding: 0 10px 0 14px; border-radius: 6px; counter-increment: line; white-space: pre-wrap; overflow-wrap: anywhere; transition: background-color var(--motion-fast); }
+    .markdown-lines li::before { content: counter(line); position: absolute; left: -3.1rem; width: 2.6rem; color: color-mix(in srgb, var(--muted) 70%, transparent); font-size: .7rem; text-align: right; user-select: none; }
+    .markdown-lines li:hover { background: var(--surface-2); }
+    .markdown-lines li:hover::before { color: var(--text-2); }
+    .markdown-lines li[data-kind="heading"] code { color: var(--accent); font-weight: 700; }
+    .markdown-lines li[data-kind="table"] code { color: var(--text-2); }
+    .markdown-lines li[data-kind="list"] code { color: var(--text); }
+    .markdown-lines li[data-kind="quote"] code { color: var(--muted); font-style: italic; }
     .markdown-status { color: var(--muted); font-size: .78rem; }
     .rendered-page { margin-bottom: 24px; }
     .rendered-page + .rendered-page { padding-top: 24px; border-top: 1px solid var(--line); }
-    .rendered-page h2 { margin: 0 0 9px; font-size: .78rem; letter-spacing: .11em; text-transform: uppercase; color: var(--accent); }
+    .rendered-page h2 { margin: 0 0 10px; font-size: .72rem; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
     .rendered-content { max-width: 86ch; }
     .rendered-page p { margin: 0; line-height: 1.72; white-space: pre-wrap; }
     pre { margin: 0; color: var(--text); font: .78rem/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
     .section-card { display: contents; }
     .section-label { display: none; }
-    .section-source { margin-left: auto; padding: 3px 7px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--muted); font: inherit; cursor: pointer; font-variant-numeric: tabular-nums; }
-    .section-source:hover { color: var(--text); background: var(--panel-raised); }
+    .section-source { margin-left: auto; padding: 3px 9px; border: 0; border-radius: 999px; background: var(--surface-2); color: var(--muted); font: inherit; font-weight: 600; cursor: pointer; font-variant-numeric: tabular-nums; transition: filter var(--motion-fast); }
+    .section-source:hover { filter: brightness(.96); }
+    .section-source[data-level="high"] { background: var(--confidence-high-soft); color: var(--confidence-high); }
+    .section-source[data-level="medium"] { background: var(--confidence-medium-soft); color: var(--confidence-medium); }
+    .section-source[data-level="low"] { background: var(--confidence-low-soft); color: var(--confidence-low); }
+    .section-source[data-level="refined"] { background: var(--accent-soft); color: var(--accent); }
+    .section-number { display: inline-grid; place-items: center; min-width: 22px; height: 22px; padding: 0 6px; border-radius: 7px; background: var(--surface-2); color: var(--text-2); font-variant-numeric: tabular-nums; }
     .evidence-doubt { text-decoration: underline dotted var(--confidence-medium); text-underline-offset: 4px; }
     .section-card:has(.evidence-doubt) > .section-label { display: flex; align-items: center; gap: 8px; }
     .section-card:has(.evidence-doubt) { display: block; }
 
-    .sections-view .section-card { display: block; margin: 0 0 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
-    .sections-view .section-label { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; color: var(--muted); font-size: .73rem; font-weight: 650; }
+    .sections-view .section-card { display: block; margin: 0 0 12px; padding: 12px 16px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); transition: border-color var(--motion-fast), box-shadow var(--motion-fast); }
+    .sections-view .section-card:hover { border-color: var(--line-strong); box-shadow: var(--shadow-1); }
+    .sections-view .section-label { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; color: var(--muted); font-size: .75rem; font-weight: 600; }
     .sections-view .section-card:has(.linked, .confidence-active) { border-color: var(--accent); }
     .sections-view .section-card > .semantic-block { margin-top: 0; margin-bottom: 0; }
     .semantic-block { margin: 0 0 10px; padding: 2px 8px; margin-left: -8px; margin-right: -8px; border-radius: 7px; line-height: 1.6; white-space: pre-wrap; transition: background-color var(--motion), box-shadow var(--motion); }
@@ -772,34 +1045,64 @@
     .action-popover {
       position: absolute;
       z-index: 12;
-      top: calc(100% + 6px);
+      top: calc(100% + 8px);
       right: 0;
       display: grid;
       min-width: 190px;
-      gap: 4px;
+      gap: 2px;
       padding: 6px;
       border: 1px solid var(--line);
-      border-radius: 9px;
+      border-radius: 12px;
       background: var(--panel);
-      box-shadow: 0 8px 24px #17203324;
+      box-shadow: var(--shadow-pop);
+      animation: pop-in 140ms var(--motion);
     }
-    .action-popover .download { width: 100%; text-align: left; white-space: nowrap; }
+    @keyframes pop-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } }
+    .action-popover .download { width: 100%; border-color: transparent; border-radius: 8px; justify-content: flex-start; white-space: nowrap; }
+    .action-popover .download:hover { background: var(--panel-raised); }
     .copy-control { display: inline-flex; align-items: center; gap: 7px; }
-    .copy-status { min-width: 0; color: var(--text); font-size: .72rem; font-weight: 700; }
-    .copy-status.error { color: var(--accent); }
+    /* Status messages surface as a toast instead of shifting the header. */
+    .copy-status:not(:empty) {
+      position: fixed;
+      z-index: 40;
+      left: 50%;
+      bottom: 28px;
+      padding: 10px 18px;
+      border-radius: 999px;
+      background: var(--primary);
+      color: var(--on-primary);
+      box-shadow: var(--shadow-pop);
+      font-size: .8125rem;
+      font-weight: 550;
+      transform: translateX(-50%);
+      animation: toast-in 180ms var(--motion);
+    }
+    .copy-status.error:not(:empty) { background: var(--danger); color: #fff; }
+    @keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } }
     .download[data-copy-state="copied"] { border-color: var(--line-strong); background: var(--panel-raised); color: var(--text); }
     .download[data-copy-state="error"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
     .download {
-      padding: 7px 10px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: transparent;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 34px;
+      padding: 0 13px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--panel);
       color: var(--text);
       cursor: pointer;
       text-decoration: none;
       font-size: .78rem;
-      font-weight: 650;
+      font-weight: 600;
+      transition: background-color var(--motion-fast), border-color var(--motion-fast);
     }
+    .download:hover:not(:disabled) { background: var(--panel-raised); }
+    .download.primary-action { padding-left: 11px; border-color: var(--primary); background: var(--primary); color: var(--on-primary); }
+    .download.primary-action:hover { background: var(--primary-hover); }
+    .downloads { align-self: center; }
+    .download.icon-only { justify-content: center; padding: 0; }
+    body:not(.has-document) .downloads, body:not(.has-document) .workspace { display: none; }
     .download:disabled { cursor: not-allowed; opacity: .4; }
     .download[aria-disabled="true"] { opacity: .4; pointer-events: none; }
 
@@ -807,6 +1110,7 @@
       .shell { padding: 18px; }
       .examples { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
       .workspace { grid-template-columns: 1fr; height: auto; }
+      .has-document .shell { grid-template-columns: 1fr; row-gap: 12px; }
       .split-handle { display: none; }
       .preview-wrap, .tab-panel.active { flex: none; min-height: 420px; max-height: 74vh; }
     }
@@ -816,10 +1120,14 @@
       .client-timer { display: none !important; }
     .client-timer-legacy { width: 100%; }
       .toolbar { align-items: stretch; flex-wrap: wrap; }
-      .file-field { flex-basis: 100%; }
+      .file-field, .activity-line { flex-basis: 100%; }
+      .status-line { flex: 1; }
       .button { flex: 1; }
       .examples { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .card-head { align-items: flex-start; flex-direction: column; }
+      .card-head { flex-wrap: wrap; }
+      .output-card .card-head { padding: 0 8px 8px; }
+      .output-card .tabs { flex-basis: 100%; min-height: 44px; }
+      .doc-metrics { display: none; }
       .inspector-grid { grid-template-columns: 1fr 1fr; }
       .inspector-primary { grid-template-columns: 1fr; }
       .download { text-align: center; }
@@ -836,6 +1144,8 @@
   </style>
 </head>
 <body>
+  <p class="credit">Built by <strong>Aman Behera</strong><span class="separator" aria-hidden="true">·</span>For any issues, reach out at
+    <a href="mailto:aman.behera@hilabs.com">aman.behera@hilabs.com</a></p>
   <main class="shell">
     <header>
       <div class="brand">
@@ -848,27 +1158,26 @@
 
     </header>
     <form class="toolbar" id="upload-form">
-      <label class="file-field" for="source-file">
+      <label class="file-field" for="source-file" id="file-field">
         <input id="source-file" name="file" type="file" accept=".bmp,.jpeg,.jpg,.png,.tif,.tiff,.webp,.pdf">
-        <span aria-hidden="true">＋</span>
-        <span class="file-name" id="file-name">Choose one image, PDF, or TIFF</span>
+        <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M5 20h14"></path></svg>
+        <span class="file-name" id="file-name">Choose or drop a PDF, PNG, JPG, TIFF, WEBP or BMP</span>
       </label>
+      <div class="activity-line" id="activity-line" hidden>
+        <div class="status-line" id="status-line" role="status" aria-live="polite" aria-atomic="true"></div>
+        <div class="client-timer" id="client-timer" data-state="idle" aria-label="Client request timing" hidden>
+          <span class="timer-label">Total time taken</span>
+          <strong class="timer-value" id="client-elapsed">0.0 s</strong>
+          <span class="timer-state" id="client-timer-state">Idle</span>
+          <!-- kept for the browser-testable timing contract; the visible chip lives in the page header -->
+        </div>
+      </div>
       <button class="button primary" id="parse-button" type="submit" disabled>Parse</button>
       <button class="button" id="clear-button" type="button" disabled>Clear</button>
     </form>
 
     <nav id="examples" class="examples" aria-label="Example documents">
       <span class="examples-label">Try an example</span>
-      <button class="example-button" type="button" data-example="fax-cover">
-        <img class="example-preview" src="/api/examples/fax-cover?thumb=1" alt="" loading="lazy">
-        <span class="example-name">Fax cover sheet</span>
-        <span class="example-kind">Handwriting and checkboxes</span>
-      </button>
-      <button class="example-button" type="button" data-example="provider-roster">
-        <img class="example-preview" src="/api/examples/provider-roster?thumb=1" alt="" loading="lazy">
-        <span class="example-name">Provider roster</span>
-        <span class="example-kind">Handwritten table</span>
-      </button>
       <button class="example-button" type="button" data-example="provider-agreement">
         <img class="example-preview" src="/api/examples/provider-agreement?thumb=1" alt="" loading="lazy">
         <span class="example-name">Provider agreement</span>
@@ -879,38 +1188,39 @@
         <span class="example-name">Attention Is All You Need</span>
         <span class="example-kind">Math and columns</span>
       </button>
+      <button class="example-button" type="button" data-example="fax-cover">
+        <img class="example-preview" src="/api/examples/fax-cover?thumb=1" alt="" loading="lazy">
+        <span class="example-name">Fax cover sheet</span>
+        <span class="example-kind">Handwriting and checkboxes</span>
+      </button>
+      <button class="example-button" type="button" data-example="provider-roster">
+        <img class="example-preview" src="/api/examples/provider-roster?thumb=1" alt="" loading="lazy">
+        <span class="example-name">Provider roster</span>
+        <span class="example-kind">Handwritten table</span>
+      </button>
       <button class="example-button" type="button" data-example="financial-table">
         <img class="example-preview" src="/api/examples/financial-table?thumb=1" alt="" loading="lazy">
         <span class="example-name">Financial table</span>
         <span class="example-kind">Dense layout</span>
       </button>
-      <button class="example-button" type="button" data-example="handwriting">
-        <img class="example-preview" src="/api/examples/handwriting?thumb=1" alt="" loading="lazy">
-        <span class="example-name">Handwritten notes</span>
-        <span class="example-kind">Handwriting and formulas</span>
+      <button class="example-button" type="button" data-example="contracts">
+        <img class="example-preview" src="/api/examples/contracts?thumb=1" alt="" loading="lazy">
+        <span class="example-name">Contracts</span>
+        <span class="example-kind">Handwritten signatures and fields</span>
       </button>
     </nav>
 
-    <div class="activity-line" id="activity-line" hidden>
-      <div class="status-line" id="status-line" role="status" aria-live="polite" aria-atomic="true"></div>
-      <div class="client-timer" id="client-timer" data-state="idle" aria-label="Client request timing" hidden>
-        <span class="timer-label">Total time taken</span>
-        <strong class="timer-value" id="client-elapsed">0.0 s</strong>
-        <span class="timer-state" id="client-timer-state">Idle</span>
-        <!-- kept for the browser-testable timing contract; the visible chip lives in the page header -->
-      </div>
-    </div>
     <section class="workspace" aria-label="OCR result workspace">
       <article class="card source-card" aria-label="Page evidence">
         <div class="card-head">
           <span class="card-title">Page evidence</span>
           <span class="metric elapsed-chip" id="elapsed-chip" data-icon="&#9201;" hidden></span>
-          <div class="page-controls">
-            <button class="icon-button" id="previous-page" type="button" disabled>Previous</button>
-            <span class="page-count" id="page-count">No pages</span>
-            <button class="icon-button" id="next-page" type="button" disabled>Next</button>
+          <div class="doc-metrics" id="doc-metrics" hidden>
+            <span class="metric" id="metric-time" title="Backend processing time"></span>
+            <span class="metric" id="metric-pages" title="Pages"></span>
+            <span class="metric" id="metric-chars" title="Extracted characters"></span>
+            <span class="metric" id="metric-size" title="Source file size"></span>
           </div>
-        </div>
         <div class="categories" id="region-categories" hidden>
           <label class="source-zoom" for="source-zoom">Zoom
             <select id="source-zoom">
@@ -923,9 +1233,10 @@
             </select>
           </label>
           <details class="layers-control" id="layers-control">
-            <summary>Layers <span id="layer-count"></span></summary>
+            <summary><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5z"></path><path d="m3 13 9 5 9-5"></path></svg>Layers <span id="layer-count"></span></summary>
             <div class="category-list" id="category-list" role="group" aria-label="Filter overlay layers"></div>
           </details>
+        </div>
         </div>
         <div class="preview-wrap">
           <div class="empty-state" id="preview-empty">
@@ -934,11 +1245,24 @@
           </div>
           <canvas id="page-canvas" tabindex="0" aria-label="OCR page with region overlays"></canvas>
         </div>
+        <div class="page-controls" id="page-controls">
+          <button class="icon-button" id="previous-page" type="button" aria-label="Previous page" title="Previous page" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg>
+          </button>
+          <span class="page-count" id="page-count">No pages</span>
+          <button class="icon-button" id="next-page" type="button" aria-label="Next page" title="Next page" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
+          </button>
+        </div>
       </article>
       <div class="split-handle" id="split-handle" role="separator" aria-orientation="vertical" aria-label="Resize panes" tabindex="0"></div>
-      <article class="card output-card">
+      <article class="card output-card" aria-label="Document output">
         <div class="card-head">
-          <span class="card-title">Document output</span>
+          <div class="tabs" role="tablist" aria-label="Output views">
+            <button class="tab" role="tab" type="button" aria-selected="true" aria-controls="panel-rendered" id="tab-rendered">Text output</button>
+            <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-visual" id="tab-visual" tabindex="-1">Visual</button>
+            <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-markdown" id="tab-markdown" tabindex="-1">Markdown</button>
+          </div>
           <div class="downloads">
             <button class="download icon-only" id="copy-icon" type="button"
               aria-label="Copy" title="Copy the current view" disabled>
@@ -961,19 +1285,13 @@
               </div>
             </details>
             <details class="action-menu">
-              <summary class="download">Download</summary>
+              <summary class="download primary-action"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m-5-5 5 5 5-5M5 20h14"></path></svg>Download</summary>
               <div class="action-popover">
                 <a class="download" id="download-markdown" aria-disabled="true">Markdown</a>
                 <a class="download" id="download-json" aria-disabled="true">Result JSON</a>
               </div>
             </details>
             <span class="copy-status" id="copy-status" role="status" aria-live="polite" aria-atomic="true"></span>
-            <div class="doc-metrics" id="doc-metrics" hidden>
-              <span class="metric" id="metric-time" title="Backend processing time"></span>
-              <span class="metric" id="metric-pages" title="Pages"></span>
-              <span class="metric" id="metric-chars" title="Extracted characters"></span>
-              <span class="metric" id="metric-size" title="Source file size"></span>
-            </div>
             <div class="feedback" id="feedback" hidden>
               <button class="feedback-button" id="feedback-up" type="button" aria-pressed="false"
                 aria-label="Report this result as good" title="Result looks right">
@@ -1016,16 +1334,11 @@
             </div>
           </div>
         </div>
-        <div class="tabs" role="tablist" aria-label="Output views">
-          <button class="tab" role="tab" type="button" aria-selected="true" aria-controls="panel-rendered" id="tab-rendered">Text output</button>
-          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-visual" id="tab-visual" tabindex="-1">Visual</button>
-          <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-markdown" id="tab-markdown" tabindex="-1">Markdown</button>
-        </div>
         <div class="tab-panel active empty-panel" role="tabpanel" id="panel-rendered" aria-labelledby="tab-rendered">
           <div class="rendered-toolbar" id="rendered-toolbar" hidden>
-            <span class="refining-note" role="status" aria-live="polite">Refining layout</span>
+            <span class="refining-note" id="refining-note" role="status" aria-live="polite">Refining layout</span>
             <button class="confidence-toggle" id="sections-toggle" type="button" aria-pressed="true">Sections</button>
-            <button class="confidence-toggle" id="confidence-toggle" type="button" aria-pressed="false" aria-label="Turn provider confidence highlights on">Confidence</button>
+            <button class="confidence-toggle" id="confidence-toggle" type="button" aria-pressed="true" aria-label="Turn provider confidence highlights off">Confidence</button>
           </div>
           <div class="rendered-view sections-view" id="rendered-view">
             <div class="empty-state"><strong>Ready to extract</strong>Choose a document or public example to begin.</div>
@@ -1092,10 +1405,15 @@
       <strong id="confidence-inspector-score"></strong>
       <span id="confidence-inspector-source"></span>
     </div>
-    <footer class="credit">Built by <strong>Aman Behera</strong> · <a href="mailto:aman.behera@hilabs.com">Contact</a></footer>
   </main>
 
   <script>
+    function viewPreference(name) {
+      try { return localStorage.getItem(`ocr-view-${name}`) !== "off"; } catch { return true; }
+    }
+    function saveViewPreference(name, on) {
+      try { localStorage.setItem(`ocr-view-${name}`, on ? "on" : "off"); } catch {}
+    }
     const state = {
       response: null,
       pageIndex: 0,
@@ -1117,13 +1435,14 @@
       recoveryRequestId: null,
       recoveryController: null,
       recoverySequence: 0,
-      confidenceReview: false,
+      confidenceReview: viewPreference("confidence"),
       activeEvidenceId: null,
       pinnedConfidence: null,
       inspectorAnchor: null,
       renderedMarkdown: null,
       renderedMarkdownSessionId: null,
-      renderedMarkdownRevision: null
+      renderedMarkdownRevision: null,
+      refinementPending: false
     };
     const byId = (id) => document.getElementById(id);
     const INLINE_MAX_GAP_HEIGHTS = 3;
@@ -1164,9 +1483,23 @@
       const file = fileInput.files[0];
       state.selectedFile = file || null;
       state.selectedExample = null;
-      byId("file-name").textContent = file ? file.name : "Choose one image, PDF, or TIFF";
+      byId("file-name").textContent = file ? file.name : "Choose or drop a PDF, PNG, JPG, TIFF, WEBP or BMP";
+      byId("file-field").classList.toggle("has-file", Boolean(file));
       byId("parse-button").disabled = !file;
       byId("clear-button").disabled = !file && !state.response;
+    });
+
+    const fileField = byId("file-field");
+    fileField.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      fileField.classList.add("dragging");
+    });
+    fileField.addEventListener("dragleave", () => fileField.classList.remove("dragging"));
+    fileField.addEventListener("drop", (event) => {
+      event.preventDefault();
+      fileField.classList.remove("dragging");
+      fileInput.files = event.dataTransfer.files;
+      fileInput.dispatchEvent(new Event("change"));
     });
 
     function hasSelection() {
@@ -1174,7 +1507,11 @@
     }
 
     document.querySelectorAll("[data-example]").forEach((button) => {
-      button.addEventListener("click", () => handleExample(button));
+      button.addEventListener("click", () => {
+        handleExample(button);
+        button.setAttribute("aria-busy", "true");
+        form.requestSubmit();
+      });
     });
 
     // The example already lives on the server, so name it instead of downloading its
@@ -1230,6 +1567,7 @@
       if (file) body.append("file", file);
       let cleanupFailed = false;
       let timerOutcome = "error";
+      let payload = null;
       try {
         if (previousSessionId) {
           try {
@@ -1239,10 +1577,10 @@
           }
         }
         const query = example
-          ? `?defer_presentation=1&compact=1&example=${encodeURIComponent(example)}`
-          : "?defer_presentation=1&compact=1";
+          ? `?defer_presentation=1&defer_refinement=1&compact=1&example=${encodeURIComponent(example)}`
+          : "?defer_presentation=1&defer_refinement=1&compact=1";
         const response = await fetch(`/api/process${query}`, { method: "POST", body });
-        const payload = await response.json();
+        payload = await response.json();
         if (!response.ok) throw new Error(payload.detail || "The document could not be parsed");
         if (resultRequest !== state.resultRequest) return;
         state.response = payload;
@@ -1250,7 +1588,9 @@
         state.pageIndex = 0;
         state.selectedRegionKey = null;
         resetHiddenKinds();
-        renderResult();
+        // The presentation draft and any pending LLM refinement are fetched
+        // separately below, once refinement (if any) has finished.
+        renderResult({ skipPresentation: payload.refinement?.status === "pending" });
         timerOutcome = "complete";
         const cleanupNote = cleanupFailed ? cleanupWarning : "";
         const pages = payload.result.pages.length;
@@ -1271,6 +1611,15 @@
           setBusy(false);
         }
       }
+      if (payload?.refinement?.status === "pending" && resultRequest === state.resultRequest) {
+        const refined = await loadRefinement(payload);
+        if (resultRequest === state.resultRequest && state.response?.session_id === payload.session_id) {
+          // When the refinement request itself fails loadRefinement hands back the same
+          // OCR-only payload; keep the selection and run the deferred presentation fetch.
+          if (refined !== payload) applyRevisionResponse(refined);
+          else loadPresentation(payload);
+        }
+      }
     });
 
     byId("clear-button").addEventListener("click", async () => {
@@ -1280,13 +1629,14 @@
       fileInput.value = "";
       state.selectedFile = null;
       state.selectedExample = null;
-      byId("file-name").textContent = "Choose one image, PDF, or TIFF";
+      byId("file-name").textContent = "Choose or drop a PDF, PNG, JPG, TIFF, WEBP or BMP";
       byId("parse-button").disabled = true;
       resetResult();
       resetClientTimer();
       try {
         if (sessionId) await deleteSession(sessionId);
-        setStatus("Session cleared from local temporary storage.", false, "success");
+        // A cleared view needs no confirmation; only a failed cleanup is worth a message.
+        byId("activity-line").hidden = true;
       } catch {
         setStatus(
           "The local view was cleared, but the temporary server session could not be removed. It will be cleared when the server stops.",
@@ -1354,9 +1704,16 @@
     });
     byId("keep-unresolved").addEventListener("click", () => handleCorrection("keep_unresolved"));
     byId("confidence-toggle").addEventListener("click", handleConfidenceReview);
-    byId("sections-toggle").addEventListener("click", () => {
-      const active = byId("rendered-view").classList.toggle("sections-view");
+    applyConfidenceReview();
+    function applySections(active) {
+      byId("rendered-view").classList.toggle("sections-view", active);
       byId("sections-toggle").setAttribute("aria-pressed", String(active));
+    }
+    applySections(viewPreference("sections"));
+    byId("sections-toggle").addEventListener("click", () => {
+      const active = !byId("rendered-view").classList.contains("sections-view");
+      applySections(active);
+      saveViewPreference("sections", active);
     });
     (() => {
       const handle = byId("split-handle");
@@ -1662,7 +2019,7 @@
         && currentRegions().some((item) => item.id === region.id)
       );
       button.hidden = !selectable;
-      button.disabled = !selectable || state.rereadBusy;
+      button.disabled = !selectable || state.rereadBusy || state.refinementPending;
     }
 
     function updateReviewActions(region) {
@@ -1695,13 +2052,13 @@
       byId("review-alternative").hidden = structuredTable || alternatives.length === 0;
       byId("accept-alternative").hidden = structuredTable || alternatives.length === 0;
       controls.querySelectorAll("button, select, textarea").forEach((control) => {
-        control.disabled = state.rereadBusy;
+        control.disabled = state.rereadBusy || state.refinementPending;
       });
       byId("edit-region").hidden = structuredTable || editing;
       byId("edit-region").setAttribute("aria-expanded", String(editing));
       byId("keep-unresolved").hidden = !pending || editing;
-      byId("review-alternative").disabled = state.rereadBusy || editing;
-      byId("accept-alternative").disabled = state.rereadBusy || editing;
+      byId("review-alternative").disabled = state.rereadBusy || state.refinementPending || editing;
+      byId("accept-alternative").disabled = state.rereadBusy || state.refinementPending || editing;
       byId("save-region-edit").textContent = state.rereadBusy ? "Saving…" : "Save changes";
     }
 
@@ -1805,7 +2162,7 @@
       state.clientTimerStartedAt = null;
       byId("client-timer").dataset.state = outcome;
       byId("client-timer-state").textContent = outcome === "complete" ? "Complete" : "Stopped on error";
-      setElapsedChip(outcome);
+      setElapsedChip(outcome === "complete" ? "idle" : outcome);
     }
 
     function resetClientTimer() {
@@ -1838,6 +2195,7 @@
       });
       document.querySelectorAll("[data-example]").forEach((button) => {
         button.disabled = busy;
+        if (!busy) button.removeAttribute("aria-busy");
       });
       byId("feedback").hidden = busy || !state.response;
       if (busy) showParsingLoader(message);
@@ -1867,7 +2225,7 @@
       status.className = `status-line visible${isError ? " error" : tone ? ` ${tone}` : ""}`;
     }
 
-    function renderResult() {
+    function renderResult(options = {}) {
       document.body.classList.add("has-document");
       const payload = state.response;
       const result = payload.result;
@@ -1882,13 +2240,82 @@
       renderMetrics(payload);
       resetFeedback();
       renderPage();
-      loadPresentation(payload);
+      // While the LLM refinement is still pending, the presentation draft is fetched
+      // once refinement finishes and re-renders anyway, so skip the extra round trip.
+      if (!options.skipPresentation) loadPresentation(payload);
+    }
+
+    // Disables editing, feedback, and rereads while a deferred refinement is pending
+    // so they cannot race the background job that is still mutating the session.
+    function setRefinementPending(pending) {
+      state.refinementPending = pending;
+      byId("feedback").classList.toggle("refinement-pending", pending);
+      byId("review-actions").classList.toggle("refinement-pending", pending);
+      setRefiningNote(pending, "Refining with LLM…");
+      updateRereadAction(selectedRegion());
+      updateReviewActions(selectedRegion());
+    }
+
+    function setRefiningNote(active, text) {
+      const toolbar = byId("rendered-toolbar");
+      const note = byId("refining-note");
+      if (active) note.textContent = text;
+      toolbar.classList.toggle("refining", active);
+    }
+
+    // Crops the LLM has already answered replace their OCR text while the rest of its
+    // reply streams; the final result re-renders the page from the server as before.
+    function applyRefinementPreview(pages) {
+      Object.entries(pages || {}).forEach(([pageNumber, texts]) => {
+        const section = renderedView.querySelector(`.rendered-page[data-page-number="${pageNumber}"]`);
+        if (!section) return;
+        Object.entries(texts).forEach(([regionId, text]) => {
+          const matches = [...section.querySelectorAll("[data-evidence-id]")].filter((element) =>
+            element.dataset.evidenceId === regionId || element.dataset.evidenceId.startsWith(`${regionId}-word-`));
+          if (!matches.length || matches[0].dataset.preview === text) return;
+          matches.slice(1).forEach((element) => element.remove());
+          matches[0].textContent = text;
+          matches[0].dataset.preview = text;
+          matches[0].classList.add("refinement-preview");
+        });
+      });
+    }
+
+    async function loadRefinement(payload) {
+      if (payload.refinement?.status !== "pending") return payload;
+      setRefinementPending(true);
+      const previewTimer = window.setInterval(async () => {
+        try {
+          const preview = await fetch(`/api/sessions/${payload.session_id}/refinement/preview`);
+          if (preview.ok && state.refinementPending && state.response?.session_id === payload.session_id) {
+            applyRefinementPreview((await preview.json()).pages);
+          }
+        } catch {}
+      }, 600);
+      try {
+        const response = await fetch(
+          `/api/sessions/${payload.session_id}/refinement?compact=1`
+        );
+        if (!response.ok) throw new Error("Refinement unavailable");
+        // Even a failed refinement advances the session revision; keep the server's copy
+        // so later edits and feedback address the revision it holds.
+        // The OCR result stands on its own, so a failed refinement is not announced.
+        const refined = await response.json();
+        if (refined.refinement?.status !== "complete") console.warn("LLM refinement did not complete", refined.refinement);
+        return refined;
+      } catch (error) {
+        console.warn("LLM refinement unavailable", error);
+        return payload;
+      } finally {
+        window.clearInterval(previewTimer);
+        setRefinementPending(false);
+      }
     }
 
     async function loadPresentation(payload) {
       if (payload.presentation?.status !== "pending") return;
       const toolbar = byId("rendered-toolbar");
-      toolbar.classList.add("refining");
+      setRefiningNote(true, "Refining layout");
       try {
         const response = await fetch(`/api/sessions/${payload.session_id}/presentation`);
         if (!response.ok) return;
@@ -1933,8 +2360,9 @@
 
     function resetFeedback() {
       state.feedbackSent = {};
+      state.feedbackIds = {};
       byId("feedback").hidden = !state.response;
-      byId("feedback-up").disabled = !state.response;
+      byId("feedback-up").disabled = !state.response || state.refinementPending;
       byId("feedback-up").setAttribute("aria-pressed", "false");
       byId("feedback-problem").open = false;
       byId("feedback-down").removeAttribute("data-sent");
@@ -1957,7 +2385,7 @@
     const pendingFeedback = new Set();
 
     async function sendFeedback(verdict, reason = null, note = "", keepOpen = false) {
-      if (!state.response) return;
+      if (!state.response || state.refinementPending) return;
       const sessionId = state.response.session_id;
       const page = state.response.result?.pages?.[state.pageIndex];
       const key = `${state.response.revision}:${page?.page_number}`;
@@ -1978,15 +2406,18 @@
               revision: state.response.revision,
               page_number: page?.page_number ?? null,
               filename: state.response.filename ?? null,
+              amends: verdict === "problem" ? state.feedbackIds?.[key] ?? null : null,
             }),
           }
         );
         if (!response.ok) throw new Error(`Feedback failed (${response.status})`);
+        const saved = await response.json();
         if (state.response?.session_id !== sessionId) return;
         state.feedbackSent[key] = verdict;
+        state.feedbackIds = { ...state.feedbackIds, [key]: verdict === "problem" ? saved.id : null };
         renderFeedback();
         if (!keepOpen) byId("feedback-problem").open = false;
-        setCopyStatus("Feedback saved with the original input and output.");
+        setCopyStatus(keepOpen ? "Thanks. Tell us what went wrong, or close this." : "Thanks, your feedback was saved.");
       } catch (error) {
         setCopyStatus(error.message, true);
       } finally {
@@ -2062,7 +2493,11 @@
           card.className = "section-card";
           const label = document.createElement("span");
           label.className = "section-label";
-          label.textContent = `${index + 1} · ${String(region?.kind || "section").replaceAll(/[-_]/g, " ")}`;
+          const kind = String(region?.kind || "section").replaceAll(/[-_]/g, " ");
+          const number = document.createElement("span");
+          number.className = "section-number";
+          number.textContent = String(index + 1);
+          label.append(number, kind.charAt(0).toUpperCase() + kind.slice(1));
           const target = block.querySelector("[data-evidence-note]") || (block.matches("[data-evidence-id]") ? block : block.querySelector("[data-evidence-id]"));
           if (target) {
             const source = document.createElement("button");
@@ -2072,6 +2507,8 @@
             const confidence = displayConfidence(region);
             source.textContent = note ? (note.refined ? "Refined" : "Check source")
               : validConfidence(confidence.value) ? formatConfidence(confidence.value) : "Source";
+            source.dataset.level = note ? (note.refined ? "refined" : "medium")
+              : validConfidence(confidence.value) ? confidenceLevel(confidence.value) : "unknown";
             source.title = note?.text || (validConfidence(confidence.value)
               ? `Confidence: ${formatConfidence(confidence.value)}. Locate source.` : "Locate source");
             source.addEventListener("click", (event) => {
@@ -2105,6 +2542,11 @@
 
     function handleConfidenceReview() {
       state.confidenceReview = !state.confidenceReview;
+      saveViewPreference("confidence", state.confidenceReview);
+      applyConfidenceReview();
+    }
+
+    function applyConfidenceReview() {
       const toggle = byId("confidence-toggle");
       toggle.setAttribute("aria-pressed", String(state.confidenceReview));
       toggle.setAttribute(
@@ -2167,6 +2609,9 @@
       list.setAttribute("aria-label", `${lines.length} lines of Markdown`);
       lines.forEach((line) => {
         const item = document.createElement("li");
+        // Light Markdown highlighting: headings, table rows, list items and quotes.
+        item.dataset.kind = /^#{1,6}\s/.test(line) ? "heading" : /^\s*\|/.test(line) ? "table"
+          : /^\s*([-*+]|\d+[.)])\s/.test(line) ? "list" : /^\s*>/.test(line) ? "quote" : "";
         const code = document.createElement("code");
         code.textContent = line || "\u00a0";
         item.append(code);
@@ -2304,6 +2749,46 @@
     }
 
     const TEXT_LAYER_NOTE = "Exact text from the PDF text layer · no recognition score";
+    // The review UI names the routing, not the vendor; exports keep raw provenance.
+    const withoutModelNames = (key, value) => typeof value === "string" && /qwen/i.test(value) ? "LLM" : value;
+    // Technical details stay complete but readable: per-token scores are counted, class
+    // scores keep their top three, and long floats are rounded. Downloads keep everything.
+    function readableDetail(key, value) {
+      if (key === "tokens" && Array.isArray(value)) return `${value.length} token scores`;
+      if (key === "class_scores" && value && typeof value === "object") {
+        return Object.entries(value).sort((a, b) => b[1] - a[1]).slice(0, 3)
+          .map(([name, score]) => `${name.replaceAll("_", " ")} ${score.toFixed(2)}`).join(" · ");
+      }
+      if (typeof value === "number" && !Number.isInteger(value)) return Number(value.toFixed(3));
+      return withoutModelNames(key, value);
+    }
+
+    // Nested evidence as labelled rows ("generation › token score  0.978"), not JSON.
+    function renderDetails(target, value) {
+      const rows = [];
+      const walk = (item, path) => {
+        if (item && typeof item === "object" && (!Array.isArray(item) || item.some((entry) => entry && typeof entry === "object"))) {
+          Object.entries(item).forEach(([key, child]) => walk(child, [...path, key]));
+        } else rows.push([path, Array.isArray(item) ? item.join(", ") : item]);
+      };
+      if (value != null) walk(JSON.parse(JSON.stringify(value, readableDetail)), []);
+      const kept = rows.filter(([, item]) => item !== "" && item != null);
+      if (!kept.length) {
+        target.textContent = "-";
+        return;
+      }
+      target.replaceChildren(...kept.map(([path, item]) => {
+        const row = document.createElement("span");
+        row.className = "detail-row";
+        const key = document.createElement("span");
+        key.className = "detail-key";
+        key.textContent = path.map((part) => /^\d+$/.test(part) ? `#${Number(part) + 1}` : part.replaceAll("_", " ")).join(" › ");
+        const text = document.createElement("span");
+        text.textContent = item === true ? "Yes" : item === false ? "No" : String(item);
+        row.append(key, text);
+        return row;
+      }));
+    }
 
     function confidenceScope(region) {
       const kind = String(region?.kind || "").toLowerCase();
@@ -2428,10 +2913,10 @@
         ? TEXT_LAYER_NOTE
         : percent === "Unknown"
         ? target.dataset.confidenceProvider.startsWith("qwen/")
-          ? "Routed to LLM · Confidence unavailable"
+          ? "Routed to LLM"
           : "Confidence: Not available"
         : `Confidence: ${percent}`;
-      byId("confidence-inspector-source").textContent = [target.dataset.confidenceScope, target.dataset.evidenceNote].filter(Boolean).join(" · ");
+      byId("confidence-inspector-source").textContent = "";
       renderedView.querySelector(".confidence-active")?.classList.remove("confidence-active");
       target.classList.add("confidence-active");
       inspector.hidden = false;
@@ -2500,7 +2985,7 @@
       byId("confidence-inspector-score").textContent = validConfidence(confidence.value)
         ? `Confidence: ${formatConfidence(confidence.value)}`
         : confidence.note || `${confidence.label}: Not available`;
-      byId("confidence-inspector-source").textContent = confidence.scope;
+      byId("confidence-inspector-source").textContent = "";
       inspector.hidden = false;
       const inspectorBox = inspector.getBoundingClientRect();
       inspector.style.left = `${Math.max(8, Math.min(
@@ -2539,6 +3024,9 @@
       }
       if (textLayerSource(region)) {
         return { label: "Text source", value: null, note: TEXT_LAYER_NOTE, scope: "text layer" };
+      }
+      if (region?.text_provenance?.method === "qwen_crop_refinement") {
+        return { label: "Confidence", value: null, note: "Routed to LLM", scope: "region" };
       }
       if (semanticKind(region) === "control") {
         return {
@@ -3710,6 +4198,7 @@
       const total = Math.max(pages.length, imageUrls.length);
       const hasPage = state.pageIndex >= 0 && state.pageIndex < total;
       byId("page-count").textContent = hasPage ? `${state.pageIndex + 1} / ${total}` : "No pages";
+      byId("page-controls").hidden = total < 2;
       byId("previous-page").disabled = !hasPage || state.pageIndex === 0;
       byId("next-page").disabled = !hasPage || state.pageIndex >= total - 1;
       state.selectedRegionKey = null;
@@ -3953,20 +4442,20 @@
       context.clearRect(0, 0, canvas.width, canvas.height);
       context.drawImage(state.image, 0, 0);
       const selectedIndex = selectedRegionIndex();
-      context.lineWidth = Math.max(1.5, canvas.width / 1100);
+      const line = Math.max(1.5, canvas.width / 1100);
       currentOverlays().forEach((region, index) => {
         const box = region.bounding_box;
         const selected = index === selectedIndex;
+        const hovered = regionKey(region) === state.hoveredRegionKey;
         const color = selected ? actionColor : regionColor(region);
         const width = box.right - box.left;
         const height = box.bottom - box.top;
         // A soft fill per block type reads at a glance; tags on every box hid the page.
-        if (selected) {
-          context.globalAlpha = 0.16;
-          context.fillStyle = color;
-          context.fillRect(box.left, box.top, width, height);
-        }
-        context.globalAlpha = selected ? 1 : 0.5;
+        context.globalAlpha = selected ? 0.18 : hovered ? 0.14 : 0.06;
+        context.fillStyle = color;
+        context.fillRect(box.left, box.top, width, height);
+        context.globalAlpha = selected || hovered ? 1 : 0.7;
+        context.lineWidth = selected || hovered ? line * 1.6 : line;
         context.strokeStyle = color;
         context.strokeRect(box.left, box.top, width, height);
         context.globalAlpha = 1;
@@ -4015,6 +4504,8 @@
       const key = region ? regionKey(region) : null;
       if (key === state.hoveredRegionKey) return;
       state.hoveredRegionKey = key;
+      canvas.style.cursor = region ? "pointer" : "crosshair";
+      drawPage();
       linkTextTo(region?.text_provenance?.region_id || region?.id || null);
       if (!region) {
         if (!state.pinnedConfidence) hideConfidenceInspector();
@@ -4025,6 +4516,7 @@
 
     canvas.addEventListener("pointerleave", () => {
       state.hoveredRegionKey = null;
+      drawPage();
       linkTextTo(null);
       if (!state.pinnedConfidence) hideConfidenceInspector();
     });
@@ -4049,9 +4541,19 @@
         const button = document.createElement("button");
         button.type = "button";
         button.className = `region-button${index === selectedIndex ? " active" : ""}`;
+        button.style.setProperty("--category-color", regionColor(region));
         const label = overlayCategoryLabel(categoryKey(region));
-        button.textContent = `${index + 1} ${label}: ${region.text || "No text"}`;
-        button.title = `Region ${index + 1}: ${label}`;
+        const number = document.createElement("span");
+        number.className = "region-index";
+        number.textContent = String(index + 1);
+        const kind = document.createElement("span");
+        kind.className = "region-kind";
+        kind.textContent = label;
+        const snippet = document.createElement("span");
+        snippet.className = "region-snippet";
+        snippet.textContent = region.text || "No text";
+        button.append(number, kind, snippet);
+        button.setAttribute("aria-label", `Region ${index + 1}, ${label}: ${region.text || "No text"}`);
         button.addEventListener("click", () => selectRegion(index));
         button.addEventListener("focus", () => {
           const box = button.getBoundingClientRect();
@@ -4062,6 +4564,11 @@
         });
         return button;
       }));
+      // Keep the selected row visible by scrolling the list only, never the window.
+      const active = list.querySelector(".active");
+      if (active && (active.offsetTop < list.scrollTop || active.offsetTop + active.offsetHeight > list.scrollTop + list.clientHeight)) {
+        list.scrollTo({ top: active.offsetTop - list.clientHeight / 3, behavior: "smooth" });
+      }
     }
 
     function selectRegion(index, toggle = true) {
@@ -4098,21 +4605,31 @@
       drawPage();
     }
 
+    function readableKind(value) {
+      const text = String(value || "").replaceAll(/[-_]/g, " ");
+      return text.charAt(0).toUpperCase() + text.slice(1);
+    }
+
     function updateInspector(region) {
       if (!state.rereadBusy) setRereadStatus("");
       updateRereadAction(region);
       updateReviewActions(region);
       byId("inspector").classList.toggle("empty", !region);
-      byId("region-kind").textContent = region?.kind || "None selected";
+      byId("region-kind").textContent = region ? readableKind(region.kind) : "None selected";
       // The layout reader names what it thinks a region is; show it when it says.
       const category = region?.text_provenance?.layout_category;
       byId("region-category-row").hidden = !category;
-      byId("region-category").textContent = category || "-";
+      byId("region-category").textContent = category ? readableKind(category) : "-";
       const confidence = displayConfidence(region);
       byId("region-confidence-label").textContent = "Confidence";
       byId("region-confidence").textContent = validConfidence(confidence.value)
         ? formatConfidence(confidence.value)
         : confidence.note || "Not available";
+      byId("region-confidence").dataset.level = validConfidence(confidence.value) ? confidenceLevel(confidence.value) : "unknown";
+      if (region && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        byId("inspector").animate([{ opacity: 0.4, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }],
+          { duration: 180, easing: "cubic-bezier(0.2, 0, 0, 1)" });
+      }
       byId("region-provider").textContent = String(region?.provider || "").startsWith("qwen/") ? "Routed to LLM" : region?.provider || "-";
       const detectorSequence = region?.text_provenance?.reading_order_method === "detector_sequence";
       const spatialOrder = region?.structure?.presentation_order_method === "spatial_sort";
@@ -4123,10 +4640,10 @@
       const box = region?.bounding_box;
       byId("region-box").textContent = box ? `${box.left}, ${box.top}, ${box.right}, ${box.bottom} px` : "-";
       byId("region-resolution").textContent = region?.resolution || "-";
-      byId("region-provenance").textContent = region?.text_provenance ? JSON.stringify(region.text_provenance) : "-";
+      renderDetails(byId("region-provenance"), region?.text_provenance);
       byId("region-alternatives").textContent = alignedAlternatives(region);
-      byId("region-raw-alternatives").textContent = region?.alternatives?.length ? JSON.stringify(region.alternatives) : "-";
-      byId("region-structure").textContent = region?.structure ? JSON.stringify(region.structure) : "-";
+      renderDetails(byId("region-raw-alternatives"), region?.alternatives);
+      renderDetails(byId("region-structure"), region?.structure);
       byId("region-text").textContent = region?.text || "Click an overlay to inspect its evidence.";
       byId("download-crop").disabled = !region || !state.image;
       cropCanvas.style.borderColor = region ? regionColor(region) : "";
@@ -4255,7 +4772,7 @@
       state.pageImages.clear();
       state.locateId = null;
       state.hiddenKinds.clear();
-      state.confidenceReview = false;
+      state.confidenceReview = viewPreference("confidence");
       state.activeEvidenceId = null;
       state.pinnedConfidence = null;
       byId("confidence-inspector").hidden = true;
@@ -4294,9 +4811,7 @@
       byId("rendered-toolbar").hidden = true;
       byId("rendered-toolbar").classList.remove("refining");
       byId("confidence-toggle").disabled = false;
-      byId("confidence-toggle").setAttribute("aria-pressed", "false");
-      byId("confidence-toggle").setAttribute("aria-label", "Turn provider confidence highlights on");
-      byId("panel-rendered").classList.remove("confidence-review");
+      applyConfidenceReview();
       byId("panel-rendered").classList.add("empty-panel");
       setEmptyContent("rendered-view", "Ready to extract", "Choose a document or public example to begin.");
       setEmptyContent("markdown-source", "Ready to extract", "Exact downloaded Markdown will appear here.");
@@ -4330,11 +4845,12 @@
           resetClientTimer();
           resetFeedback();
           setBusy(false);
-          if (!hasSelection()) byId("file-name").textContent = "Choose one image, PDF, or TIFF";
+          if (!hasSelection()) byId("file-name").textContent = "Choose or drop a PDF, PNG, JPG, TIFF, WEBP or BMP";
           const url = new URL(location.href);
           url.searchParams.delete("session");
           history.replaceState(null, "", url.pathname + url.search + url.hash);
-          setStatus("This temporary document session has expired. Please upload or parse it again.", true);
+          // An expired session simply returns to the start screen; there is nothing to fix.
+          byId("activity-line").hidden = true;
         } else if (!response.ok) {
           throw new Error("Session check failed");
         } else if (unverifiedSession === session) {
@@ -4360,7 +4876,13 @@
       setBusy(true, "Loading document...");
       try {
         const response = await fetch(`/api/sessions/${encodeURIComponent(session)}?compact=1`);
-        if (!response.ok) throw new Error("This temporary document session has expired. Please upload it again.");
+        if (response.status === 404) {
+          // A link to an expired session opens the start screen, not an error.
+          history.replaceState(null, "", location.pathname);
+          byId("activity-line").hidden = true;
+          return;
+        }
+        if (!response.ok) throw new Error("The document could not be loaded. Please upload it again.");
         state.response = await response.json();
         resetHiddenKinds();
         renderResult();

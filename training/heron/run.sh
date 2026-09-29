@@ -17,6 +17,12 @@ case $1 in
   # Checkpoints are chosen on validation splits only; `eval` (test) runs once, on the chosen one.
   select) $PY eval_heron.py --model ${2:-original} --eval $ROOT/labels_naf_valid.json=$ROOT/naf $ROOT/labels_signverod_val.json=$ROOT/signverod \
            $ROOT/labels_doclaynet_val.json=$ROOT/doclaynet --output $ROOT/select_${3:-original}.json ;;
+  # Checkbox fine-tune: synthetic pen marks on CommonForms plus NAF's real ticked boxes (box
+  # plus paired label, as Heron draws them); every other class from Heron itself.
+  prep-checkboxes) HF_HUB_OFFLINE=0 $PY prep_marks.py $ROOT ${2:-3000} && $PY prep_naf.py $ROOT checkboxes ;;
+  train-checkboxes) $PY train_heron.py --original-classes --decoder-only --tile-crops 550 \
+           --train $ROOT/labels_marks_train.json=$ROOT/marks $ROOT/labels_naf_checkboxes_train.json=$ROOT/naf \
+           --eval $ROOT/labels_marks_valid.json=$ROOT/marks --epochs 4 --lr 1e-5 --output $ROOT/runs/checkboxes-v1 "${@:3}" ;;
   eval) $PY eval_heron.py --model ${2:-original} --eval $ROOT/labels_naf_test.json=$ROOT/naf $ROOT/labels_signverod_val.json=$ROOT/signverod \
            $ROOT/labels_doclaynet_test.json=$ROOT/doclaynet $ROOT/labels_kvp10k_test.json=$ROOT/kvp10k --output $ROOT/eval_${3:-original}.json ;;
 esac

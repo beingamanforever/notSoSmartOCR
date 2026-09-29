@@ -13,6 +13,7 @@ import math
 import threading
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from functools import cache
 from typing import Any
 
@@ -48,6 +49,25 @@ NEW_LABELS = frozenset({"signature", "hand_mark"})
 
 Detection = dict[str, Any]
 
+
+@contextmanager
+def _full_fp32(torch):
+    """Heron at full fp32 on a GPU, where Falcon turns on TF32 process-wide.
+
+    TF32 matmuls and convolutions are what made GPU and CPU proposals differ; with them
+    off, 415 of 416 proposals on 30 OmniDocBench pages matched CPU exactly (scores within
+    3e-5) at 25x the speed. The Falcon service runs layout under its engine lock, so no
+    other kernel sees the switch.
+    """
+    precision = torch.get_float32_matmul_precision()
+    convolutions = torch.backends.cudnn.allow_tf32
+    torch.set_float32_matmul_precision("highest")
+    torch.backends.cudnn.allow_tf32 = False
+    try:
+        yield
+    finally:
+        torch.set_float32_matmul_precision(precision)
+        torch.backends.cudnn.allow_tf32 = convolutions
 
 def resolve_layout(
     detections: Sequence[Detection],
@@ -492,7 +512,7 @@ class HeronTableDetector:
 
             def run(image: Image.Image) -> list[Detection]:
                 inputs = processor(images=[image], return_tensors="pt").to(device)
-                with torch.inference_mode():
+                with torch.inference_mode(), _full_fp32(torch):
                     outputs = model(**inputs)
                 # Heron's targets assign one class per query. Flattened focal top-k
                 # emits several alternative labels for one box and drops other queries.

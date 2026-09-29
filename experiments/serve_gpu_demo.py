@@ -17,7 +17,7 @@ from ocr_pipeline.demo import (
     create_app,
 )
 from ocr_pipeline.markdown_refinement import refine_document
-from ocr_pipeline.openrouter import budgeted_transport
+from ocr_pipeline.openrouter import ReplyCache, budgeted_transport
 from ocr_pipeline.orientation import (
     OFFICIAL_TEMPERATURE,
     OFFICIAL_UPRIGHT_PRIOR,
@@ -92,12 +92,19 @@ def create_verified_app(
     if args.qwen_crops:
         app_options["crop_refiner"] = partial(
             refine_document,
-            workers=args.page_workers,
+            workers=args.qwen_workers,
             zero_data_retention=not args.qwen_allow_non_zdr,
-            transport=partial(
-                budgeted_transport,
-                database=args.qwen_spend_database,
-                budget_usd=args.qwen_budget_usd,
+            # Re-parsed pages (every rerun of an example) reuse their earlier reply.
+            transport=ReplyCache(
+                partial(
+                    budgeted_transport,
+                    database=args.qwen_spend_database,
+                    budget_usd=args.qwen_budget_usd,
+                    # Worst case per Qwen 3.7 Flash request at 16k output tokens is about
+                    # $0.003; the default $0.25 hold left by a killed request locked $4.50
+                    # of a $5 budget while real spend was $0.08.
+                    reserve_usd=0.01,
+                )
             ),
         )
     if args.katex_asset_root is not None:
@@ -127,6 +134,16 @@ def _parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=4,
         help="Concurrent page requests; the GPU service controls model execution",
+    )
+    parser.add_argument(
+        "--qwen-workers",
+        type=_positive_int,
+        default=16,
+        help=(
+            "Pages refined concurrently. Each page is its own independent request, so "
+            "this changes only latency; at the page-worker count a 20-page PDF waited "
+            "through five sequential rounds of LLM calls"
+        ),
     )
     parser.add_argument(
         "--max-document-pages",

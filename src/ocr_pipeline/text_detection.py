@@ -21,7 +21,10 @@ _predictors: dict[str, object] = {}
 
 
 def detect_words(image_path: Path, device: str = "cuda") -> list[list[float]]:
-    """[left, top, right, bottom, detection score, recognition confidence] per word, in page pixels."""
+    """[left, top, right, bottom, detection score, recognition confidence, text] per word.
+
+    Boxes are in page pixels.
+    """
     import numpy as np
     from PIL import Image
 
@@ -51,13 +54,13 @@ def detect_words(image_path: Path, device: str = "cuda") -> list[list[float]]:
         except Exception as error:
             raise ReaderError("text_detection_failed", str(error)) from error
     words = [
-        (*word.geometry[0], *word.geometry[1], word.objectness_score, word.confidence)
+        (*word.geometry[0], *word.geometry[1], word.objectness_score, word.confidence, word.value)
         for block in result.blocks
         for line in block.lines
         for word in line.words
     ]
     return [
-        [x0 * width, y0 * height, x1 * width, y1 * height, float(score), float(confidence)]
-        for x0, y0, x1, y1, score, confidence in words
+        [x0 * width, y0 * height, x1 * width, y1 * height, float(score), float(confidence), value]
+        for x0, y0, x1, y1, score, confidence, value in words
         if x1 > x0 and y1 > y0
     ]
