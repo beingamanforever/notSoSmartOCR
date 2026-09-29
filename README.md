@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="artifacts/brand/notsosmartocr-logo.png" alt="Not So Smart OCR logo" width="120">
+
 # Not So Smart OCR
 
 **Document extraction you can inspect.**
@@ -12,12 +14,19 @@ Text · Tables · Handwriting · Formulas · Source-linked review
 
 ![Not So Smart OCR workbench](artifacts/demo/workbench.png)
 
+OCR turns text in images, PDFs, and scanned or handwritten documents into editable text.
+
+![Images, PDFs, and scanned documents converted to text with OCR](artifacts/demo/ocr-overview.png)
+
 ## Features
 
 - Extract text and structure from PDFs and images.
 - Inspect colored layout boxes and download full-resolution source crops.
 - Review formulas, tables, images, and detected checkbox states.
 - Explore text, visual, Markdown, and JSON views of the same evidence.
+- Select output to locate its source, inspect regional scores, and edit a transcription in a multiline editor with its crop alongside it.
+- Saved edits update Text output, Markdown, and JSON together while retaining the original reading in the evidence history.
+- Fit the full page, navigate multi-page documents, and use the responsive light or dark interface.
 - Save feedback with its image and result, retaining 1,000 records locally.
 
 ## Examples
@@ -36,7 +45,15 @@ Text · Tables · Handwriting · Formulas · Source-linked review
 | **Text and images** | **Printed mathematics** |
 | ![GSoC Final Evaluation with source-linked OCR output](artifacts/demo/gsoc-ui.png) | ![Scanned calculus formulas with detected regions and rendered math output](artifacts/demo/printed-math-ui.png) |
 
-Screenshots show actual output, including errors. Overlapping regions can still produce duplicates; handwriting, numeric fields, and reading order remain imperfect. Model scores are uncalibrated. Private documents and datasets are excluded.
+| Inspect a source region | Edit a transcription |
+| --- | --- |
+| ![Visual inspector with the source crop, transcription, and score provenance](artifacts/demo/visual-inspector.png) | ![Source-linked editing with an option to keep uncertain text unresolved](artifacts/demo/region-editing.png) |
+
+The workbench, academic paper, source-selection, and inspector screenshots were updated on 29 September 2026.
+Screenshots show actual output, including errors.
+Overlapping regions can still produce duplicates; handwriting, numeric fields, and reading order remain imperfect.
+Model scores are uncalibrated, and a hosted reread may not provide a recognition score.
+Private documents and datasets are excluded.
 
 ## Pipeline
 
@@ -45,12 +62,21 @@ flowchart LR
     A[PDF / image] --> B[Orientation]
     B --> C[Heron layout]
     C --> D[Falcon OCR crops]
-    D --> E[Canonical evidence]
-    E --> F[Text / Visual / Markdown / JSON]
-    F --> G[Review and feedback]
+    D --> E[Evidence checks]
+    E --> F[Optional crop refinement]
+    F --> G[Canonical evidence]
+    G --> H[Text / Visual / Markdown / JSON]
+    H --> I[Review and feedback]
 ```
 
-The configuration verified on 13 September 2026 uses DocTR and Tesseract OSD for orientation, Heron layout inside the native Falcon server, and complete-region Falcon OCR. It retains source pixels and canonical evidence, with local KaTeX for math. An additional app-level Heron proposal pass, TableFormer, Nemotron, and external crop refinement are optional and inactive in this configuration. The demo composition endpoint reports the configuration of each running service.
+The demo verified on 29 September 2026 uses docTR orientation and skew estimation, Heron layout inside the native Falcon server, complete-region Falcon OCR, and evidence checks.
+Optional Qwen3.7 Flash crop refinement is enabled in the updated demo screenshots; it requires a separately configured hosted API and spending limit.
+Source pixels and canonical evidence are retained, with local KaTeX for math.
+The demo composition endpoint reports the configuration of each running service.
+
+Image-decode reuse, lighter response transfer, and overlapping local OCR with hosted refinement reduce overhead while preserving original OCR inputs and canonical exports.
+These component improvements do not establish a measured full-document latency gain.
+The UI loads source crops on demand; downloaded JSON retains their original PNG data.
 
 ## Walkthroughs
 

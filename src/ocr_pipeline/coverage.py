@@ -1,9 +1,5 @@
 """Docling's orphan clusters for scanned pages: detected text no layout region holds.
 
-A ruled table covers only its grid: its read transcribes the grid, and the rulings are
-found by morphological opening with long line kernels (the lattice step of Camelot and
-pdfplumber).
-
 Docling's layout postprocessor turns every text cell no cluster took into its own text
 cluster (`create_orphan_clusters`), so nothing on a born-digital page is dropped. A scan
 has no cells, so words from a text detector stand in for them: handwriting beside a
@@ -16,32 +12,57 @@ from collections.abc import Sequence
 from statistics import median
 from typing import Any
 
-from PIL import Image
 
 Detection = dict[str, Any]
 # Containers group other regions and are never decoded, so they read none of their words.
 CONTAINER_LABELS = frozenset({"form", "key_value_region"})
-# A ruling spans at least half of the table crop, as Camelot's line scale assumes.
-RULING_SHARE = 0.5
+# Docling's `_assign_cells_to_clusters` min_overlap (intersection over the cell).
+MIN_CELL_SHARE = 0.2
+
+
+def grown_tables(
+    detections: Sequence[Detection], words: Sequence[Sequence[float]]
+) -> list[Detection]:
+    """Each table grown to the detected words it holds, as Docling regrows a table.
+
+    A word belongs to the table holding the largest share of it, above 0.2, and a table's
+    box becomes the union with its words (`_assign_cells_to_clusters`,
+    `_adjust_cluster_bboxes`). A roster's margin notes straddle Heron's table edge: the
+    table crop cut them off, so they were read as loose lines under the table.
+    """
+    grown = [dict(item) for item in detections]
+    tables = [item for item in grown if item["label"] == "table"]
+    detected = [item["box"] for item in tables]  # words are assigned before regrowth
+    for word in words:
+        share, table = max(
+            ((_share(word, box), table) for box, table in zip(detected, tables)),
+            key=lambda pair: pair[0],
+            default=(0.0, None),
+        )
+        if table is not None and share > MIN_CELL_SHARE:
+            table["box"] = tuple(
+                f(a, b) for f, a, b in zip((min, min, max, max), table["box"], word[:4])
+            )
+    return grown
+
+
+def _share(word: Sequence[float], box: Sequence[float]) -> float:
+    width = max(0.0, min(word[2], box[2]) - max(word[0], box[0]))
+    height = max(0.0, min(word[3], box[3]) - max(word[1], box[1]))
+    area = (word[2] - word[0]) * (word[3] - word[1])
+    return width * height / area if area > 0 else 0.0
 
 
 def orphan_text_detections(
     detections: Sequence[Detection],
     words: Sequence[Sequence[float]],
-    image: Image.Image,
 ) -> list[Detection]:
     """Text detections for lines of detected words whose centres no region covers.
 
-    `words` are page-pixel boxes (left, top, right, bottom, score). A ruled table covers
-    only its grid, as its read transcribes only the grid.
+    `words` are page-pixel boxes (left, top, right, bottom, score). A table covers its
+    whole box, grown to its words (`grown_tables`).
     """
-    covers = [
-        (ruled_extent(image, item["box"]) or item["box"])
-        if item["label"] == "table"
-        else item["box"]
-        for item in detections
-        if item["label"] not in CONTAINER_LABELS
-    ]
+    covers = [item["box"] for item in detections if item["label"] not in CONTAINER_LABELS]
     orphans = [
         word
         for word in words
@@ -99,43 +120,3 @@ def _lines(words: Sequence[Sequence[float]]) -> list[list[Sequence[float]]]:
             line.append(word)
         lines.append(line)
     return lines
-
-
-def ruled_extent(
-    image: Image.Image, box: Sequence[float]
-) -> tuple[float, float, float, float] | None:
-    """Page box between the outermost rulings, or None when the table is not ruled."""
-    import cv2
-    import numpy as np
-
-    # Clamped: PIL pads outside the image with black, which Otsu would call rulings.
-    left, top = max(0, int(box[0])), max(0, int(box[1]))
-    right, bottom = min(image.width, int(box[2])), min(image.height, int(box[3]))
-    crop = np.asarray(image.convert("L").crop((left, top, right, bottom)))
-    if crop.size == 0:
-        return None
-    ink = cv2.threshold(crop, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
-    rows = _rulings(ink, 0)
-    columns = _rulings(ink, 1)
-    if len(rows) < 3 or len(columns) < 2:
-        return None
-    return (left + columns[0], top + rows[0], left + columns[-1], top + rows[-1])
-
-
-def _rulings(ink, axis: int) -> list[int]:
-    """Positions of line runs covering RULING_SHARE of the crop along one axis."""
-    import cv2
-
-    length = max(1, int(ink.shape[1 - axis] * RULING_SHARE))
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_RECT, (length, 1) if axis == 0 else (1, length)
-    )
-    profile = cv2.morphologyEx(ink, cv2.MORPH_OPEN, kernel).sum(axis=1 - axis) > 0
-    positions, start = [], None
-    for index, on in enumerate([*profile.tolist(), False]):
-        if on and start is None:
-            start = index
-        elif not on and start is not None:
-            positions.append((start + index) // 2)
-            start = None
-    return positions

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 import io
 import json
@@ -15,7 +16,7 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from html.parser import HTMLParser
@@ -52,7 +53,12 @@ from .orientation import REVIEW_CONFIDENCE as ORIENTATION_REVIEW_CONFIDENCE
 from .orientation import OrientationReader
 from .preprocessing import PageFrameReader, RoutedTesseractReader
 from .providers import LocalReader, ReaderError, TesseractReader
-from .rendering import HEADING_MARKS, render_evidence, render_page_markdown
+from .rendering import (
+    HEADING_MARKS,
+    NATIVE_CONTROL_METHODS,
+    render_evidence,
+    render_page_markdown,
+)
 from .table_topology import TableTopologyError, validate_table_topology
 
 try:
@@ -70,6 +76,20 @@ except ImportError:  # pragma: no cover - exercised only without demo dependenci
     JSONResponse = None
     Response = None
     GZipMiddleware = None
+
+
+def _display_response(response: dict[str, Any]) -> dict[str, Any]:
+    """Send source crops on demand; keep canonical API responses and exports intact."""
+    display = copy.deepcopy(response)
+    for page in display["result"]["pages"]:
+        for region in page["regions"]:
+            asset = (region.get("structure") or {}).get("image")
+            if asset and asset.get("media_type") == "image/png" and asset.get("data"):
+                del asset["data"]
+                asset["url"] = (
+                    f"/api/sessions/{response['session_id']}/regions/{region['id']}.png"
+                )
+    return display
 
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -94,6 +114,9 @@ EXAMPLE_FILES = {
     "code": "artifacts/demo/code_document.png",
     "financial-table": "artifacts/demo/financial_table.png",
     "scanned-form": "artifacts/demo/scanned_form.png",
+    "fax-cover": "artifacts/demo/fax_cover.png",
+    "provider-roster": "artifacts/demo/provider_roster.png",
+    "provider-agreement": "artifacts/demo/provider_agreement.png",
 }
 TABLE_EXAMPLE_NAME = "clinical-table"
 PRESENTATION_CATEGORIES = {
@@ -655,6 +678,8 @@ def create_app(
     backend_version = _backend_version(active_reader)
     prepare_lock = threading.Lock()
     process_lock = threading.Lock()
+    # Keep hosted calls within the existing serial reservation budget.
+    refine_lock = threading.Lock()
     state_lock = threading.Lock()
     recovery_lock = threading.Lock()
 
@@ -679,7 +704,7 @@ def create_app(
         RequestLimitMiddleware,
         max_body_bytes=max_upload_bytes + MULTIPART_OVERHEAD_BYTES,
     )
-    app.add_middleware(GZipMiddleware, minimum_size=1024)
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
     @app.middleware("http")
     async def handle_no_store(request: Any, call_next: Any) -> Any:
@@ -706,6 +731,14 @@ def create_app(
     def handle_katex_css() -> Any:
         return _katex_response(katex_assets, "katex.css", "text/css")
 
+    @app.get("/assets/logo.png")
+    def handle_logo() -> Any:
+        return FileResponse(
+            Path(__file__).resolve().parents[2]
+            / "artifacts/brand/notsosmartocr-logo.png",
+            media_type="image/png",
+        )
+
     @app.get("/assets/katex/katex.js")
     def handle_katex_javascript() -> Any:
         return _katex_response(
@@ -731,7 +764,7 @@ def create_app(
         return JSONResponse(composition_payload)
 
     @app.get("/api/examples/{example_name}")
-    def handle_example(example_name: str) -> Any:
+    def handle_example(example_name: str, thumb: bool = False) -> Any:
         if example_name == TABLE_EXAMPLE_NAME:
             return Response(
                 _table_example_png(),
@@ -745,6 +778,12 @@ def create_app(
         example = _example_path(example_name)
         if example is None:
             raise HTTPException(404, "Example not found")
+        if thumb and example.suffix.lower() in IMAGE_SUFFIXES:
+            with Image.open(example) as image:
+                image.thumbnail((480, 480))
+                buffer = io.BytesIO()
+                image.convert("RGB").save(buffer, format="JPEG", quality=85)
+            return Response(buffer.getvalue(), media_type="image/jpeg")
         return FileResponse(
             example,
             filename=example.name,
@@ -756,6 +795,7 @@ def create_app(
         request: Request,
         file: UploadFile | None = File(None),
         defer_presentation: bool = False,
+        compact: bool = False,
         example: str | None = None,
     ) -> Any:
         # A named example already lives on this host, so sending its bytes down to the
@@ -822,6 +862,14 @@ def create_app(
                     max_page_pixels=max_page_pixels,
                     max_pixels=max_decoded_pixels,
                 )
+                coverage = _coverage_assessment(active_reader, len(document.pages))
+                reader_review = getattr(active_reader, "page_needs_review", None)
+                reader_review_pages = [
+                    page.page_number
+                    for page in document.pages
+                    if callable(reader_review) and reader_review(page.page_number)
+                ]
+            with refine_lock:
                 if crop_refiner is not None and document.pages:
                     refinement_started = time.perf_counter()
                     crop_refiner(document, preview_paths)
@@ -853,6 +901,11 @@ def create_app(
                                 ),
                             }
                         )
+            with (
+                process_lock
+                if cross_page_table_stage is not None or presentation_reader is not None
+                else nullcontext()
+            ):
                 if crop_refiner is not None and cross_page_table_stage is not None:
                     execution, continuation_seconds = _apply_cross_page_tables(
                         document,
@@ -877,14 +930,7 @@ def create_app(
                         pipeline_timings["stage.presentation"] = (
                             time.perf_counter() - presentation_started
                         )
-                elapsed_seconds = time.perf_counter() - started
-                coverage = _coverage_assessment(active_reader, len(document.pages))
-                reader_review = getattr(active_reader, "page_needs_review", None)
-                reader_review_pages = [
-                    page.page_number
-                    for page in document.pages
-                    if callable(reader_review) and reader_review(page.page_number)
-                ]
+            elapsed_seconds = time.perf_counter() - started
             result = _sanitize_result(document.to_dict(), session_root)
             result["document_id"] = Path(original_name).stem
             result["source"]["name"] = original_name
@@ -986,7 +1032,7 @@ def create_app(
                     "reader_review_pages": reader_review_pages,
                 },
             )
-            return JSONResponse(response)
+            return JSONResponse(_display_response(response) if compact else response)
         except HTTPException:
             shutil.rmtree(session_dir, ignore_errors=True)
             raise
@@ -1013,10 +1059,29 @@ def create_app(
             )
 
     @app.get("/api/sessions/{session_id}")
-    def handle_session(session_id: str) -> Any:
+    def handle_session(session_id: str, compact: bool = False) -> Any:
         with state_lock:
             session = _get_session(sessions, session_id)
-            return JSONResponse(session["response"])
+            response = session["response"]
+            return JSONResponse(_display_response(response) if compact else response)
+
+    @app.get("/api/sessions/{session_id}/regions/{region_id}.png")
+    def handle_region_image(session_id: str, region_id: str) -> Any:
+        with state_lock:
+            session = _get_session(sessions, session_id)
+            for page in session["response"]["result"]["pages"]:
+                for region in page["regions"]:
+                    asset = (region.get("structure") or {}).get("image") or {}
+                    if (
+                        region["id"] == region_id
+                        and asset.get("media_type") == "image/png"
+                        and asset.get("data")
+                    ):
+                        return Response(
+                            base64.b64decode(asset["data"], validate=True),
+                            media_type="image/png",
+                        )
+        raise HTTPException(404, "Region image not found")
 
     @app.get("/api/sessions/{session_id}/pages/{page_number}")
     def handle_page(session_id: str, page_number: int) -> Any:
@@ -1385,7 +1450,8 @@ def create_app(
                 if alternative.decision_state == "pending"
             ]
             if (
-                original_region.resolution == "resolved"
+                action != "edit"
+                and original_region.resolution == "resolved"
                 and not pending_alternatives
                 and not (original_region.structure or {}).get("layout_owner_id")
             ):
@@ -1507,6 +1573,10 @@ def create_app(
                     reviewed.confidence = None
                     reviewed.provider = "human-review"
                     reviewed.text_provenance = {"human_review": review_record}
+                    method = (original_region.text_provenance or {}).get("method")
+                    if reviewed.kind == "checkbox" and method in NATIVE_CONTROL_METHODS:
+                        reviewed.text_provenance["method"] = method
+                        reviewed.structure["label"] = reviewed.text
             else:
                 reviewed.text_provenance = {
                     **(

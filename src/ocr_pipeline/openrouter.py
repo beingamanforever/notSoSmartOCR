@@ -404,6 +404,15 @@ def _parse_result(
             latency_ms=_elapsed_ms(started),
         ) from error
 
+    # The Alibaba endpoint supports no structured outputs, and in JSON mode Qwen still
+    # wraps the requested object in a list; the object inside is then held to the schema.
+    if (
+        response_schema.get("type") == "object"
+        and isinstance(content, list)
+        and len(content) == 1
+        and isinstance(content[0], dict)
+    ):
+        content = content[0]
     shape_error = _shape_error(content, response_schema)
     if shape_error:
         raise OpenRouterError(
@@ -529,8 +538,12 @@ def _error_message(response_body: bytes) -> str:
     try:
         response = json.loads(response_body)
         error = response.get("error", {})
-        message = error.get("message") if isinstance(error, Mapping) else None
-        return str(message or "no error message")
+        if not isinstance(error, Mapping):
+            return "no error message"
+        # "Provider returned error" says nothing; the provider's own reply is in metadata.
+        raw = (error.get("metadata") or {}).get("raw")
+        message = str(error.get("message") or "no error message")
+        return f"{message}: {str(raw)[:300]}" if raw else message
     except (UnicodeDecodeError, json.JSONDecodeError):
         return "invalid error response"
 

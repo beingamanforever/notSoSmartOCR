@@ -34,6 +34,22 @@
         "Segoe UI", sans-serif;
     }
 
+    @media (prefers-color-scheme: dark) {
+      :root {
+        color-scheme: dark;
+        --background: #0e131b; --panel: #151b25; --panel-raised: #1c2330;
+        --line: #273041; --line-strong: #536078; --text: #e6e9ef; --muted: #a6b0c2;
+        --accent: #85b5ff; --accent-soft: #16233b;
+        --confidence-high: #34d399; --confidence-high-soft: #12352b;
+        --confidence-medium: #fbbf24; --confidence-medium-soft: #3a2a10;
+        --confidence-low: #f87171; --confidence-low-soft: #3b1a1a;
+        --text-layer-soft: #1b2a44; --positive: #4ade80; --positive-soft: #123222;
+      }
+      .button.primary { color: #0e131b; }
+    }
+    .status-line.error { color: var(--negative); border-color: var(--negative); background: var(--negative-soft); }
+    .document-table td { font-variant-numeric: tabular-nums; }
+
     * { box-sizing: border-box; }
     [hidden] { display: none !important; }
     body {
@@ -56,16 +72,23 @@
       text-align: center;
       margin-bottom: 14px;
     }
+    .brand { display: inline-flex; align-items: center; gap: 10px; text-align: left; }
+    .brand-logo { width: 44px; height: 44px; object-fit: contain; flex: 0 0 auto; }
+    .has-document .brand-logo { width: 32px; height: 32px; }
     h1 { margin: 3px 0 1px; font-size: clamp(1.65rem, 3vw, 2.2rem); letter-spacing: -.04em; }
     .subtitle { margin: 0; color: var(--muted); }
+    .credit { margin: 6px 0 0; color: var(--muted); font-size: .78rem; }
+    .credit a { color: inherit; text-decoration-color: var(--line); text-underline-offset: 3px; }
+    .credit a:hover { color: var(--accent); }
+    .has-document .credit { margin: 0 0 0 auto; }
     .has-document .examples { display: none; }
-    .has-document header { text-align: left; display: flex; align-items: baseline; gap: 16px; }
+    .has-document header { text-align: left; display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
     .has-document h1 { font-size: 1.25rem; }
     .has-document .shell { max-width: 2100px; padding: 16px 20px; }
     .toolbar, .card {
       border: 1px solid var(--line);
       background: var(--panel);
-      box-shadow: 0 6px 20px #1720330d;
+      box-shadow: none;
     }
     .toolbar {
       display: flex;
@@ -87,6 +110,7 @@
       color: var(--muted);
       cursor: pointer;
     }
+    .file-field:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
     .file-field:hover { border-color: var(--accent); background: var(--accent-soft); }
     .file-field input { position: absolute; width: 1px; height: 1px; opacity: 0; }
     .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -100,7 +124,7 @@
       cursor: pointer;
       font-weight: 680;
     }
-    .button:hover:not(:disabled) { border-color: var(--muted); transform: translateY(-1px); }
+    .button:hover:not(:disabled) { border-color: var(--muted); }
     .button.primary { border-color: var(--accent); background: var(--accent); color: var(--panel); }
     .button:disabled { cursor: not-allowed; opacity: .42; }
 
@@ -119,7 +143,7 @@
       color: var(--muted);
     }
     .status-line.visible { display: block; }
-    .status-line.busy, .status-line.error { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+    .status-line.busy { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
     .status-line.success { color: var(--text); border-color: var(--line-strong); background: var(--panel-raised); }
     .client-timer { display: none !important; }
     .client-timer-legacy {
@@ -142,7 +166,7 @@
 
     .examples {
       display: grid;
-      grid-template-columns: repeat(6, minmax(130px, 1fr));
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       gap: 12px;
       margin: -6px 0 18px;
       padding: 2px;
@@ -167,50 +191,9 @@
     .example-name { display: block; padding: 8px 9px 2px; }
     .example-kind { display: block; padding: 0 9px 8px; color: var(--muted); font-size: .68rem; font-weight: 500; }
 
-    .timing-card {
-      margin: -6px 0 18px;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: var(--panel);
-    }
-    .timing-card summary {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 10px 13px;
-      cursor: pointer;
-      color: var(--muted);
-      font-size: .78rem;
-      font-weight: 700;
-    }
-    .timing-card summary::marker { color: var(--accent); }
-    .timing-total { color: var(--text); font-variant-numeric: tabular-nums; }
-    .timing-list {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 1px;
-      border-top: 1px solid var(--line);
-      background: var(--line);
-    }
-    .timing-item {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 10px 13px;
-      background: var(--panel);
-      color: var(--muted);
-      font-size: .75rem;
-    }
-    .timing-item strong { color: var(--text); font-variant-numeric: tabular-nums; }
-    .timing-item small {
-      display: block;
-      margin-top: 3px;
-      color: var(--muted);
-      font-size: .68rem;
-      line-height: 1.35;
-    }
     .workspace {
       --split: 50%;
+      height: max(560px, calc(100dvh - 160px));
       display: grid;
       grid-template-columns: minmax(0, var(--split)) 10px minmax(0, 1fr);
       align-items: stretch;
@@ -226,13 +209,13 @@
     .split-handle:hover, .split-handle.dragging { background-color: var(--accent-soft); }
     .card {
       min-width: 0;
-      border-radius: 16px;
+      border-radius: 10px;
       overflow: hidden;
       display: flex;
       flex-direction: column;
     }
     /* the scrolling body absorbs the height difference so both cards end level */
-    .preview-wrap, .tab-panel.active { flex: 1 1 auto; }
+    .preview-wrap, .tab-panel.active { flex: 1 1 0; min-height: 0; }
     .card-head {
       min-height: 57px;
       display: flex;
@@ -301,12 +284,10 @@
       cursor: pointer;
       font-size: .74rem;
     }
-    .category-button[aria-pressed="false"] { opacity: .48; text-decoration: line-through; }
+    .category-button[aria-pressed="false"] { color: var(--muted); text-decoration: line-through; }
     .category-swatch { width: 8px; height: 8px; border-radius: 50%; background: var(--category-color); }
 
     .preview-wrap {
-      min-height: 620px;
-      max-height: 74vh;
       overflow: auto;
       display: block;
       padding: 20px;
@@ -327,7 +308,7 @@
       box-shadow: 0 10px 34px #17203324;
       cursor: crosshair;
     }
-    canvas.visible { display: block; }
+    canvas.visible { display: block; margin-inline: auto; }
     .loader { display: grid; place-items: center; gap: 14px; color: var(--muted); }
     .loader-blocks { display: grid; grid-template-columns: repeat(2, 18px); gap: 4px; }
     .loader-blocks i {
@@ -368,21 +349,22 @@
     .card-head .elapsed-chip { margin-right: auto; }
     .elapsed-chip[data-state="running"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 
-    .doc-metrics { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .doc-metrics { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .metric {
       display: inline-flex;
       align-items: center;
       gap: 5px;
-      padding: 3px 9px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background: var(--panel-raised);
+      padding: 3px 4px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
       color: var(--muted);
       font-size: .7rem;
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
     .metric::before {
+      display: none;
       content: attr(data-icon);
       color: var(--metric-tint);
       font-size: .78rem;
@@ -405,7 +387,7 @@
       background: var(--panel);
       color: var(--muted);
       cursor: pointer;
-      transition: color 150ms ease, border-color 150ms ease, background-color 150ms ease;
+      transition: color var(--motion), border-color var(--motion), background-color var(--motion);
     }
     .feedback-button:disabled { opacity: .5; cursor: default; }
     #feedback-up:hover:not(:disabled) { color: var(--positive); border-color: var(--positive); }
@@ -481,7 +463,7 @@
     .inspector-action { flex: 0 0 auto; }
     .reread-status { color: var(--muted); font-size: .72rem; }
     .reread-status:empty { display: none; }
-    .reread-status.error { color: var(--accent); }
+    .reread-status.error { color: var(--negative); }
     .review-actions {
       display: flex;
       align-items: center;
@@ -493,7 +475,7 @@
       border-radius: 9px;
       background: var(--panel-raised);
     }
-    .review-actions input, .review-actions select {
+    .review-actions select {
       min-height: 34px;
       min-width: 150px;
       max-width: 100%;
@@ -504,6 +486,28 @@
       padding: 5px 8px;
     }
     .review-actions .download { min-height: 34px; }
+    .review-actions[hidden], .region-editor[hidden] { display: none; }
+    .region-editor { flex-basis: 100%; min-width: 0; }
+    .region-editor label { display: block; margin-bottom: 8px; font-size: .86rem; font-weight: 650; }
+    .region-editor textarea {
+      display: block;
+      width: 100%;
+      min-height: 140px;
+      resize: vertical;
+      padding: 12px;
+      border: 1px solid var(--line-strong);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+      font-size: .94rem;
+      line-height: 1.6;
+    }
+    .region-editor textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .editor-hint { margin: 8px 0 12px; color: var(--muted); font-size: .76rem; line-height: 1.5; }
+    .editor-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .editor-actions .save-edit { background: var(--accent); border-color: var(--accent); color: var(--panel); }
+    .review-actions .reread-status { flex-basis: 100%; font-size: .78rem; line-height: 1.5; }
     .inspector-primary { display: grid; grid-template-columns: minmax(180px, .8fr) minmax(0, 1.2fr); gap: 14px; align-items: start; }
     .region-crop {
       display: block;
@@ -561,10 +565,8 @@
       font-weight: 650;
     }
     .tab[aria-selected="true"] { color: var(--text); border-color: var(--accent); }
-    .review-details { padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--confidence-medium-soft); }
-    .review-details summary { color: var(--confidence-medium); cursor: pointer; font-size: .76rem; font-weight: 750; }
-    .review-list { margin: 8px 0 0; padding-left: 18px; color: var(--text); font-size: .74rem; line-height: 1.5; }
-    .tab-panel { display: none; min-height: 620px; max-height: 74vh; overflow: auto; padding: 18px; }
+    .rendered-toolbar { gap: 6px; }
+    .tab-panel { display: none; overflow: auto; padding: 18px; }
     .tab-panel.active { display: block; }
     .tab-panel.empty-panel.active { display: grid; place-items: center; }
     .rendered-toolbar {
@@ -616,7 +618,7 @@
       color: inherit;
       box-decoration-break: clone;
       -webkit-box-decoration-break: clone;
-      transition: background-color 140ms ease, opacity 140ms ease;
+      transition: background-color var(--motion), opacity var(--motion);
     }
     /* Every recognised span is tinted, so the reader sees coverage as well as risk.
        The tints are deliberately close in lightness: only hue separates them, which
@@ -627,11 +629,11 @@
     .confidence-review .confidence-evidence[data-confidence-level="text-layer"] { background: var(--text-layer-soft); }
     .confidence-review .confidence-evidence[data-confidence-level="unknown"] { text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
     .confidence-review .confidence-evidence[data-confidence-level="high"]:hover,
-    .confidence-review .confidence-evidence[data-confidence-level="high"].confidence-active { background: #c2e7d5; }
+    .confidence-review .confidence-evidence[data-confidence-level="high"].confidence-active { background: color-mix(in srgb, var(--confidence-high) 30%, var(--panel)); }
     .confidence-review .confidence-evidence[data-confidence-level="medium"]:hover,
-    .confidence-review .confidence-evidence[data-confidence-level="medium"].confidence-active { background: #f8d5a3; }
+    .confidence-review .confidence-evidence[data-confidence-level="medium"].confidence-active { background: color-mix(in srgb, var(--confidence-medium) 30%, var(--panel)); }
     .confidence-review .confidence-evidence[data-confidence-level="low"]:hover,
-    .confidence-review .confidence-evidence[data-confidence-level="low"].confidence-active { background: #f7bcbc; }
+    .confidence-review .confidence-evidence[data-confidence-level="low"].confidence-active { background: color-mix(in srgb, var(--confidence-low) 30%, var(--panel)); }
     .confidence-review .presentation-source-link,
     .confidence-review .presentation-source-link:hover,
     .confidence-review .presentation-source-link.confidence-active { background: transparent; }
@@ -644,9 +646,9 @@
       padding: 6px 8px;
       border: 1px solid var(--line-strong);
       border-radius: 8px;
-      background: var(--text);
-      color: var(--panel);
-      box-shadow: 0 8px 24px #17203338;
+      background: var(--panel);
+      color: var(--text);
+      box-shadow: 0 6px 18px #17203320;
       font-size: .74rem;
       line-height: 1.4;
       pointer-events: none;
@@ -668,10 +670,22 @@
     .rendered-content { max-width: 86ch; }
     .rendered-page p { margin: 0; line-height: 1.72; white-space: pre-wrap; }
     pre { margin: 0; color: var(--text); font: .78rem/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; word-break: break-word; }
+    .section-card { display: contents; }
+    .section-label { display: none; }
+    .section-source { margin-left: auto; padding: 3px 7px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--muted); font: inherit; cursor: pointer; font-variant-numeric: tabular-nums; }
+    .section-source:hover { color: var(--text); background: var(--panel-raised); }
+    .evidence-doubt { text-decoration: underline dotted var(--confidence-medium); text-underline-offset: 4px; }
+    .section-card:has(.evidence-doubt) > .section-label { display: flex; align-items: center; gap: 8px; }
+    .section-card:has(.evidence-doubt) { display: block; }
+
+    .sections-view .section-card { display: block; margin: 0 0 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    .sections-view .section-label { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; color: var(--muted); font-size: .73rem; font-weight: 650; }
+    .sections-view .section-card:has(.linked, .confidence-active) { border-color: var(--accent); }
+    .sections-view .section-card > .semantic-block { margin-top: 0; margin-bottom: 0; }
     .semantic-block { margin: 0 0 10px; padding: 2px 8px; margin-left: -8px; margin-right: -8px; border-radius: 7px; line-height: 1.6; white-space: pre-wrap; transition: background-color var(--motion), box-shadow var(--motion); }
     .semantic-block[data-evidence-ids] { cursor: pointer; }
     .semantic-block[data-evidence-ids]:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
-    .semantic-block.linked { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+    .linked { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
     .block-row { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 22px; row-gap: 2px; margin: 0 0 8px; }
     .block-row > .semantic-block { margin: 0 -8px 0 -8px; }
     .block-row > .semantic-block + .semantic-block { margin-left: 0; }
@@ -791,10 +805,9 @@
     @media (max-width: 900px) {
       .shell { padding: 18px; }
       .examples { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
-      .workspace { grid-template-columns: 1fr; }
+      .workspace { grid-template-columns: 1fr; height: auto; }
       .split-handle { display: none; }
-      .preview-wrap { min-height: 420px; }
-      .tab-panel { min-height: 420px; }
+      .preview-wrap, .tab-panel.active { flex: none; min-height: 420px; max-height: 74vh; }
     }
     @media (max-width: 580px) {
       .shell { padding: 12px; }
@@ -808,14 +821,10 @@
       .card-head { align-items: flex-start; flex-direction: column; }
       .inspector-grid { grid-template-columns: 1fr 1fr; }
       .inspector-primary { grid-template-columns: 1fr; }
-      .downloads { display: grid; width: 100%; grid-template-columns: 1fr 1fr; }
-      .copy-control { grid-column: 1 / -1; }
-      .copy-control .download { flex: 1; }
       .download { text-align: center; }
       .tabs { padding-inline: 8px; }
       .tab { padding-inline: 10px; }
       .tab-panel { padding: 14px; }
-      .timing-list { grid-template-columns: 1fr; }
     }
     @media (prefers-reduced-motion: reduce) {
       .button:hover:not(:disabled) { transform: none; }
@@ -828,10 +837,15 @@
 <body>
   <main class="shell">
     <header>
-      <div>
-        <h1>Not So Smart OCR</h1>
-        <p class="subtitle">Evidence-linked document extraction.</p>
+      <div class="brand">
+        <img class="brand-logo" src="/assets/logo.png" alt="" width="44" height="44">
+        <div>
+          <h1>Not So Smart OCR</h1>
+          <p class="subtitle">Evidence-linked document extraction.</p>
+        </div>
       </div>
+      <p class="credit">Built by Aman Behera · For any issues reach out at
+        <a href="mailto:aman.behera@hilabs.com">aman.behera@hilabs.com</a></p>
     </header>
     <form class="toolbar" id="upload-form">
       <label class="file-field" for="source-file">
@@ -845,27 +859,36 @@
 
     <nav id="examples" class="examples" aria-label="Example documents">
       <span class="examples-label">Try an example</span>
+      <button class="example-button" type="button" data-example="fax-cover">
+        <img class="example-preview" src="/api/examples/fax-cover?thumb=1" alt="" loading="lazy">
+        <span class="example-name">Fax cover sheet</span>
+        <span class="example-kind">Handwriting and checkboxes</span>
+      </button>
+      <button class="example-button" type="button" data-example="provider-roster">
+        <img class="example-preview" src="/api/examples/provider-roster?thumb=1" alt="" loading="lazy">
+        <span class="example-name">Provider roster</span>
+        <span class="example-kind">Handwritten table</span>
+      </button>
+      <button class="example-button" type="button" data-example="provider-agreement">
+        <img class="example-preview" src="/api/examples/provider-agreement?thumb=1" alt="" loading="lazy">
+        <span class="example-name">Provider agreement</span>
+        <span class="example-kind">Scanned contract</span>
+      </button>
       <button class="example-button" type="button" data-example="academic-paper">
-        <img class="example-preview" src="/api/examples/academic-paper" alt="Attention Is All You Need preview" loading="lazy">
+        <img class="example-preview" src="/api/examples/academic-paper?thumb=1" alt="" loading="lazy">
         <span class="example-name">Attention Is All You Need</span>
         <span class="example-kind">Math and columns</span>
       </button>
-      <button class="example-button" type="button" data-example="gsoc">
-        <img class="example-preview" src="/api/examples/gsoc" alt="GSoC Final Evaluation preview" loading="lazy">
-        <span class="example-name">GSoC Final Evaluation</span>
-        <span class="example-kind">Text and images</span>
-      </button>
-      <button class="example-button" type="button" data-example="handwriting">
-        <img class="example-preview" src="/api/examples/handwriting" alt="Handwritten notes preview" loading="lazy">
-        <span class="example-name">Handwritten notes</span>
-        <span class="example-kind">Handwriting and formulas</span>
-      </button>
       <button class="example-button" type="button" data-example="financial-table">
-        <img class="example-preview" src="/api/examples/financial-table" alt="Financial table preview" loading="lazy">
+        <img class="example-preview" src="/api/examples/financial-table?thumb=1" alt="" loading="lazy">
         <span class="example-name">Financial table</span>
         <span class="example-kind">Dense layout</span>
       </button>
-
+      <button class="example-button" type="button" data-example="handwriting">
+        <img class="example-preview" src="/api/examples/handwriting?thumb=1" alt="" loading="lazy">
+        <span class="example-name">Handwritten notes</span>
+        <span class="example-kind">Handwriting and formulas</span>
+      </button>
     </nav>
 
     <div class="activity-line" id="activity-line" hidden>
@@ -877,11 +900,6 @@
         <!-- kept for the browser-testable timing contract; the visible chip lives in the page header -->
       </div>
     </div>
-    <details class="timing-card" id="timing-card" hidden>
-      <summary><span>Pipeline execution</span><span class="timing-total" id="timing-total"></span></summary>
-      <div class="timing-list" id="timing-list"></div>
-    </details>
-
     <section class="workspace" aria-label="OCR result workspace">
       <article class="card source-card" aria-label="Page evidence">
         <div class="card-head">
@@ -897,6 +915,7 @@
           <label class="source-zoom" for="source-zoom">Zoom
             <select id="source-zoom">
               <option value="100">Fit width</option>
+              <option value="page" selected>Fit page</option>
               <option value="actual">Actual pixels</option>
               <option value="150">1.5×</option>
               <option value="200">2×</option>
@@ -1002,16 +1021,13 @@
           <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-visual" id="tab-visual" tabindex="-1">Visual</button>
           <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-markdown" id="tab-markdown" tabindex="-1">Markdown</button>
         </div>
-        <details class="review-details" id="review-details" hidden>
-          <summary id="review-summary">Review required</summary>
-          <ul class="review-list" id="review-list"></ul>
-        </details>
         <div class="tab-panel active empty-panel" role="tabpanel" id="panel-rendered" aria-labelledby="tab-rendered">
           <div class="rendered-toolbar" id="rendered-toolbar" hidden>
             <span class="refining-note" role="status" aria-live="polite">Refining layout</span>
+            <button class="confidence-toggle" id="sections-toggle" type="button" aria-pressed="true">Sections</button>
             <button class="confidence-toggle" id="confidence-toggle" type="button" aria-pressed="false" aria-label="Turn provider confidence highlights on">Confidence</button>
           </div>
-          <div class="rendered-view" id="rendered-view">
+          <div class="rendered-view sections-view" id="rendered-view">
             <div class="empty-state"><strong>Ready to extract</strong>Choose a document or public example to begin.</div>
           </div>
         </div>
@@ -1019,7 +1035,6 @@
           <div class="inspector empty" id="inspector">
             <div class="inspector-empty">Select a region on the page to inspect its evidence.</div>
             <div class="inspector-head">
-              <span class="reread-status" id="reread-status" role="status" aria-live="polite" aria-atomic="true"></span>
               <button class="download inspector-action" id="download-crop" type="button" disabled>Download crop</button>
               <button class="download inspector-action" id="reread-handwriting" type="button" hidden disabled>Reread handwriting</button>
             </div>
@@ -1033,10 +1048,18 @@
             <div class="review-actions" id="review-actions" hidden>
               <select id="review-alternative" aria-label="Alternative transcription"></select>
               <button class="download" id="accept-alternative" type="button">Accept</button>
-              <button class="download" id="edit-region" type="button">Edit</button>
-              <input id="region-edit-text" aria-label="Corrected transcription" hidden>
-              <button class="download" id="save-region-edit" type="button" hidden>Save edit</button>
+              <button class="download" id="edit-region" type="button" aria-expanded="false" aria-controls="region-editor">Edit transcription</button>
               <button class="download" id="keep-unresolved" type="button">Keep unresolved</button>
+              <div class="region-editor" id="region-editor" hidden>
+                <label for="region-edit-text">Edit transcription</label>
+                <textarea id="region-edit-text" rows="5" aria-describedby="region-edit-hint" spellcheck="false"></textarea>
+                <p class="editor-hint" id="region-edit-hint">Changes update Text output, Markdown, and downloads. Ctrl or ⌘ + Enter to save; Esc to cancel.</p>
+                <div class="editor-actions">
+                  <button class="download save-edit" id="save-region-edit" type="button">Save changes</button>
+                  <button class="download" id="cancel-region-edit" type="button">Cancel</button>
+                </div>
+              </div>
+              <span class="reread-status" id="reread-status" role="status" aria-live="polite" aria-atomic="true"></span>
             </div>
             <div class="inspector-grid">
               <div class="datum"><span class="label">Kind</span><span class="value" id="region-kind">None selected</span></div>
@@ -1080,6 +1103,8 @@
       hoveredRegionKey: null,
       image: null,
       imageRequest: 0,
+      pageImages: new Map(),
+      locateId: null,
       resultRequest: 0,
       hiddenKinds: new Set(["text", "line", "table_candidate", "table_cell", "word"]),
       selectedFile: null,
@@ -1177,6 +1202,26 @@
       resetResult();
       state.selectedFile = file;
       state.selectedExample = example;
+      const placeholderUrl = file
+        ? (file.type.startsWith("image/") && file.type !== "image/tiff" ? URL.createObjectURL(file) : null)
+        : `/api/examples/${encodeURIComponent(example)}`;
+      if (placeholderUrl) {
+        const request = state.imageRequest;
+        const placeholder = new Image();
+        placeholder.onload = () => {
+          if (file) URL.revokeObjectURL(placeholderUrl);
+          if (request !== state.imageRequest || state.response) return;
+          state.image = placeholder;
+          canvas.width = placeholder.naturalWidth;
+          canvas.height = placeholder.naturalHeight;
+          applyZoom();
+          canvas.classList.add("visible");
+          byId("preview-empty").hidden = true;
+          drawPage();
+        };
+        placeholder.onerror = () => { if (file) URL.revokeObjectURL(placeholderUrl); };
+        placeholder.src = placeholderUrl;
+      }
       setBusy(
         true,
         "Extracting text and structure."
@@ -1194,8 +1239,8 @@
           }
         }
         const query = example
-          ? `?defer_presentation=1&example=${encodeURIComponent(example)}`
-          : "?defer_presentation=1";
+          ? `?defer_presentation=1&compact=1&example=${encodeURIComponent(example)}`
+          : "?defer_presentation=1&compact=1";
         const response = await fetch(`/api/process${query}`, { method: "POST", body });
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.detail || "The document could not be parsed");
@@ -1208,14 +1253,11 @@
         renderResult();
         timerOutcome = "complete";
         const cleanupNote = cleanupFailed ? cleanupWarning : "";
-        const reviewRequired = (payload.uncertainty?.pages || []).some(
-          (page) => page.review_required
-        );
         const pages = payload.result.pages.length;
         setStatus(
-          `Complete · ${pages} ${pages === 1 ? "page" : "pages"}${reviewRequired ? " · review flagged" : ""}${cleanupNote}`,
-          false,
-          payload.result.status === "success" && !reviewRequired ? "success" : ""
+          `${payload.result.status === "success" ? "Complete" : "Incomplete extraction"} · ${pages} ${pages === 1 ? "page" : "pages"}${cleanupNote}`,
+          payload.result.status !== "success",
+          payload.result.status === "success" ? "success" : ""
         );
         byId("clear-button").disabled = false;
       } catch (error) {
@@ -1292,8 +1334,29 @@
     byId("accept-alternative").addEventListener("click", () => handleCorrection("accept"));
     byId("edit-region").addEventListener("click", handleEditRegion);
     byId("save-region-edit").addEventListener("click", () => handleCorrection("edit"));
+    byId("cancel-region-edit").addEventListener("click", () => {
+      closeRegionEditor();
+      setRereadStatus("");
+      updateReviewActions(selectedRegion());
+      byId("edit-region").focus();
+    });
+    byId("region-edit-text").addEventListener("keydown", (event) => {
+      if (event.isComposing || state.rereadBusy) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        byId("cancel-region-edit").click();
+      } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        void handleCorrection("edit");
+      }
+    });
     byId("keep-unresolved").addEventListener("click", () => handleCorrection("keep_unresolved"));
     byId("confidence-toggle").addEventListener("click", handleConfidenceReview);
+    byId("sections-toggle").addEventListener("click", () => {
+      const active = byId("rendered-view").classList.toggle("sections-view");
+      byId("sections-toggle").setAttribute("aria-pressed", String(active));
+    });
     (() => {
       const handle = byId("split-handle");
       const workspace = handle.parentElement;
@@ -1372,11 +1435,14 @@
     }
 
     async function handleCopyJson() {
-      await handleCopy(
-        byId("copy-json"),
-        state.response ? JSON.stringify(state.response, null, 2) : "",
-        "JSON copied"
-      );
+      if (!state.response) return;
+      try {
+        const response = await fetch(`/api/sessions/${state.response.session_id}`);
+        if (!response.ok) throw new Error("Session unavailable");
+        await handleCopy(byId("copy-json"), JSON.stringify(await response.json(), null, 2), "JSON copied");
+      } catch {
+        showCopyStatus(byId("copy-json"), "JSON copy failed", "error");
+      }
     }
 
     async function handleCopy(button, content, successMessage) {
@@ -1406,16 +1472,24 @@
 
     function handleEditRegion() {
       const region = selectedRegion();
-      if (!region) return;
+      if (!region || state.rereadBusy) return;
       const input = byId("region-edit-text");
-      const save = byId("save-region-edit");
       input.value = region.text || "";
-      input.hidden = false;
-      save.hidden = false;
+      byId("region-editor").hidden = false;
+      setRereadStatus("");
+      updateReviewActions(region);
       input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+
+    function closeRegionEditor() {
+      byId("region-editor").hidden = true;
+      byId("region-edit-text").value = "";
+      byId("edit-region").setAttribute("aria-expanded", "false");
     }
 
     async function handleCorrection(action) {
+      if (state.rereadBusy) return;
       const extra = { action };
       if (action === "accept") {
         const alternativeIndex = Number(byId("review-alternative").value);
@@ -1430,6 +1504,11 @@
         extra.alternative_index = alternativeIndex;
       } else if (action === "edit") {
         const text = byId("region-edit-text").value;
+        if (!text.trim()) {
+          setRereadStatus("Enter a transcription before saving.", true);
+          byId("region-edit-text").focus();
+          return;
+        }
         if (semanticKind(selectedRegion()) === "formula") {
           const rendered = renderPresentationFormula(text);
           if (rendered.failure) {
@@ -1442,7 +1521,7 @@
       await submitRegionRequest(
         "corrections",
         extra,
-        "Saving review decision...",
+        "Saving changes...",
         action === "keep_unresolved" ? "Region kept unresolved." : "Correction saved."
       );
     }
@@ -1515,18 +1594,28 @@
         state.rereadBusy = false;
         updateRereadAction(selectedRegion());
         updateReviewActions(selectedRegion());
+        if (visualTabActive() && selectedRegion() && byId("region-editor").hidden) {
+          byId("edit-region").focus();
+        }
         byId("parse-button").disabled = !hasSelection();
         byId("clear-button").disabled = !state.response && !hasSelection();
       }
     }
 
     function applyRevisionResponse(payload) {
+      const selectedKey = state.selectedRegionKey;
+      closeRegionEditor();
       state.response = payload;
       state.renderedMarkdown = null;
       state.renderedMarkdownSessionId = null;
       state.renderedMarkdownRevision = null;
       clearInteraction();
       renderResult();
+      state.selectedRegionKey = selectedKey;
+      updateInspector(selectedRegion());
+      renderRegionList(currentOverlays());
+      drawPage();
+      if (byId("tab-markdown").getAttribute("aria-selected") === "true") void loadRenderedMarkdown();
     }
 
     function recoveryStatusMessage(payload, fallback) {
@@ -1534,7 +1623,7 @@
         accept: "Alternative accepted as the canonical revision.",
         candidate_pending: "A candidate was added; review is still required.",
         corrected: "Canonical text was updated.",
-        edit: "Human text saved as the canonical revision.",
+        edit: "Saved. Text output, Markdown, and downloads are up to date.",
         keep_unresolved: "Region kept unresolved.",
         unchanged_after_reread: "Reread matched the current canonical text.",
         unresolved: "Reread finished without enough evidence to resolve the region."
@@ -1589,7 +1678,13 @@
           || region.structure?.layout_owner_id)
       );
       const controls = byId("review-actions");
-      controls.hidden = !pending;
+      const editor = byId("region-editor");
+      const key = region ? regionKey(region) : "";
+      if (editor.dataset.regionKey !== key) closeRegionEditor();
+      editor.dataset.regionKey = key;
+      const editing = !editor.hidden;
+      controls.hidden = !canonical || (structuredTable && !pending);
+      controls.setAttribute("aria-busy", String(state.rereadBusy));
       byId("review-alternative").replaceChildren(...alternatives.map(({ alternative, index }) => {
         const option = document.createElement("option");
         option.value = String(index);
@@ -1598,13 +1693,15 @@
       }));
       byId("review-alternative").hidden = structuredTable || alternatives.length === 0;
       byId("accept-alternative").hidden = structuredTable || alternatives.length === 0;
-      controls.querySelectorAll("button, select, input").forEach((control) => {
+      controls.querySelectorAll("button, select, textarea").forEach((control) => {
         control.disabled = state.rereadBusy;
       });
-      byId("edit-region").hidden = structuredTable;
-      byId("region-edit-text").hidden = true;
-      byId("region-edit-text").value = "";
-      byId("save-region-edit").hidden = true;
+      byId("edit-region").hidden = structuredTable || editing;
+      byId("edit-region").setAttribute("aria-expanded", String(editing));
+      byId("keep-unresolved").hidden = !pending || editing;
+      byId("review-alternative").disabled = state.rereadBusy || editing;
+      byId("accept-alternative").disabled = state.rereadBusy || editing;
+      byId("save-region-edit").textContent = state.rereadBusy ? "Saving…" : "Save changes";
     }
 
     async function copyText(content) {
@@ -1729,6 +1826,7 @@
     }
 
     function setBusy(busy, message = "") {
+      document.body.classList.toggle("has-document", busy || Boolean(state.response));
       const parseButton = byId("parse-button");
       form.setAttribute("aria-busy", String(busy));
       parseButton.textContent = busy ? "Parsing..." : "Parse";
@@ -1772,8 +1870,6 @@
       document.body.classList.add("has-document");
       const payload = state.response;
       const result = payload.result;
-      renderTiming(payload.timing, payload.page_execution, payload.stage_execution);
-      renderReview(payload);
       renderRendered(result.pages, payload.presentation?.pages || []);
       ["copy-icon", "copy-text", "copy-markdown", "copy-json"].forEach((id) => {
         byId(id).disabled = false;
@@ -1797,16 +1893,13 @@
         if (!response.ok) return;
         const presentation = await response.json();
         // The session may have moved on while the draft was generating.
-        if (state.response?.session_id !== payload.session_id) return;
+        if (
+          state.response?.session_id !== payload.session_id
+          || state.response?.revision !== payload.revision
+        ) return;
         state.response.presentation = presentation;
         state.response.stage_execution.push(...(presentation.stage_execution || []));
-        renderTiming(
-          state.response.timing,
-          state.response.page_execution,
-          state.response.stage_execution
-        );
         renderRendered(state.response.result.pages, presentation.pages || []);
-        renderPage();
       } catch (error) {
         // The canonical rendering already on screen stays valid without a draft.
       } finally {
@@ -1913,118 +2006,6 @@
       return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
     }
 
-    function renderReview(payload) {
-      const notices = [];
-      const notedPages = new Set();
-      const add = (message, pageNumber = null) => {
-        const clean = String(message || "").trim().replaceAll("_", " ");
-        if (clean && !notices.includes(clean)) notices.push(clean);
-        if (Number.isInteger(pageNumber)) notedPages.add(pageNumber);
-      };
-      (payload.result?.failures || []).forEach((failure) => add(
-        `Page ${failure.page_number || "?"}: ${failure.code || failure.stage || "OCR failure"}. ${failure.message || ""}`,
-        failure.page_number
-      ));
-      (payload.uncertainty?.pages || []).forEach((page) => {
-        (page.risk_reasons || []).forEach((reason) => add(`Page ${page.page_number}: ${reason}`, page.page_number));
-      });
-      (payload.stage_execution || []).filter((run) => run.status === "failed").forEach((run) => {
-        // Failure codes are usually already prefixed with their stage, so joining both
-        // produced notices like "presentation presentation validation failed".
-        const code = String(run.failure_code || "failed").replaceAll("_", " ");
-        const stage = String(run.stage || "").replaceAll("_", " ");
-        const detail = stage && code.startsWith(stage) ? code : `${stage} ${code}`.trim();
-        add(`Page ${run.page_number}: ${detail}`, run.page_number);
-      });
-      (payload.uncertainty?.pages || [])
-        .filter((page) => page.review_required && !notedPages.has(page.page_number))
-        .forEach((page) => add(`Page ${page.page_number}: review required`, page.page_number));
-      const details = byId("review-details");
-      details.hidden = notices.length === 0;
-      details.open = false;
-      byId("review-summary").textContent = `Review required · ${notices.length}`;
-      byId("review-list").replaceChildren(...notices.map((message) => {
-        const item = document.createElement("li");
-        item.textContent = message;
-        return item;
-      }));
-    }
-
-    function renderTiming(timing, pageExecution = [], stageExecution = []) {
-      const card = byId("timing-card");
-      card.open = false;
-      if (!timing) {
-        card.hidden = true;
-        return;
-      }
-      const values = [
-        ["Receive + multipart", timing.receive_seconds],
-        ["Store file", timing.save_seconds],
-        ["Preview queue", timing.preview_queue_seconds],
-        ["Preview processing", timing.preview_seconds],
-        ["OCR queue", timing.queue_seconds],
-        ["OCR pipeline", timing.pipeline_seconds],
-        ...(timing.manual_reread_seconds == null
-          ? []
-          : [["Manual reread", timing.manual_reread_seconds]]),
-        ...pageExecution.map((run) => [
-          `Page ${run.page_number} ${run.batched_reader ? "post-read processing" : "total"}`,
-          run.execution_seconds,
-          `${Number(run.queue_seconds).toFixed(3)} s queued${run.batched_reader ? " · batched reader" : ""}`
-        ]),
-        ...Object.entries(timing.pipeline_steps || {})
-          .filter(([name]) => !name.startsWith("stage.") || !stageExecution.length)
-          .map(([name, seconds]) => [
-            name.replace(/^stage\./, "").replaceAll("_", " "),
-            seconds,
-            ""
-          ]),
-        ...stageExecution.map((run) => [
-          `Page ${run.page_number} · ${String(run.stage).replaceAll("_", " ")}`,
-          run.elapsed_seconds,
-          stageExecutionDetail(run)
-        ])
-      ];
-      byId("timing-total").textContent = `${timing.total_seconds.toFixed(3)} s backend total`;
-      byId("timing-list").replaceChildren(...values.map(([label, seconds, detail]) => {
-        const item = document.createElement("div");
-        item.className = "timing-item";
-        const name = document.createElement("span");
-        name.textContent = label;
-        if (detail) {
-          const small = document.createElement("small");
-          small.textContent = detail;
-          name.append(small);
-        }
-        const value = document.createElement("strong");
-        value.textContent = `${Number(seconds).toFixed(3)} s`;
-        item.append(name, value);
-        return item;
-      }));
-      card.hidden = false;
-    }
-
-    function stageExecutionDetail(run) {
-      const details = [
-        Number.isFinite(run.input_regions) && Number.isFinite(run.output_regions)
-          ? `${run.input_regions} → ${run.output_regions} regions`
-          : "",
-        run.added_regions ? `+${run.added_regions}` : "",
-        run.removed_regions ? `-${run.removed_regions}` : "",
-        run.modified_regions ? `${run.modified_regions} modified` : "",
-        run.accepted_crop_ids?.length ? `${run.accepted_crop_ids.length} crops accepted` : "",
-        run.rejected_crop_ids?.length ? `${run.rejected_crop_ids.length} crops rejected` : "",
-        run.attempts ? `${run.attempts} attempt${run.attempts === 1 ? "" : "s"}` : "",
-        Number.isFinite(run.cost_usd) ? `$${run.cost_usd.toFixed(6)}` : ""
-      ].filter(Boolean).join(" · ");
-      const reason = run.failure_code || run.skip_reason;
-      return [
-        run.status,
-        reason ? String(reason).replaceAll("_", " ") : "",
-        details
-      ].filter(Boolean).join(" · ");
-    }
-
     function renderRendered(pages, presentations) {
       const panel = byId("panel-rendered");
       panel.classList.remove("empty-panel");
@@ -2048,6 +2029,58 @@
         const content = usablePresentation(presentation)
           ? renderStructuredPresentation(page, presentation)
           : renderCanonicalPage(page);
+        const notes = new Map();
+        page.regions.forEach((risk) => (risk.structure?.region_risks || []).forEach((item) => {
+          const source = page.regions.find((region) => region.id === item.region_id);
+          if (!source) return;
+          const reasons = item.reasons.map((reason) => ({
+            likely_misread_text: "The initial reader had a low recognition score",
+            second_reader_doubt: "The second reader was unsure about this region",
+            sampled_retry_read: "The initial read needed a retry"
+          }[reason] || reason.replaceAll("_", " "))).join(". ");
+          const refined = source.text_provenance?.method === "qwen_crop_refinement";
+          notes.set(source.id, { text: `${reasons}. ${refined ? "A refined reading is shown; no calibrated score is available." : "Compare this region with the source."}`, refined });
+        }));
+        content.querySelectorAll("[data-evidence-id]").forEach((marker) => {
+          const id = marker.dataset.evidenceId;
+          const note = notes.get(id) || notes.get(id.replace(/-word-\d+$/, ""));
+          if (note) {
+            marker.dataset.evidenceNote = note.text;
+            marker.classList.toggle("evidence-doubt", !note.refined);
+          }
+        });
+        [...content.children].forEach((block, index) => {
+          const ids = block.dataset.evidenceIds || block.querySelector("[data-evidence-id]")?.dataset.evidenceId || "";
+          const region = page.regions.find((item) => ids.split(" ").includes(item.id));
+          const card = document.createElement("article");
+          card.className = "section-card";
+          const label = document.createElement("span");
+          label.className = "section-label";
+          label.textContent = `${index + 1} · ${String(region?.kind || "section").replaceAll(/[-_]/g, " ")}`;
+          const target = block.querySelector("[data-evidence-note]") || (block.matches("[data-evidence-id]") ? block : block.querySelector("[data-evidence-id]"));
+          if (target) {
+            const source = document.createElement("button");
+            source.type = "button";
+            source.className = "section-source";
+            const note = notes.get(target.dataset.evidenceId);
+            const confidence = displayConfidence(region);
+            source.textContent = note ? (note.refined ? "Refined" : "Check source")
+              : validConfidence(confidence.value) ? formatConfidence(confidence.value) : "Source";
+            source.title = note?.text || (validConfidence(confidence.value)
+              ? `${confidence.label} · ${confidence.calibration || "Uncalibrated"}. Locate source.` : "Locate source");
+            source.addEventListener("click", (event) => {
+              event.stopPropagation();
+              selectEvidenceTarget(target);
+              if (target.classList.contains("confidence-evidence")) {
+                state.pinnedConfidence = target;
+                showConfidenceInspector(target);
+              }
+            });
+            label.append(source);
+          }
+          block.replaceWith(card);
+          card.append(label, block);
+        });
         section.append(pageHead, content);
         return section;
       });
@@ -2344,7 +2377,7 @@
     renderedView.addEventListener("click", (event) => {
       const target = confidenceTarget(event.target);
       if (!target) {
-        clearInteraction();
+        if (!event.target.closest("[data-evidence-ids]")) clearInteraction();
         return;
       }
       if (state.pinnedConfidence === target) {
@@ -2353,8 +2386,8 @@
         hideConfidenceInspector();
         return;
       }
-      state.pinnedConfidence = target;
       selectEvidenceTarget(target);
+      state.pinnedConfidence = target;
       showConfidenceInspector(target);
     });
     document.addEventListener("keydown", (event) => {
@@ -2383,16 +2416,6 @@
 
     function showConfidenceInspector(target) {
       const pinned = state.pinnedConfidence === target;
-      const pageNumber = evidencePageNumber(target);
-      const pageIndex = state.response?.result.pages.findIndex(
-        (page) => page.page_number === pageNumber
-      );
-      if (Number.isInteger(pageIndex) && pageIndex >= 0 && pageIndex !== state.pageIndex) {
-        state.pageIndex = pageIndex;
-        resetHiddenKinds();
-        renderPage();
-        if (pinned) state.pinnedConfidence = target;
-      }
       const inspector = byId("confidence-inspector");
       const percent = target.dataset.confidencePercent;
       byId("confidence-inspector-score").textContent = percent === "Text layer"
@@ -2402,7 +2425,7 @@
           ? "Qwen reread accepted · Calibrated confidence unavailable"
           : "Confidence: Not available"
         : `${target.dataset.confidenceKind}: ${percent} · ${target.dataset.confidenceCalibration}`;
-      byId("confidence-inspector-source").textContent = target.dataset.confidenceScope;
+      byId("confidence-inspector-source").textContent = [target.dataset.confidenceScope, target.dataset.evidenceNote].filter(Boolean).join(" · ");
       renderedView.querySelector(".confidence-active")?.classList.remove("confidence-active");
       target.classList.add("confidence-active");
       inspector.hidden = false;
@@ -2565,6 +2588,8 @@
       updateInspector(source);
       if (visualTabActive()) renderRegionList(currentOverlays());
       drawPage();
+      if (state.image) scrollPageTo(source.id);
+      else state.locateId = source.id;
     }
 
     function pagesWithTableContinuations(pages, continuations) {
@@ -3176,6 +3201,8 @@
       const ids = [group.region.id, ...(group.region.structure?.child_evidence_ids || [])];
       block.dataset.evidenceIds = ids.join(" ");
       const evidenceId = ids[1] || ids[0];
+      block.dataset.evidenceId = evidenceId;
+      block.tabIndex = 0;
       block.addEventListener("pointerenter", () => {
         if (state.pinnedConfidence) return;
         state.activeEvidenceId = evidenceId;
@@ -3188,7 +3215,13 @@
       });
       block.addEventListener("click", (event) => {
         if (event.target.closest("a, button, input, select")) return;
-        scrollPageTo(evidenceId);
+        selectEvidenceTarget(block);
+      });
+      block.addEventListener("keydown", (event) => {
+        if (event.target === block && ["Enter", " "].includes(event.key)) {
+          event.preventDefault();
+          selectEvidenceTarget(block);
+        }
       });
       return block;
     }
@@ -3210,11 +3243,12 @@
     // Hovering a box lights its text; clicking one (scroll = true) also brings it into view.
     function linkTextTo(evidenceId, scroll = false) {
       const panel = byId("panel-rendered");
-      panel.querySelector(".semantic-block.linked")?.classList.remove("linked");
+      panel.querySelector(".linked")?.classList.remove("linked");
       if (!evidenceId) return;
-      const block = [...panel.querySelectorAll("[data-evidence-ids]")].find((element) =>
-        element.dataset.evidenceIds.split(" ").includes(evidenceId)
+      const linked = [...panel.querySelectorAll("[data-evidence-ids], [data-evidence-id]")].find((element) =>
+        (element.dataset.evidenceIds || element.dataset.evidenceId).split(" ").includes(evidenceId)
       );
+      const block = linked?.closest(".presentation-block, .semantic-block") || linked;
       if (!block) return;
       block.classList.add("linked");
       if (!scroll) return;
@@ -3244,7 +3278,7 @@
         ? ownedSources[0] : group.region;
       if (kind === "figure" && group.region.structure?.image) {
         const asset = group.region.structure.image;
-        if (asset.media_type !== "image/png" || !/^[A-Za-z0-9+/=]+$/.test(asset.data || "")) return null;
+        if (asset.media_type !== "image/png" || !(asset.url?.startsWith("/api/sessions/") || /^[A-Za-z0-9+/=]+$/.test(asset.data || ""))) return null;
         const figure = document.createElement("figure");
         figure.className = "semantic-block figure";
         figure.dataset.regionKind = "figure";
@@ -3258,7 +3292,7 @@
           source_confidence_scope: "figure detection"
         } }, group.region);
         const link = document.createElement("a");
-        link.href = `data:image/png;base64,${asset.data}`;
+        link.href = asset.url || `data:image/png;base64,${asset.data}`;
         link.download = `${group.region.id}.png`;
         link.setAttribute("aria-label", "Download extracted image");
         const image = document.createElement("img");
@@ -3631,9 +3665,17 @@
 
     byId("previous-page").addEventListener("click", () => changePage(-1));
     byId("next-page").addEventListener("click", () => changePage(1));
-    byId("source-zoom").addEventListener("change", (event) => {
-      const width = event.target.value === "actual" ? `${canvas.width}px` : `${event.target.value}%`;
+    function applyZoom() {
+      const value = byId("source-zoom").value;
+      const viewport = canvas.parentElement;
+      const width = value === "actual" ? `${canvas.width}px`
+        : value === "page" ? `${Math.max(1, Math.min(viewport.clientWidth - 40, (viewport.clientHeight - 40) * canvas.width / Math.max(1, canvas.height)))}px`
+        : `${value}%`;
       canvas.style.setProperty("--source-zoom", width);
+    }
+    new ResizeObserver(applyZoom).observe(canvas.parentElement);
+    byId("source-zoom").addEventListener("change", () => {
+      applyZoom();
       hideConfidenceInspector();
     });
     function changePage(offset) {
@@ -3655,6 +3697,7 @@
     function renderPage() {
       renderFeedback();
       const imageRequest = ++state.imageRequest;
+      state.locateId = null;
       const payload = state.response;
       const pages = payload ? payload.result.pages : [];
       const imageUrls = payload ? payload.page_images : [];
@@ -3678,29 +3721,42 @@
         return;
       }
 
+      const url = imageUrls[state.pageIndex];
+      const show = (image) => {
+        if (imageRequest !== state.imageRequest) return;
+        state.image = image;
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+        applyZoom();
+        canvas.classList.add("visible");
+        byId("preview-empty").hidden = true;
+        drawPage();
+        if (state.locateId) {
+          scrollPageTo(state.locateId);
+          state.locateId = null;
+        }
+        if (visualTabActive()) renderRegionList(currentOverlays());
+      };
+      const cached = state.pageImages.get(url);
+      if (cached?.complete && cached.naturalWidth) return show(cached);
       state.image = null;
       canvas.classList.remove("visible");
       context.clearRect(0, 0, canvas.width, canvas.height);
       byId("preview-empty").hidden = false;
       byId("preview-empty").textContent = "Loading page preview...";
       const image = new Image();
-      image.onload = () => {
-        if (imageRequest !== state.imageRequest) return;
-        state.image = image;
-        canvas.width = image.naturalWidth;
-        canvas.height = image.naturalHeight;
-        canvas.classList.add("visible");
-        byId("preview-empty").hidden = true;
-        drawPage();
-        if (visualTabActive()) renderRegionList(currentOverlays());
-      };
+      // Keep only two decoded pages: long PDFs must not consume gigabytes in the tab.
+      state.pageImages.set(url, image);
+      if (state.pageImages.size > 2) state.pageImages.delete(state.pageImages.keys().next().value);
+      image.onload = () => show(image);
       image.onerror = () => {
+        state.pageImages.delete(url);
         if (imageRequest !== state.imageRequest) return;
         canvas.classList.remove("visible");
         byId("preview-empty").hidden = false;
         byId("preview-empty").textContent = "The page preview could not be loaded.";
       };
-      image.src = imageUrls[state.pageIndex];
+      image.src = url;
     }
 
     function currentRegions() {
@@ -4190,6 +4246,8 @@
       state.hoveredRegionKey = null;
       state.image = null;
       state.imageRequest += 1;
+      state.pageImages.clear();
+      state.locateId = null;
       state.hiddenKinds.clear();
       state.confidenceReview = false;
       state.activeEvidenceId = null;
@@ -4198,13 +4256,10 @@
       state.renderedMarkdown = null;
       state.renderedMarkdownSessionId = null;
       state.renderedMarkdownRevision = null;
-      byId("timing-card").hidden = true;
       byId("doc-metrics").hidden = true;
-      byId("review-details").hidden = true;
-      byId("review-details").open = false;
       byId("region-categories").hidden = true;
       byId("layers-control").open = false;
-      byId("source-zoom").value = "100";
+      byId("source-zoom").value = "page";
       canvas.style.removeProperty("--source-zoom");
       canvas.classList.remove("visible");
       cropCanvas.hidden = true;
@@ -4298,14 +4353,14 @@
       if (!session) return;
       setBusy(true, "Loading document...");
       try {
-        const response = await fetch(`/api/sessions/${encodeURIComponent(session)}`);
+        const response = await fetch(`/api/sessions/${encodeURIComponent(session)}?compact=1`);
         if (!response.ok) throw new Error("This temporary document session has expired. Please upload it again.");
         state.response = await response.json();
         resetHiddenKinds();
         renderResult();
         byId("file-name").textContent = state.response.filename;
         byId("clear-button").disabled = false;
-        setStatus("Document restored. Review flagged evidence before using the output.");
+        setStatus(state.response.result.status === "success" ? "Document restored." : "Incomplete extraction. Some content could not be read.", state.response.result.status !== "success");
       } catch (error) {
         setStatus(error.message, true);
       } finally {

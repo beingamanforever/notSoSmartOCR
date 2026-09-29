@@ -715,6 +715,9 @@ def test_upload_renders_checkbox_label_instead_of_decoder_table_markup():
         ("☐ Please Comment", "Please Comment"),
         ("Pale □", "Pale"),
         ("■ Glucose Test Strips", "Glucose Test Strips"),
+        ("O Yes", "Yes"),  # a radio circle read as a letter
+        ("O2 Precautions", "O2 Precautions"),
+        ("0 - Able to independently feed self", "0 - Able to independently feed self"),
     ],
 )
 def test_checkbox_label_removes_presentation_marks(value: str, expected: str) -> None:
@@ -1244,3 +1247,19 @@ def test_a_crop_floor_above_the_crop_ceiling_is_rejected() -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_retry_crop_floor_respects_request_ceiling() -> None:
+    engine = FakeLayoutEngine(
+        [{'category': 'text', 'bbox': [0, 0, 40, 40], 'score': .9, 'text': ''}],
+        {0.2: 'recovered', 0.5: 'recovered', 0.8: 'recovered'},
+    )
+    server = _start_layout_server(engine, layout={'max_image_size': 128})
+    try:
+        body = _post_layout_read(server, Image.new('RGB', (40, 40), 'white'))
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert body['elements'][0]['text'] == 'recovered'
+    assert engine.retry_calls
+    assert all(call['min_image_size'] == 128 for call in engine.retry_calls)

@@ -12,6 +12,7 @@ import html
 import json
 import io
 import math
+from contextlib import ExitStack
 from collections import Counter
 import re
 import unicodedata
@@ -179,14 +180,17 @@ class FalconLayoutReader:
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
         cells = read_cells(image_path)
+        # A born-digital page has text cells; a scan sends detected words instead,
+        # so text no layout region holds is still read (Docling's orphan clusters).
+        words = (
+            self.word_detector(image_path) if self.word_detector and not cells else []
+        )
         payload = {
             "image": base64.b64encode(image_path.read_bytes()).decode("ascii"),
-            # A born-digital page has text cells; a scan sends detected words instead,
-            # so text no layout region holds is still read (Docling's orphan clusters).
             **(
                 {"cells": cells}
                 if cells
-                else {"words": self.word_detector(image_path)}
+                else {"words": [word[:5] for word in words]}
                 if self.word_detector
                 else {}
             ),
@@ -200,99 +204,110 @@ class FalconLayoutReader:
         regions = []
         # One detected box can hold stacked tables; each is its own table grid.
         elements = [part for element in elements for part in _table_parts(element)]
-        for index, element in enumerate(elements, start=1):
-            category = str(element.get("category") or "text")
-            text = str(element.get("text") or "").strip()
-            box = _bounding_box(element.get("bbox"))
-            if box is None:
-                continue
-            detection = {
-                key: element[key]
-                for key in ("query_id", "class_scores", "orphan_text")
-                if key in element
-            }
-            terminated = _read_terminated(element)
-            attempts = element.get("read_attempts") or []
-            read_history = {
-                **({"read_attempts": attempts} if attempts else {}),
-                **({"read_terminated": terminated} if terminated else {}),
-                **(
-                    {"read_retries": int(element["retries"])}
-                    if element.get("retries") is not None
-                    else {}
-                ),
-            }
-            # A clean retry is the read; its calibrated confidence carries the doubt.
-            read_resolution = "unreadable" if terminated else "resolved"
-            if category in {"checkbox-selected", "checkbox-unselected"}:
-                selected = category == "checkbox-selected"
-                raw_text = text
-                text = _checkbox_label(text)
-                if raw_text and not text:
-                    read_resolution = "unreadable"
-                glyph = DECODED_BALLOT_MARK.match(raw_text)
-                glyph_selected = glyph and glyph.group().casefold() in SELECTED_BALLOTS
-                programmatic = element.get("text_source") == TEXT_LAYER
-                typed = programmatic and not glyph and TYPED_MARK.search(text)
-                if typed:
-                    # A form filled in software marks its box with a typed "X".
-                    text = TYPED_MARK.sub("", text).strip()
-                    selected = True
-                if glyph and programmatic:
-                    selected = bool(glyph_selected)  # the page's own glyph is the state
-                elif glyph and glyph_selected != selected:
-                    read_resolution = "conflicting"
-                regions.append(
-                    TextRegion(
-                        id=f"p{page_number}-falcon-{index}",
-                        kind="checkbox",
-                        text=text,
-                        confidence=(element.get("generation") or {}).get("token_score"),
-                        bounding_box=box,
-                        reading_order=index,
-                        provider=PROVIDER,
-                        text_provenance={
-                            "method": TEXT_LAYER
-                            if programmatic
-                            else "learned_checkbox_detection",
-                            "reading_order_method": "detector_sequence",
-                            "model": model,
-                            "layout_detection": {
-                                **detection,
-                                "category": category,
-                                "score": float(element["score"]),
-                            },
-                            "generation": element.get("generation") or {},
-                            "raw_text": raw_text,
-                            **read_history,
-                            "confidence_meaning": PROGRAMMATIC_TEXT
-                            if programmatic
-                            else UNCALIBRATED_CONFIDENCE,
-                        },
-                        resolution=read_resolution,
-                        structure={
-                            "state": "selected" if selected else "unselected",
-                            **(
-                                {
-                                    "decoded_state": "selected"
-                                    if glyph_selected
-                                    else "unselected"
-                                }
-                                if glyph
-                                else {}
-                            ),
-                            "state_confidence": None
-                            if programmatic and (glyph or typed)
-                            else float(element["score"]),
-                            "label_evidence_ids": [],
-                            "label": text,
-                        },
+        with ExitStack() as images:
+            source = None
+            for index, element in enumerate(elements, start=1):
+                category = str(element.get("category") or "text")
+                text = str(element.get("text") or "").strip()
+                box = _bounding_box(element.get("bbox"))
+                if box is None:
+                    continue
+                detection = {
+                    key: element[key]
+                    for key in ("query_id", "class_scores", "orphan_text")
+                    if key in element
+                }
+                terminated = _read_terminated(element)
+                attempts = element.get("read_attempts") or []
+                read_history = {
+                    **({"read_attempts": attempts} if attempts else {}),
+                    **({"read_terminated": terminated} if terminated else {}),
+                    **(
+                        {"read_retries": int(element["retries"])}
+                        if element.get("retries") is not None
+                        else {}
+                    ),
+                }
+                # A clean retry is the read; its calibrated confidence carries the doubt.
+                read_resolution = "unreadable" if terminated else "resolved"
+                if category in {"checkbox-selected", "checkbox-unselected"}:
+                    selected = category == "checkbox-selected"
+                    raw_text = text
+                    text = _checkbox_label(text)
+                    if raw_text and not text:
+                        read_resolution = "unreadable"
+                    glyph = DECODED_BALLOT_MARK.match(raw_text)
+                    glyph_selected = (
+                        glyph and glyph.group().casefold() in SELECTED_BALLOTS
                     )
-                )
-                continue
-            # A picture the reader transcribed (handwriting Heron calls `picture`) is text.
-            if category in EMPTY_CATEGORIES and not (category == "picture" and text):
-                with Image.open(image_path) as source:
+                    programmatic = element.get("text_source") == TEXT_LAYER
+                    typed = programmatic and not glyph and TYPED_MARK.search(text)
+                    if typed:
+                        # A form filled in software marks its box with a typed "X".
+                        text = TYPED_MARK.sub("", text).strip()
+                        selected = True
+                    if glyph and programmatic:
+                        selected = bool(
+                            glyph_selected
+                        )  # the page's own glyph is the state
+                    elif glyph and glyph_selected != selected:
+                        read_resolution = "conflicting"
+                    regions.append(
+                        TextRegion(
+                            id=f"p{page_number}-falcon-{index}",
+                            kind="checkbox",
+                            text=text,
+                            confidence=(element.get("generation") or {}).get(
+                                "token_score"
+                            ),
+                            bounding_box=box,
+                            reading_order=index,
+                            provider=PROVIDER,
+                            text_provenance={
+                                "method": TEXT_LAYER
+                                if programmatic
+                                else "learned_checkbox_detection",
+                                "reading_order_method": "detector_sequence",
+                                "model": model,
+                                "layout_detection": {
+                                    **detection,
+                                    "category": category,
+                                    "score": float(element["score"]),
+                                },
+                                "generation": element.get("generation") or {},
+                                "raw_text": raw_text,
+                                **read_history,
+                                "confidence_meaning": PROGRAMMATIC_TEXT
+                                if programmatic
+                                else UNCALIBRATED_CONFIDENCE,
+                            },
+                            resolution=read_resolution,
+                            structure={
+                                "state": "selected" if selected else "unselected",
+                                **(
+                                    {
+                                        "decoded_state": "selected"
+                                        if glyph_selected
+                                        else "unselected"
+                                    }
+                                    if glyph
+                                    else {}
+                                ),
+                                "state_confidence": None
+                                if programmatic and (glyph or typed)
+                                else float(element["score"]),
+                                "label_evidence_ids": [],
+                                "label": text,
+                            },
+                        )
+                    )
+                    continue
+                # A picture the reader transcribed (handwriting Heron calls `picture`) is text.
+                if category in EMPTY_CATEGORIES and not (
+                    category == "picture" and text
+                ):
+                    if source is None:
+                        source = images.enter_context(Image.open(image_path))
                     box = BoundingBox(
                         max(0, box.left),
                         max(0, box.top),
@@ -312,143 +327,145 @@ class FalconLayoutReader:
                             "height": crop.height,
                             "data": base64.b64encode(buffer.getvalue()).decode("ascii"),
                         }
-                regions.append(
-                    TextRegion(
-                        id=f"p{page_number}-falcon-{index}",
-                        kind="figure",
-                        text="",
-                        confidence=None,
-                        bounding_box=box,
-                        reading_order=index,
-                        provider=PROVIDER,
-                        text_provenance={
-                            "method": "source_image_crop",
-                            "reading_order_method": "detector_sequence",
-                            "layout_detection": detection,
-                            "layout_category": category,
-                            "layout_detection_score": element.get("score"),
-                            "model": model,
-                        },
-                        resolution="unreadable"
-                        if category in {"form", "key-value-region"}
-                        else read_resolution,
-                        structure={
-                            "image": asset,
-                            **(
-                                {"role": "form_source"}
-                                if category in {"form", "key-value-region"}
-                                else {}
-                            ),
-                            # Located, never transcribed, as document APIs report it.
-                            **(
-                                {"role": "signature"} if category == "signature" else {}
-                            ),
-                        },
+                    regions.append(
+                        TextRegion(
+                            id=f"p{page_number}-falcon-{index}",
+                            kind="figure",
+                            text="",
+                            confidence=None,
+                            bounding_box=box,
+                            reading_order=index,
+                            provider=PROVIDER,
+                            text_provenance={
+                                "method": "source_image_crop",
+                                "reading_order_method": "detector_sequence",
+                                "layout_detection": detection,
+                                "layout_category": category,
+                                "layout_detection_score": element.get("score"),
+                                "model": model,
+                            },
+                            resolution="unreadable"
+                            if category in {"form", "key-value-region"}
+                            else read_resolution,
+                            structure={
+                                "image": asset,
+                                **(
+                                    {"role": "form_source"}
+                                    if category in {"form", "key-value-region"}
+                                    else {}
+                                ),
+                                # Located, never transcribed, as document APIs report it.
+                                **(
+                                    {"role": "signature"}
+                                    if category == "signature"
+                                    else {}
+                                ),
+                            },
+                        )
                     )
+                    continue
+                text, kind = _plain_text(text, KIND_BY_CATEGORY.get(category, "text"))
+                decoded_control = _decoded_ballot_control(
+                    text, kind, element.get("class_scores")
                 )
-                continue
-            text, kind = _plain_text(text, KIND_BY_CATEGORY.get(category, "text"))
-            decoded_control = _decoded_ballot_control(
-                text, kind, element.get("class_scores")
-            )
-            if decoded_control is not None:
-                text, state, state_glyph = decoded_control
-                kind = "checkbox"
-            structure = (
-                {
-                    "state": state,
-                    "label": text,
-                    "label_evidence_ids": [],
-                }
-                if decoded_control is not None
-                else None
-            )
-            structure_error = None
-            if terminated:
-                # Evidence, not content: the detector's kind, not the one its markup claims.
-                kind = KIND_BY_CATEGORY.get(category, "text")
-            if kind == "table":
-                try:
-                    structure = _table_structure(text, element.get("generation"))
-                except ValueError as error:
-                    structure_error = str(error)
-            if kind == "table" and structure:
-                text = _table_text(structure)
-            programmatic = element.get("text_source") == TEXT_LAYER
-            recognition_method = (
-                TEXT_LAYER
-                if programmatic
-                else "falcon_perception_plain_ocr"
-                if category == "page_text"
-                else "falcon_perception_layout_ocr"
-            )
-            token_score = (element.get("generation") or {}).get("token_score")
-            # Fitted on greedy first reads; a sampled retry is outside that calibration.
-            # The calibration was fitted on Heron detection scores; an orphan line's
-            # score is docTR's, so it stays an uncalibrated decoder score.
-            calibrated = (
-                token_score is not None
-                and element.get("score") is not None
-                and kind not in {"table", "checkbox"}
-                and not attempts
-                and not element.get("orphan_text")
-            )
-            region = TextRegion(
-                id=f"p{page_number}-falcon-{index}",
-                kind=kind,
-                text=text,
-                confidence=calibrated_confidence(token_score, element["score"])
-                if calibrated
-                else token_score,
-                bounding_box=box,
-                reading_order=index,
-                provider=PROVIDER,
-                text_provenance={
-                    "method": "decoded_ballot_glyph_promotion"
+                if decoded_control is not None:
+                    text, state, state_glyph = decoded_control
+                    kind = "checkbox"
+                structure = (
+                    {
+                        "state": state,
+                        "label": text,
+                        "label_evidence_ids": [],
+                    }
                     if decoded_control is not None
-                    else recognition_method,
-                    **(
-                        {
-                            "recognition_method": recognition_method,
-                            "state_source": "decoded_ballot_glyph",
-                            "state_glyph": state_glyph,
-                        }
-                        if decoded_control is not None
-                        else {}
-                    ),
-                    "reading_order_method": "page_decoder"
-                    if category == "page_text"
-                    else "detector_sequence",
-                    "layout_detection": detection,
-                    "generation": element.get("generation") or {},
-                    "raw_text": element.get("text") or "",
-                    **read_history,
-                    **(
-                        {"table_structure_error": structure_error}
-                        if structure_error
-                        else {}
-                    ),
-                    "layout_category": category,
-                    **(
-                        {"table_structure_model": element["table_source"]}
-                        if "table_source" in element
-                        else {}
-                    ),
-                    # Named so nobody reads this as a recognition confidence.
-                    "layout_detection_score": element.get("score"),
-                    "confidence_meaning": PROGRAMMATIC_TEXT
+                    else None
+                )
+                structure_error = None
+                if terminated:
+                    # Evidence, not content: the detector's kind, not the one its markup claims.
+                    kind = KIND_BY_CATEGORY.get(category, "text")
+                if kind == "table":
+                    try:
+                        structure = _table_structure(text, element.get("generation"))
+                    except ValueError as error:
+                        structure_error = str(error)
+                if kind == "table" and structure:
+                    text = _table_text(structure)
+                programmatic = element.get("text_source") == TEXT_LAYER
+                recognition_method = (
+                    TEXT_LAYER
                     if programmatic
-                    else CALIBRATED_CONFIDENCE
+                    else "falcon_perception_plain_ocr"
+                    if category == "page_text"
+                    else "falcon_perception_layout_ocr"
+                )
+                token_score = (element.get("generation") or {}).get("token_score")
+                # Fitted on greedy first reads; a sampled retry is outside that calibration.
+                # The calibration was fitted on Heron detection scores; an orphan line's
+                # score is docTR's, so it stays an uncalibrated decoder score.
+                calibrated = (
+                    token_score is not None
+                    and element.get("score") is not None
+                    and kind not in {"table", "checkbox"}
+                    and not attempts
+                    and not element.get("orphan_text")
+                )
+                region = TextRegion(
+                    id=f"p{page_number}-falcon-{index}",
+                    kind=kind,
+                    text=text,
+                    confidence=calibrated_confidence(token_score, element["score"])
                     if calibrated
-                    else UNCALIBRATED_CONFIDENCE
-                    if token_score is not None
-                    else "recognition unavailable",
-                    "model": model,
-                },
-                resolution="unreadable" if structure_error else read_resolution,
-                structure=structure or {},
-            )
-            regions.append(region)
+                    else token_score,
+                    bounding_box=box,
+                    reading_order=index,
+                    provider=PROVIDER,
+                    text_provenance={
+                        "method": "decoded_ballot_glyph_promotion"
+                        if decoded_control is not None
+                        else recognition_method,
+                        **(
+                            {
+                                "recognition_method": recognition_method,
+                                "state_source": "decoded_ballot_glyph",
+                                "state_glyph": state_glyph,
+                            }
+                            if decoded_control is not None
+                            else {}
+                        ),
+                        "reading_order_method": "page_decoder"
+                        if category == "page_text"
+                        else "detector_sequence",
+                        "layout_detection": detection,
+                        "generation": element.get("generation") or {},
+                        "raw_text": element.get("text") or "",
+                        **read_history,
+                        **(
+                            {"table_structure_error": structure_error}
+                            if structure_error
+                            else {}
+                        ),
+                        "layout_category": category,
+                        **(
+                            {"table_structure_model": element["table_source"]}
+                            if "table_source" in element
+                            else {}
+                        ),
+                        # Named so nobody reads this as a recognition confidence.
+                        "layout_detection_score": element.get("score"),
+                        "confidence_meaning": PROGRAMMATIC_TEXT
+                        if programmatic
+                        else CALIBRATED_CONFIDENCE
+                        if calibrated
+                        else UNCALIBRATED_CONFIDENCE
+                        if token_score is not None
+                        else "recognition unavailable",
+                        "model": model,
+                    },
+                    resolution="unreadable" if structure_error else read_resolution,
+                    structure=structure or {},
+                )
+                regions.append(region)
         if not regions:
             # A page with no readable region is a failed read, not an empty document.
             # Reporting it as success renders a handful of geometric controls and calls
@@ -460,6 +477,7 @@ class FalconLayoutReader:
             )
         _assign_image_owners(regions)
         _flag_foreign_scripts(regions)
+        _attach_second_reader(regions, words)
         return regions
 
     def _request(self, url: str, payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -493,6 +511,27 @@ def calibrated_confidence(token_score: float, layout_score: float) -> float:
     return 1 / (1 + math.exp(-logit))
 
 
+def _attach_second_reader(regions: list[TextRegion], words: list[list[float]]) -> None:
+    """Record the lowest docTR recognition confidence among the words each region holds."""
+    for region in regions:
+        if region.kind in {"table", "figure"} or region.text_provenance is None:
+            continue
+        box = region.bounding_box
+        held = [
+            word[5]
+            for word in words
+            if len(word) > 5
+            and box.left <= (word[0] + word[2]) / 2 <= box.right
+            and box.top <= (word[1] + word[3]) / 2 <= box.bottom
+        ]
+        if held:
+            region.text_provenance["second_reader"] = {
+                "model": "docTR crnn_vgg16_bn",
+                "min_word_confidence": min(held),
+                "words": len(held),
+            }
+
+
 def _flag_foreign_scripts(regions: list[TextRegion]) -> None:
     """A script holding a sliver of the page's letters is a misread glyph, not a language.
 
@@ -508,7 +547,11 @@ def _flag_foreign_scripts(regions: list[TextRegion]) -> None:
     if len(page) < 2:
         return
     total = sum(page.values())
-    minor = {script for script, letters in page.items() if letters < MINOR_SCRIPT_SHARE * total}
+    minor = {
+        script
+        for script, letters in page.items()
+        if letters < MINOR_SCRIPT_SHARE * total
+    }
     for region, letters in zip(regions, counts):
         # PDF characters were extracted, not generated by the crop decoder.
         if (region.text_provenance or {}).get(
@@ -536,7 +579,6 @@ def _script_letters(text: str) -> Counter:
     )
     letters.pop("GREEK", None)
     return letters
-
 
 
 def _assign_image_owners(regions: list[TextRegion]) -> None:
@@ -734,6 +776,9 @@ def _checkbox_label(text: str) -> str:
     # Falcon may mark the label up as a heading; the region's kind is still checkbox.
     text = _plain_text(text, "text")[0]
     text = re.sub(rf"^(?:{BALLOT_MARK})\s*", "", text)
+    # A control crop starts at its glyph; Falcon reads a radio circle as the letter O
+    # ("O Yes": 72 of 4,187 labels in the domain and handwriting runs).
+    text = re.sub(r"^[Oo]\s+(?=\S)", "", text)
     return re.sub(rf"\s*(?:{BALLOT_MARK})$", "", text).strip()
 
 
@@ -888,15 +933,21 @@ def _table_parts(element: dict[str, Any]) -> list[dict[str, Any]]:
     generation = element.get("generation") or {}
     parts = []
     for start, end in bounds:
+        start += len(text[start:end]) - len(text[start:end].lstrip())
+        end = start + len(text[start:end].rstrip())
         tokens = [
-            {**token, "start": token["start"] - start, "end": token["end"] - start}
+            {
+                **token,
+                "start": max(token["start"], start) - start,
+                "end": min(token["end"], end) - start,
+            }
             for token in generation.get("tokens", [])
-            if token["start"] >= start and token["end"] <= end
+            if token["start"] < end and token["end"] > start
         ]
         parts.append(
             {
                 **element,
-                "text": text[start:end].strip(),
+                "text": text[start:end],
                 "generation": {**generation, "tokens": tokens},
             }
         )
@@ -994,7 +1045,9 @@ def _exceeds_capacity(element: dict[str, Any]) -> bool:
     box = element.get("bbox")
     if not isinstance(box, list) or len(box) != 4:
         return False
-    area = max(0.0, float(box[2]) - float(box[0])) * max(0.0, float(box[3]) - float(box[1]))
+    area = max(0.0, float(box[2]) - float(box[0])) * max(
+        0.0, float(box[3]) - float(box[1])
+    )
     characters = len("".join(MARKUP.sub(" ", str(element.get("text") or "")).split()))
     return characters * MIN_GLYPH_AREA > area
 

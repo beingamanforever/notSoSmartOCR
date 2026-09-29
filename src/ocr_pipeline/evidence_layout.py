@@ -154,6 +154,11 @@ class EvidenceLayoutStage:
                     if (region.text_provenance or {}).get("layout_category")
                     == "key-value-region"
                 ],
+                [
+                    region
+                    for region in updated
+                    if (region.text_provenance or {}).get("layout_category") == "form"
+                ],
             )
             ordered = [region for unit in units for region in unit]
             positions = {region.id: index for index, region in enumerate(ordered)}
@@ -459,12 +464,16 @@ def _spatial_order(
 
 
 def _learned_order(
-    top_level: list[TextRegion], fields: list[TextRegion]
+    top_level: list[TextRegion],
+    fields: list[TextRegion],
+    forms: list[TextRegion] = (),
 ) -> list[list[TextRegion]]:
     """Reading units in recursive XY-cut order (Ha et al., 1995).
 
-    A region inside a detected key-value field joins that field's unit, ordered as one
-    element as Docling's ReadingOrderModel orders a container's children. On
+    A detected container is ordered as one element, as Docling's ReadingOrderModel
+    orders a container's children: a key-value field's regions form one unit, and the
+    units of a form read row by row. XY-cut alone split a form at the gap between its
+    printed labels and handwritten values ("Pages: Phones: Date: 10 2/13/25"). On
     OmniDocBench English ground-truth boxes XY-cut beat Docling's rule-based predictor:
     reading-order edit 0.043 vs 0.064 on text pages and 0.046 vs 0.110 on table pages.
     """
@@ -473,32 +482,59 @@ def _learned_order(
         top_level,
         key=lambda region: (region.bounding_box.top, region.bounding_box.left),
     ):
-        box = region.bounding_box
-        holder = min(
-            (
-                field
-                for field in fields
-                if field.bounding_box.left
-                <= _horizontal_center(box)
-                <= field.bounding_box.right
-                and field.bounding_box.top <= _center(box) <= field.bounding_box.bottom
-            ),
-            key=lambda field: (
-                _height(field.bounding_box)
-                * (field.bounding_box.right - field.bounding_box.left)
-            ),
-            default=None,
-        )
+        holder = _container(region.bounding_box, fields)
         groups.setdefault(holder.id if holder else region.id, []).append(region)
     units = [
-        [
-            region
-            for unit in _xy_cut([[region] for region in members])
-            for region in unit
-        ]
+        [region for unit in _rows([[region] for region in members]) for region in unit]
         for members in groups.values()
     ]
-    return _xy_cut(units)
+    in_form: dict[str, list[list[TextRegion]]] = {}
+    for unit in units:
+        form = _container(_union(region.bounding_box for region in unit), forms)
+        in_form.setdefault(form.id if form else unit[0].id, []).append(unit)
+    blocks = [_rows(members) for members in in_form.values()]
+    order = _xy_cut([[region for unit in block for region in unit] for block in blocks])
+    by_first = {block[0][0].id: block for block in blocks}
+    return [unit for merged in order for unit in by_first[merged[0].id]]
+
+
+def _container(box: BoundingBox, containers: list[TextRegion]) -> TextRegion | None:
+    """The smallest container holding the box's centre."""
+    return min(
+        (
+            item
+            for item in containers
+            if item.bounding_box.left <= _horizontal_center(box) <= item.bounding_box.right
+            and item.bounding_box.top <= _center(box) <= item.bounding_box.bottom
+        ),
+        key=lambda item: _height(item.bounding_box)
+        * (item.bounding_box.right - item.bounding_box.left),
+        default=None,
+    )
+
+
+def _rows(units: list[list[TextRegion]]) -> list[list[TextRegion]]:
+    """Units in row order: a unit joins a row it shares a text line with, rows top down."""
+    rows: list[list[list[TextRegion]]] = []
+    for unit in sorted(units, key=lambda unit: _center(_union(r.bounding_box for r in unit))):
+        box = _union(region.bounding_box for region in unit)
+        row = next(
+            (
+                row
+                for row in rows
+                if all(_same_line(box, _union(r.bounding_box for r in other)) for other in row)
+            ),
+            None,
+        )
+        if row is None:
+            rows.append([unit])
+        else:
+            row.append(unit)
+    return [
+        unit
+        for row in rows
+        for unit in sorted(row, key=lambda unit: min(r.bounding_box.left for r in unit))
+    ]
 
 
 def _xy_cut(units: list[list[TextRegion]]) -> list[list[TextRegion]]:

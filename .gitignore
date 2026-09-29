@@ -36,6 +36,9 @@ experiments/results/
 
 # Unverified contract examples remain local.
 /artifacts/demo/contract_agreement.png
+/artifacts/demo/fax_cover.png
+/artifacts/demo/provider_roster.png
+/artifacts/demo/provider_agreement.png
 /artifacts/demo/contract_amendment.png
 /artifacts/demo/clinical_table_result.png
 

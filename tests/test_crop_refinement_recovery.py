@@ -1425,3 +1425,168 @@ def test_a_form_without_boxes_or_marks_is_not_read_for_controls(tmp_path, monkey
     result = refine_page(image, page, "base output", transport=transport)
 
     assert result.get("form_controls_added", 0) == 0
+
+
+def test_qwen_marks_a_pen_ticked_box_the_detector_calls_unselected():
+    from ocr_pipeline.markdown_refinement import _form_control_regions
+
+    form = {
+        "id": "form",
+        "kind": "figure",
+        "bounding_box": {"left": 0, "top": 0, "right": 200, "bottom": 100},
+        "structure": {"role": "form_source"},
+    }
+
+    def detected(state):
+        return {
+            "id": "box",
+            "kind": "checkbox",
+            "text": "Hypertension",
+            "bounding_box": {"left": 0, "top": 0, "right": 100, "bottom": 50},
+            "text_provenance": {"method": "learned_checkbox_detection"},
+            "structure": {"state": state, "label": "Hypertension"},
+        }
+
+    crop = {
+        "region_id": "crop-1",
+        "box": dict(form["bounding_box"]),
+        "source_ids": ["form"],
+    }
+
+    def merge(heron_state, qwen_state):
+        control = {
+            "label": "Hypertension",
+            "state": qwen_state,
+            "bbox_2d": [0, 0, 500, 500],
+        }
+        records = [{"region_id": "crop-1", "controls": [control]}]
+        box = detected(heron_state)
+        return _form_control_regions(
+            [crop], records, {"form": form, "box": box}, [form, box], "qwen", 0
+        )
+
+    assert merge("unselected", "selected") == ([], [], {"box"})
+    # A detected mark is never cleared by the reader.
+    controls, errors, marked = merge("selected", "unselected")
+    assert (controls, marked) == ([], set())
+    assert errors == ["crop-1 disagrees with an existing physical control"]
+
+
+def test_a_glyph_sized_crop_is_upscaled_without_padding():
+    import base64
+    import io
+
+    from ocr_pipeline.markdown_refinement import QWEN_MIN_SIDE, _image_content
+
+    content = _image_content(Image.new("RGB", (8, 12), "black"))
+    data = content["image_url"]["url"].split(",", 1)[1]
+    with Image.open(io.BytesIO(base64.b64decode(data))) as sent:
+        assert min(sent.size) >= QWEN_MIN_SIDE
+        assert sent.width * 12 == sent.height * 8
+        assert sent.getextrema() == ((0, 0), (0, 0), (0, 0))
+
+
+def test_a_reader_option_off_the_printed_box_is_the_same_control():
+    from ocr_pipeline.markdown_refinement import _same_form_control
+
+    printed = {
+        "text": "Please Reply",
+        "structure": {"label": "Please Reply"},
+        "bounding_box": {"left": 1980, "top": 2556, "right": 2519, "bottom": 2730},
+    }
+    read = {
+        "label": "Please Reply",
+        "bounding_box": {"left": 1877, "top": 2535, "right": 2102, "bottom": 2712},
+    }
+    other = {"label": "Please Comment", "bounding_box": read["bounding_box"]}
+
+    assert _same_form_control(read, printed)
+    assert not _same_form_control(other, printed)
+
+
+@pytest.mark.parametrize("angle", [0, 90])
+def test_thin_form_control_maps_sent_pixels_back_to_source(
+    tmp_path, monkeypatch, angle
+):
+    import base64
+    import io
+
+    from PIL import ImageDraw, ImageOps
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    source = Image.new("RGB", (220, 40), "white")
+    ImageDraw.Draw(source).rectangle((20, 12, 99, 17), fill="black")
+    path = tmp_path / "thin-form.png"
+    source.save(path)
+    page = {
+        "page_number": 1,
+        "width": 220,
+        "height": 40,
+        "regions": [
+            {
+                "id": "form",
+                "kind": "figure",
+                "text": "",
+                "resolution": "unreadable",
+                "bounding_box": {"left": 10, "top": 10, "right": 210, "bottom": 22},
+                "structure": {"role": "form_source"},
+            },
+            {
+                "id": "known",
+                "kind": "checkbox",
+                "text": "Known option",
+                "resolution": "resolved",
+                "bounding_box": {"left": 180, "top": 10, "right": 190, "bottom": 22},
+                "structure": {"state": "unselected"},
+            },
+        ],
+    }
+    original = copy.deepcopy(page)
+
+    def transport(request, timeout):
+        body = json.loads(request.data)
+        images = [
+            part["image_url"]["url"]
+            for part in body["messages"][1]["content"]
+            if part["type"] == "image_url"
+        ]
+        assert len(images) == 1
+        with Image.open(
+            io.BytesIO(base64.b64decode(images[0].split(",", 1)[1]))
+        ) as sent:
+            # Locate the actual synthetic mark in the submitted image, as the reader does.
+            box = ImageOps.invert(sent.convert("RGB")).getbbox()
+            normalized = [
+                round(value * 1000 / side)
+                for value, side in zip(box, (sent.width, sent.height) * 2)
+            ]
+        return _answering(
+            [
+                {
+                    "region_id": "crop-1",
+                    "markdown": "[form options extracted]",
+                    "controls": [
+                        {
+                            "label": "New option",
+                            "group_label": "",
+                            "state": "selected",
+                            "bbox_2d": normalized,
+                        }
+                    ],
+                }
+            ]
+        )(request, timeout)
+
+    result = refine_page(
+        path, page, "original", rotation_degrees=angle, transport=transport
+    )
+    assert result["status"] == "generated"
+    control = next(r for r in result["refined_regions"] if r["text"] == "New option")
+    assert control["bounding_box"] == {
+        "left": 20,
+        "top": 12,
+        "right": 100,
+        "bottom": 18,
+    }
+    assert control["structure"]["state"] == "selected"
+    assert page == original

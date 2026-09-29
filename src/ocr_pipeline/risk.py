@@ -13,6 +13,12 @@ from .providers import ReaderError
 PROVIDER = "deterministic-evidence-risk"
 REASON = "likely_misread_text"
 RETRY_REASON = "sampled_retry_read"
+SECOND_READER_REASON = "second_reader_doubt"
+# docTR's printed-text reader doubts a word it holds. Falcon's likelihood stays high on
+# confident handwriting misreads, and a monotone calibration cannot reorder those; routing
+# on this too sent 42 of 81 missed handwritten snippets to Qwen instead of 22, for 19.5%
+# of text regions instead of 13.5% (hw cohort, 2026-09-29).
+SECOND_READER_DOUBT = 0.5
 
 
 class EvidenceRiskStage:
@@ -66,4 +72,7 @@ def _risk(region: TextRegion) -> str | None:
     # Qwen beat Falcon below 0.5 (0.42 vs 0.24, 0.72 vs 0.50) and not above it.
     if calibrated and region.confidence is not None and region.confidence < 0.5:
         return REASON
+    second = provenance.get("second_reader") or {}
+    if second.get("min_word_confidence", 1.0) < SECOND_READER_DOUBT:
+        return SECOND_READER_REASON
     return None

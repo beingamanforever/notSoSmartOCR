@@ -235,6 +235,14 @@ def refine_document(
         )
         started = time.perf_counter()
         try:
+            orientation = next(
+                (
+                    region.text_provenance["orientation"]
+                    for region in page.regions
+                    if (region.text_provenance or {}).get("orientation")
+                ),
+                {},
+            )
             result = refine_page(
                 image_path,
                 raw,
@@ -242,6 +250,7 @@ def refine_document(
                 model=QWEN_37_FLASH_MODEL,
                 zero_data_retention=zero_data_retention,
                 transport=transport,
+                rotation_degrees=orientation.get("angle", 0),
             )
             refined = result.pop("refined_regions", None)
             if refined is not None:
@@ -371,7 +380,7 @@ def refine_page(
         source_image = image.convert("RGB")
         sheet = _contact_sheet(source_image, crops, width, height, rotation_degrees)
         if any("owned_form_row" in crop["routing_reasons"] for crop in crops):
-            page_context = source_image.copy()
+            page_context = source_image.rotate(rotation_degrees, expand=True)
             page_context.thumbnail((800, 800))
             metadata["input_mode"] = "separate_crop_images_with_page_context"
     metadata["crops"] = [
@@ -667,7 +676,7 @@ def refine_page(
             errors.append(f"{record['region_id']} returned empty content")
             rejected.add(record["region_id"])
     answers = {r["region_id"]: r["markdown"] for r in records}
-    form_controls, control_errors = (
+    form_controls, control_errors, marked_ids = (
         _form_control_regions(
             completed_crops,
             records,
@@ -677,7 +686,7 @@ def refine_page(
             rotation_degrees,
         )
         if records_complete
-        else ([], [])
+        else ([], [], set())
     )
     errors.extend(control_errors)
     controls_by_crop = {
@@ -899,6 +908,20 @@ def refine_page(
         else region
         for region in regions
     ]
+    refined = [
+        {
+            **r,
+            "structure": {
+                **r["structure"],
+                "state": "selected",
+                "state_source": "qwen_form_option_extraction",
+                "detector_state": "unselected",
+            },
+        }
+        if r["id"] in marked_ids
+        else r
+        for r in refined
+    ]
     refined.extend(form_controls)
     index = {r["id"]: r for r in refined}
     control_owner_ids = {
@@ -1112,6 +1135,7 @@ def _form_control_regions(
     records_by_id = {record["region_id"]: record for record in records}
     controls = []
     errors = []
+    marked_ids = set()
     existing = [region for region in regions if region.get("kind") == "checkbox"]
     for crop in crops:
         source = source_index[crop["source_ids"][0]]
@@ -1154,7 +1178,14 @@ def _form_control_regions(
             )
             if duplicate is not None:
                 prior_state = (duplicate.get("structure") or {}).get("state")
-                if prior_state in {"selected", "unselected"} and prior_state != state:
+                detected = (duplicate.get("text_provenance") or {}).get(
+                    "method"
+                ) == "learned_checkbox_detection"
+                # Heron misses a pen mark over a printed box: on handwritten forms Qwen's
+                # "selected" was right in 6 of the 7 cases where the two disagreed.
+                if detected and prior_state == "unselected" and state == "selected":
+                    marked_ids.add(duplicate["id"])
+                elif prior_state in {"selected", "unselected"} and prior_state != state:
                     errors.append(
                         f"{crop['region_id']} disagrees with an existing physical control"
                     )
@@ -1202,7 +1233,7 @@ def _form_control_regions(
                     },
                 }
             )
-    return controls, errors
+    return controls, errors, marked_ids
 
 
 def _owned_label_ids(source, option_box, source_index):
@@ -1277,7 +1308,9 @@ def _same_form_control(first, second):
     ]
     if intersection >= min(areas) * 0.75:
         return True
-    return intersection >= min(areas) * 0.5 and " ".join(
+    # The same label on an overlapping box is the same control: Qwen's option boxes sit
+    # a little off the printed ones, and a copy took its form's place in reading order.
+    return intersection > 0 and " ".join(
         first["label"].casefold().split()
     ) == " ".join(
         str((second.get("structure") or {}).get("label") or second.get("text") or "")
@@ -1533,7 +1566,18 @@ def _finite(value):
     )
 
 
+# Qwen-VL resizes to multiples of 28 px (14 px patches, 2x2 merge) and rejects an image
+# with a shorter side: a glyph-sized crop failed the whole page's request.
+QWEN_MIN_SIDE = 28
+
+
 def _image_content(image):
+    if min(image.size) < QWEN_MIN_SIDE:
+        # Integer scaling preserves pixels and normalized source coordinates.
+        scale = math.ceil(QWEN_MIN_SIDE / min(image.size))
+        image = image.resize(
+            (image.width * scale, image.height * scale), Image.Resampling.NEAREST
+        )
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return {

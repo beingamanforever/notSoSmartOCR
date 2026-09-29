@@ -758,7 +758,10 @@ def create_server(
                         **options,
                         "detections": [[elements[index] for index in pending]],
                         "temperature": temperature,
-                        "min_image_size": RETRY_MIN_IMAGE_SIZE,
+                        "min_image_size": min(
+                            RETRY_MIN_IMAGE_SIZE,
+                            options.get("max_image_size", FALCON_MAX_IMAGE_SIZE),
+                        ),
                         "max_new_tokens": cap,
                     },
                 )[0]
@@ -961,7 +964,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         OCRInferenceEngine,
     )
     from ocr_pipeline.digital_tables import DigitalTableReader
-    from ocr_pipeline.coverage import orphan_text_detections
+    from ocr_pipeline.coverage import grown_tables, orphan_text_detections
     from ocr_pipeline.heron_layout import (
         CONTROL_LABELS,
         CONTROL_REGION_LABELS,
@@ -1061,7 +1064,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     resolved = resolve_layout(proposals, *image.size, page_cells)
                 if page_words and not page_cells and self.orphan_text:
-                    resolved = [*resolved, *orphan_text_detections(resolved, page_words, image)]
+                    resolved = grown_tables(resolved, page_words)
+                    resolved = [*resolved, *orphan_text_detections(resolved, page_words)]
                 detections.append(_route_detection(proposals, resolved))
             return detections
 
