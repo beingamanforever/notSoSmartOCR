@@ -11,12 +11,12 @@
   <style>
     :root {
       color-scheme: light;
-      --background: #fbfbfc; --sidebar: #f7f7f8; --panel: #ffffff; --surface: #fafafa; --surface-2: #f3f3f5; --raised: #eeeef1;
-      --line: #ececef; --line-strong: #e1e1e6; --text: #18181b; --text-2: #3f3f46; --muted: #71717a;
-      --accent: #6d28d9; --accent-2: #7c3aed; --accent-soft: #f1ebff;
-      --blue: #3b82f6; --teal: #14b8a6; --pink: #d946ef; --amber: #f59e0b;
+      --background: #fafafa; --sidebar: #f6f6f7; --panel: #ffffff; --surface: #fcfcfc; --surface-2: #f5f5f5; --raised: #f0f0f0;
+      --line: #f0f0f0; --line-strong: #e6e6e6; --text: #1f1f1f; --text-2: #3d3d3d; --muted: #666666;
+      --accent: #4250d5; --accent-2: #5b63e6; --accent-soft: #e8effc;
+      --ocr: color-mix(in srgb, var(--accent) 28%, var(--panel)); --llm: var(--accent); --kept: #c2780a; --wait: color-mix(in srgb, var(--muted) 30%, var(--panel));
       --positive: #15803d; --positive-soft: #ecfdf3; --warning: #b45309; --warning-soft: #fff7ed; --danger: #b91c1c; --danger-soft: #fef2f2;
-      --heat-0: #f1f1f4; --heat-1: #dfd3fb; --heat-2: #b89af3; --heat-3: #8b5cf6; --heat-4: #6d28d9;
+      --heat-0: #f0f0f2; --heat-1: #d4daf8; --heat-2: #a3adf0; --heat-3: #6f7be4; --heat-4: #4250d5;
       --shadow-1: 0 1px 2px rgb(16 24 40 / .04);
       --shadow-pop: 0 20px 48px -12px rgb(16 24 40 / .25), 0 2px 6px rgb(16 24 40 / .06);
       --motion: 180ms cubic-bezier(0.2, 0, 0, 1);
@@ -25,11 +25,11 @@
     @media (prefers-color-scheme: dark) {
       :root {
         color-scheme: dark;
-        --background: #0f0f11; --sidebar: #131316; --panel: #17171a; --surface: #1b1b1f; --surface-2: #202025; --raised: #26262c;
-        --line: #26262c; --line-strong: #34343c; --text: #f4f4f5; --text-2: #d4d4d8; --muted: #a1a1aa;
-        --accent: #a78bfa; --accent-2: #a78bfa; --accent-soft: #2a2140;
+        --background: #111113; --sidebar: #141417; --panel: #18181b; --surface: #1c1c20; --surface-2: #1f1f23; --raised: #26262b;
+        --line: #2a2a2f; --line-strong: #3a3a40; --text: #f5f5f5; --text-2: #d4d4d8; --muted: #a1a1aa;
+        --accent: #9aa6ff; --accent-2: #9aa6ff; --accent-soft: #262a45;
         --positive: #4ade80; --positive-soft: #13261a; --warning: #fbbf24; --warning-soft: #2b2110; --danger: #f87171; --danger-soft: #2c1414;
-        --heat-0: #202025; --heat-1: #3b2d63; --heat-2: #5b40a0; --heat-3: #7c5cd6; --heat-4: #a78bfa;
+        --heat-0: #1f1f23; --heat-1: #2a3060; --heat-2: #3f4a96; --heat-3: #6470d0; --heat-4: #9aa6ff;
       }
     }
     * { box-sizing: border-box; }
@@ -51,6 +51,10 @@
     .nav a[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
     .nav .count { margin-left: auto; padding: 1px 7px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: .7rem; font-weight: 600; }
     .sidebar .foot { margin-top: auto; display: grid; gap: 4px; }
+    .sidebar .credit { margin: 10px 10px 6px; color: var(--muted); font-size: .72rem; line-height: 1.5; }
+    .sidebar .credit b { color: var(--text-2); font-weight: 600; }
+    .sidebar .credit a { display: inline; height: auto; padding: 0; color: var(--accent); }
+    .sidebar .credit a:hover { background: none; text-decoration: underline; }
 
     .main { min-width: 0; padding: 26px 36px 48px; }
     .page-head { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; margin-bottom: 22px; }
@@ -59,9 +63,11 @@
     .page-head .actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
     .live { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: .78rem; }
     .live::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--positive); box-shadow: 0 0 0 0 color-mix(in srgb, var(--positive) 50%, transparent); animation: pulse 2s infinite; }
+    .queue { display: inline-flex; align-items: center; height: 28px; padding: 0 11px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: .78rem; font-variant-numeric: tabular-nums; }
+    .queue.busy { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
     .live.paused::before { background: var(--muted); animation: none; }
     @keyframes pulse { 70% { box-shadow: 0 0 0 7px transparent; } }
-    .control { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel); color: var(--text); font-size: .82rem; font-weight: 500; cursor: pointer; transition: background-color var(--motion); }
+    .control { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 999px; text-decoration: none; background: var(--panel); color: var(--text); font-size: .82rem; font-weight: 500; cursor: pointer; transition: background-color var(--motion); }
     .control:hover { background: var(--surface-2); }
     .control.square { width: 36px; justify-content: center; padding: 0; }
     select.control { appearance: none; padding-right: 30px; background: var(--panel) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center / 14px; }
@@ -70,11 +76,12 @@
 
     .card { border: 1px solid var(--line); border-radius: 14px; background: var(--panel); box-shadow: var(--shadow-1); }
     .card-head { display: flex; align-items: center; gap: 10px; padding: 16px 18px 0; }
+    .card > .table-wrap { margin-top: 12px; border-top: 1px solid var(--line); }
     .card-head h2, .summary-top h2 { margin: 0; font-size: .95rem; font-weight: 600; }
     .hint { color: var(--muted); font-size: .78rem; }
     .link { margin-left: auto; padding: 0; border: 0; background: none; color: var(--text-2); font-size: .8rem; font-weight: 500; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 
-    .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+    .stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
     .stat { display: grid; grid-template-columns: minmax(0, 1fr) 96px; align-items: end; gap: 4px 12px; padding: 16px 18px; }
     .stat .label { grid-column: 1 / -1; color: var(--muted); font-size: .8rem; font-weight: 500; }
     .stat .value { font-size: 1.6rem; font-weight: 700; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
@@ -87,16 +94,17 @@
     .summary > section { padding: 18px; }
     .summary > section + section { border-left: 1px solid var(--line); }
     .summary-top { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 12px; }
-    .segmented { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); }
-    .segmented button { height: 28px; padding: 0 12px; border: 0; border-radius: 7px; background: transparent; color: var(--text-2); font-size: .8rem; font-weight: 500; cursor: pointer; transition: background-color var(--motion), color var(--motion); }
+    .segmented { display: inline-flex; gap: 2px; padding: 3px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--surface-2); }
+    .segmented button { height: 28px; padding: 0 13px; border: 0; border-radius: 999px; background: transparent; color: var(--text-2); font-size: .8rem; font-weight: 500; cursor: pointer; transition: background-color var(--motion), color var(--motion); }
     .segmented button[aria-pressed="true"] { background: var(--panel); color: var(--accent); box-shadow: 0 1px 2px rgb(16 24 40 / .1); }
     .big { font-size: 2.3rem; font-weight: 700; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
     .big-note { color: var(--muted); font-size: .8rem; }
     .chart svg { display: block; width: 100%; height: 220px; margin-top: 10px; overflow: visible; }
     .chart .grid line { stroke: var(--line); stroke-dasharray: 3 4; }
     .chart text { fill: var(--muted); font-size: 11px; }
-    .chart rect.bar { fill: var(--accent-2); transition: opacity var(--motion); }
-    .chart rect.bar.llm { fill: var(--pink); }
+    .chart rect.bar { fill: var(--ocr); transition: opacity var(--motion); }
+    .chart rect.bar.llm { fill: var(--llm); }
+    .chart rect.bar.wait { fill: var(--wait); }
     .chart rect.bar:hover { opacity: .75; }
     .legend { display: flex; gap: 14px; margin-top: 6px; color: var(--muted); font-size: .74rem; }
     .legend i { display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 3px; vertical-align: -1px; }
@@ -115,7 +123,7 @@
     .timing { display: grid; gap: 14px; padding: 16px 18px 6px; }
     .timing-bar { display: flex; height: 12px; overflow: hidden; border-radius: 999px; background: var(--surface-2); }
     .timing-bar i { display: block; height: 100%; }
-    .timing-rows { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .timing-rows { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; }
     .timing-rows div { display: grid; gap: 3px; }
     .timing-rows span { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: .76rem; }
     .timing-rows span i { width: 8px; height: 8px; border-radius: 3px; }
@@ -138,7 +146,7 @@
     .tabs button { height: 38px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--text-2); font-weight: 500; cursor: pointer; }
     .tabs button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
     .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line); }
-    .search { flex: 1; min-width: 220px; display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel); color: var(--muted); }
+    .search { flex: 1; min-width: 220px; display: flex; align-items: center; gap: 8px; height: 36px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--panel); color: var(--muted); }
     .search input { flex: 1; border: 0; outline: 0; background: none; color: var(--text); }
     .table-wrap { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; }
@@ -161,6 +169,7 @@
     .badge.bad { background: var(--danger-soft); color: var(--danger); }
     .badge.llm { background: var(--accent-soft); color: var(--accent); }
     .badge.plain::before { display: none; }
+    .badge.cache { background: var(--surface-2); color: var(--text-2); }
     .empty-state { display: grid; justify-items: center; gap: 6px; padding: 56px 20px; text-align: center; }
     .empty-state b { font-size: 1rem; }
     .empty-state span { color: var(--muted); }
@@ -171,49 +180,70 @@
     .login .brand { padding: 0; }
     .login h2 { margin: 6px 0 0; font-size: 1.2rem; letter-spacing: -.02em; }
     .login p { margin: 0; color: var(--muted); line-height: 1.55; }
-    .login input { height: 42px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--panel); }
+    .login input { height: 42px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--panel); }
     .login .error { min-height: 1em; color: var(--danger); font-size: .8rem; }
-    .button { height: 42px; border: 0; border-radius: 10px; background: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
+    .button { height: 42px; border: 0; border-radius: 999px; background: var(--text); color: var(--panel); font-weight: 600; cursor: pointer; }
 
-    /* One request, one panel: the page with its routed regions, then why and what came back. */
-    .drawer { position: fixed; inset: 0; z-index: 30; display: grid; grid-template-columns: 1fr min(1180px, 100%); background: rgb(9 9 11 / .32); }
+    /* One request, one panel: the page with what was routed, then why and what came back. */
+    .drawer { position: fixed; inset: 0; z-index: 30; display: grid; grid-template-columns: 1fr min(1200px, 100%); background: rgb(9 9 11 / .32); }
     .drawer-body { display: grid; grid-template-rows: auto 1fr; overflow: hidden; border-left: 1px solid var(--line); background: var(--panel); box-shadow: var(--shadow-pop); animation: slide 220ms var(--motion); }
     @keyframes slide { from { transform: translateX(28px); opacity: 0; } }
-    .drawer-head { display: flex; align-items: center; gap: 10px; padding: 14px 18px; border-bottom: 1px solid var(--line); }
-    .drawer-head h3 { margin: 0; overflow: hidden; font-size: 1rem; text-overflow: ellipsis; white-space: nowrap; }
-    .drawer-head .control:first-of-type { margin-left: auto; }
-    .inspect { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); overflow: hidden; }
-    .viewer { position: relative; overflow: auto; padding: 18px; border-right: 1px solid var(--line); background: var(--surface-2); }
-    .page-stage { position: relative; margin: 0 auto; border-radius: 6px; background: var(--panel); box-shadow: 0 0 0 1px var(--line), var(--shadow-pop); }
+    .drawer-head { display: flex; align-items: center; gap: 14px; padding: 18px 24px; border-bottom: 1px solid var(--line); }
+    .drawer-head .file-icon { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 11px; background: var(--surface-2); color: var(--text-2); }
+    .drawer-head h3 { margin: 0; overflow: hidden; font-size: 1.02rem; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+    .drawer-head p { margin: 2px 0 0; color: var(--muted); font-size: .8rem; }
+    .drawer-head .tools { margin-left: auto; display: flex; gap: 6px; }
+    .icon-button { display: grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 999px; background: transparent; color: var(--text-2); cursor: pointer; transition: background-color var(--motion); }
+    .icon-button:hover { background: var(--surface-2); }
+    .icon-button svg { width: 18px; height: 18px; }
+    .inspect { display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 440px); overflow: hidden; }
+    .viewer { overflow: auto; padding: 28px; background: var(--surface-2); }
+    .page-stage { position: relative; max-width: 720px; margin: 0 auto; border-radius: 6px; background: var(--panel); box-shadow: 0 0 0 1px var(--line), 0 12px 32px -12px rgb(16 24 40 / .22); }
     .page-stage img { display: block; width: 100%; border-radius: 6px; }
     .page-stage svg { position: absolute; inset: 0; width: 100%; height: 100%; }
-    .page-stage rect { fill: transparent; stroke-width: 1.2; vector-effect: non-scaling-stroke; cursor: pointer; transition: fill var(--motion); }
-    .page-stage rect.ocr { stroke: color-mix(in srgb, var(--blue) 55%, transparent); }
-    .page-stage rect.routed { stroke: var(--pink); stroke-width: 2; fill: color-mix(in srgb, var(--pink) 10%, transparent); }
-    .page-stage rect.kept { stroke: var(--amber); stroke-width: 2; fill: color-mix(in srgb, var(--amber) 10%, transparent); }
-    .page-stage rect.active { fill: color-mix(in srgb, var(--accent) 22%, transparent); stroke: var(--accent); stroke-width: 2.5; }
-    .viewer-legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; color: var(--muted); font-size: .74rem; }
-    .viewer-legend i { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border: 2px solid; border-radius: 3px; vertical-align: -1px; }
-    .side { overflow: auto; padding: 18px; display: grid; gap: 16px; align-content: start; }
-    .facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: hidden; border: 1px solid var(--line); border-radius: 12px; }
-    .facts div { display: grid; gap: 4px; padding: 11px 13px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-    .facts span { color: var(--muted); font-size: .72rem; }
-    .facts b { font-weight: 600; font-size: .86rem; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
-    .section-title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: .86rem; font-weight: 600; }
-    .section-title .hint { font-weight: 400; }
-    .histogram { display: grid; grid-template-columns: repeat(10, 1fr); align-items: end; gap: 3px; height: 70px; padding: 0 2px; }
-    .histogram i { display: block; border-radius: 3px 3px 0 0; background: var(--accent-2); opacity: .85; min-height: 2px; }
-    .histogram-axis { display: flex; justify-content: space-between; color: var(--muted); font-size: .7rem; }
+    .page-stage rect { fill: transparent; stroke-width: 1; vector-effect: non-scaling-stroke; cursor: pointer; transition: fill var(--motion), stroke var(--motion); }
+    .page-stage rect.ocr { stroke: color-mix(in srgb, var(--muted) 35%, transparent); }
+    .page-stage rect.ocr:hover { stroke: var(--muted); }
+    .page-stage rect.routed { stroke: var(--llm); stroke-width: 1.6; fill: color-mix(in srgb, var(--llm) 8%, transparent); }
+    .page-stage rect.kept { stroke: var(--kept); stroke-width: 1.6; stroke-dasharray: 5 3; }
+    .page-stage rect.active { fill: color-mix(in srgb, var(--llm) 18%, transparent); stroke: var(--llm); stroke-width: 2.4; stroke-dasharray: none; }
+    .viewer-legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 18px; max-width: 720px; margin: 16px auto 0; color: var(--muted); font-size: .76rem; }
+    .viewer-legend span { display: inline-flex; align-items: center; gap: 7px; }
+    .viewer-legend i { width: 14px; height: 10px; border: 1.5px solid; border-radius: 3px; }
+    .side { overflow: auto; padding: 24px; display: grid; gap: 28px; align-content: start; }
+    .side h4 { display: flex; align-items: baseline; gap: 8px; margin: 0 0 12px; font-size: .86rem; font-weight: 650; }
+    .side h4 .hint { font-weight: 400; }
+    .facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px 16px; }
+    .facts > div { display: grid; align-content: start; gap: 4px; min-width: 0; }
+    .facts .fact-label { color: var(--muted); font-size: .74rem; }
+    .facts b { font-weight: 600; font-size: .88rem; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+    .timeline { display: flex; height: 8px; overflow: hidden; margin-top: 4px; border-radius: 999px; background: var(--surface-2); }
+    .timeline i { display: block; height: 100%; }
+    .timeline-legend { display: flex; gap: 16px; margin-top: 8px; color: var(--muted); font-size: .74rem; }
+    .timeline-legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .timeline-legend i { width: 8px; height: 8px; border-radius: 3px; }
+    .histogram { display: grid; grid-template-columns: repeat(10, 1fr); align-items: end; gap: 4px; height: 64px; }
+    .histogram i { display: block; min-height: 2px; border-radius: 4px 4px 1px 1px; background: var(--bin); transition: opacity var(--motion); }
+    .histogram i:hover { opacity: .7; }
+    .histogram-axis { display: flex; justify-content: space-between; margin-top: 6px; color: var(--muted); font-size: .7rem; }
+    .levels { margin-top: 10px; color: var(--muted); font-size: .78rem; }
+    .levels b { color: var(--text); font-weight: 600; }
+    .region-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .region-head h4 { margin: 0; }
     .region-list { display: grid; gap: 8px; }
-    .region { display: grid; gap: 6px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 11px; cursor: pointer; transition: border-color var(--motion), background-color var(--motion); }
-    .region:hover { border-color: var(--line-strong); background: var(--surface); }
-    .region.active { border-color: var(--accent); background: var(--accent-soft); }
-    .region-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-    .region-top b { font-size: .8rem; font-weight: 600; text-transform: capitalize; }
-    .region-top .conf { margin-left: auto; color: var(--muted); font-size: .76rem; font-variant-numeric: tabular-nums; }
-    .region .text { overflow-wrap: anywhere; font-size: .84rem; line-height: 1.5; }
-    .region .was { color: var(--muted); font-size: .78rem; text-decoration: line-through; overflow-wrap: anywhere; }
-    .segmented.small button { height: 24px; padding: 0 10px; font-size: .74rem; }
+    .region { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 4px 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; cursor: pointer; transition: border-color var(--motion), background-color var(--motion); }
+    .region:hover { border-color: var(--line-strong); }
+    .region.active { border-color: color-mix(in srgb, var(--llm) 45%, var(--line)); background: color-mix(in srgb, var(--llm) 5%, var(--panel)); }
+    .region .mark { grid-row: 1 / span 2; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; background: var(--surface-2); color: var(--muted); }
+    .region .mark svg { width: 15px; height: 15px; }
+    .region .mark.llm { background: var(--accent-soft); color: var(--llm); }
+    .region .mark.kept { background: color-mix(in srgb, var(--kept) 12%, var(--panel)); color: var(--kept); }
+    .region .meta { align-self: center; overflow: hidden; color: var(--muted); font-size: .74rem; text-overflow: ellipsis; white-space: nowrap; }
+    .region .meta b { color: var(--text-2); font-weight: 600; text-transform: capitalize; }
+    .region .conf { align-self: center; color: var(--muted); font-size: .74rem; font-variant-numeric: tabular-nums; }
+    .region .text { grid-column: 2 / -1; overflow-wrap: anywhere; font-size: .86rem; line-height: 1.5; }
+    .region .was { grid-column: 2 / -1; color: var(--muted); font-size: .76rem; overflow-wrap: anywhere; }
+    .region .was span { margin-right: 6px; padding: 1px 6px; border-radius: 5px; background: var(--surface-2); font-size: .68rem; font-weight: 600; }
     @media (max-width: 1180px) { .stats { grid-template-columns: repeat(3, minmax(0, 1fr)); } .summary { grid-template-columns: 1fr; } .summary > section + section { border-left: 0; border-top: 1px solid var(--line); } }
     @media (max-width: 960px) { .inspect { grid-template-columns: 1fr; overflow: auto; } .viewer { border-right: 0; } }
     @media (max-width: 860px) {
@@ -249,6 +279,7 @@
       </nav>
       <div class="foot nav">
         <a href="/" target="_blank" rel="noopener"><svg class="icon" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>Open OCR</a>
+        <p class="credit">Built by <b>Aman Behera</b><br><a href="mailto:aman.behera@hilabs.com">aman.behera@hilabs.com</a></p>
         <a href="#" id="logout"><svg class="icon" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>Sign out</a>
       </div>
     </aside>
@@ -257,6 +288,7 @@
       <div class="page-head">
         <div><h1 id="title">Overview</h1><p id="subtitle"></p></div>
         <div class="actions">
+          <span class="queue" id="queue" title="Documents the GPU is reading now and waiting in line">Idle</span>
           <span class="live" id="live" title="Refreshes every 5 seconds while this tab is open">Live</span>
           <button class="control square" id="refresh" type="button" aria-label="Refresh now" title="Refresh now"><svg class="icon" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8M21 3v5h-5"/></svg></button>
           <select class="control" id="range" aria-label="Time range">
@@ -293,7 +325,7 @@
           </section>
         </article>
         <div class="two">
-          <article class="card"><div class="card-head"><h2>Where the time goes</h2><span class="hint">median request</span></div><div class="timing" id="timing"></div></article>
+          <article class="card"><div class="card-head"><h2>Where the time goes</h2><span class="hint">average request</span></div><div class="timing" id="timing"></div></article>
           <article class="card"><div class="card-head"><h2>Why regions went to the LLM</h2><span class="hint">routing reasons</span></div><ol class="ranked" id="routing"></ol></article>
         </div>
         <div class="two">
@@ -302,7 +334,7 @@
         </div>
         <article class="card">
           <div class="card-head"><h2>Latest requests</h2><span class="hint">live</span><button class="link" type="button" data-go="logs">View all</button></div>
-          <div class="table-wrap"><table><tbody id="latest"></tbody></table></div>
+          <div class="table-wrap"><table><thead><tr><th>Date</th><th>Document</th><th>User</th><th class="num">Pages</th><th class="num">OCR</th><th class="num">LLM</th><th class="num">Total</th><th>LLM crops</th><th class="num">Cost</th><th>Status</th><th>Feedback</th></tr></thead><tbody id="latest"></tbody></table></div>
         </article>
       </section>
 
@@ -357,35 +389,46 @@
     <span data-close></span>
     <aside class="drawer-body" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
       <div class="drawer-head">
-        <h3 id="drawer-title"></h3>
-        <a class="control" id="drawer-open" target="_blank" rel="noopener">Full image</a>
-        <button class="control" type="button" data-close>Close</button>
+        <span class="file-icon"><svg class="icon" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg></span>
+        <div><h3 id="drawer-title"></h3><p id="drawer-subtitle"></p></div>
+        <div class="tools">
+          <a class="icon-button" id="drawer-open" target="_blank" rel="noopener" aria-label="Open the full page image" title="Open the full page image"><svg class="icon" viewBox="0 0 24 24"><path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg></a>
+          <button class="icon-button" type="button" data-close aria-label="Close" title="Close"><svg class="icon" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+        </div>
       </div>
       <div class="inspect">
         <div class="viewer">
           <div class="page-stage" id="stage"><img id="drawer-image" alt="First page of the request"><svg id="overlay" preserveAspectRatio="none"></svg></div>
           <div class="viewer-legend">
-            <span><i style="border-color: color-mix(in srgb, var(--blue) 55%, transparent)"></i>OCR</span>
-            <span><i style="border-color: var(--pink)"></i>OCR + LLM, LLM answer used</span>
-            <span><i style="border-color: var(--amber)"></i>OCR + LLM, OCR kept</span>
+            <span><i style="border-color: color-mix(in srgb, var(--muted) 45%, transparent)"></i>OCR</span>
+            <span><i style="border-color: var(--llm); background: color-mix(in srgb, var(--llm) 10%, transparent)"></i>OCR + LLM</span>
+            <span><i style="border-color: var(--kept); border-style: dashed"></i>LLM checked, OCR kept</span>
           </div>
         </div>
         <div class="side">
-          <div class="facts" id="facts"></div>
-          <div>
-            <h4 class="section-title">Confidence <span class="hint" id="confidence-note"></span></h4>
+          <section><div class="facts" id="facts"></div></section>
+          <section>
+            <h4>Time</h4>
+            <div class="timeline" id="timeline"></div>
+            <div class="timeline-legend" id="timeline-legend"></div>
+          </section>
+          <section>
+            <h4>Confidence <span class="hint" id="confidence-note"></span></h4>
             <div class="histogram" id="histogram"></div>
             <div class="histogram-axis"><span>0%</span><span>50%</span><span>100%</span></div>
-          </div>
-          <div class="summary-top" style="margin: 0">
-            <h4 class="section-title">Regions <span class="hint" id="region-count"></span></h4>
-            <div class="segmented small" role="group" aria-label="Regions shown">
-              <button type="button" data-regions="routed" aria-pressed="true">Routed</button>
-              <button type="button" data-regions="low" aria-pressed="false">Low confidence</button>
-              <button type="button" data-regions="all" aria-pressed="false">All</button>
+            <div class="levels" id="levels"></div>
+          </section>
+          <section>
+            <div class="region-head">
+              <h4>Regions <span class="hint" id="region-count"></span></h4>
+              <div class="segmented small" role="group" aria-label="Regions shown">
+                <button type="button" data-regions="routed" aria-pressed="true">Routed</button>
+                <button type="button" data-regions="low" aria-pressed="false">Below 90%</button>
+                <button type="button" data-regions="all" aria-pressed="false">All</button>
+              </div>
             </div>
-          </div>
-          <div class="region-list" id="region-list"></div>
+            <div class="region-list" id="region-list"></div>
+          </section>
         </div>
       </div>
     </aside>
@@ -464,7 +507,7 @@
     };
 
     function delta(now, before, better = "up") {
-      if (!before) return { text: "No prior data", tone: "" };
+      if (!before) return { text: "", tone: "" };
       const change = (now - before) / before;
       return { text: `${change >= 0 ? "+" : ""}${Math.round(change * 100)}% vs prior period`, tone: (better === "up" ? change >= 0 : change <= 0) ? "up" : "down" };
     }
@@ -472,8 +515,12 @@
     function sparkline(values, color) {
       const node = svg("svg", { viewBox: "0 0 96 30", "aria-hidden": "true" });
       const top = Math.max(0, ...values.map((value) => value || 0));
-      const points = values.map((value, index) => `${(index / Math.max(1, values.length - 1)) * 96},${top ? 28 - (26 * (value || 0)) / top : 28}`).join(" ");
-      node.append(svg("polyline", { points, fill: "none", stroke: color, "stroke-width": 1.8, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+      const coords = values.map((value, index) => [(index / Math.max(1, values.length - 1)) * 96, top ? 27 - (24 * (value || 0)) / top : 27]);
+      const line = coords.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
+      node.append(svg("polygon", { points: `0,30 ${line} 96,30`, fill: color, opacity: 0.1 }));
+      node.append(svg("polyline", { points: line, fill: "none", stroke: color, "stroke-width": 1.6, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+      const [x, y] = coords.at(-1);
+      node.append(svg("circle", { cx: x, cy: y, r: 2.4, fill: color }));
       return node;
     }
 
@@ -484,17 +531,29 @@
       const latency = (items) => median(items.map((entry) => entry.total_seconds));
       const cards = [
         ["Requests", count(now.length), delta(now.length, before.length), series.map((b) => b.items.length), "var(--accent-2)"],
-        ["Pages read", count(sum(now, "pages")), delta(sum(now, "pages"), sum(before, "pages")), series.map((b) => sum(b.items, "pages")), "var(--blue)"],
-        ["Users", count(users(now)), delta(users(now), users(before)), series.map((b) => users(b.items)), "var(--teal)"],
-        ["Median time", seconds(latency(now)), delta(latency(now), latency(before) || 0, "down"), series.map((b) => latency(b.items) || 0), "var(--amber)"],
-        ["LLM spend", money(sum(now, "llm_cost_usd")), delta(sum(now, "llm_cost_usd"), sum(before, "llm_cost_usd"), "down"), series.map((b) => sum(b.items, "llm_cost_usd")), "var(--pink)"],
+        ["Pages read", count(sum(now, "pages")), delta(sum(now, "pages"), sum(before, "pages")), series.map((b) => sum(b.items, "pages")), "var(--accent)"],
+        ["Users", count(users(now)), delta(users(now), users(before)), series.map((b) => users(b.items)), "var(--accent)"],
+        ["Median time", seconds(latency(now)), delta(latency(now), latency(before) || 0, "down"), series.map((b) => latency(b.items) || 0), "var(--accent)"],
+        ["LLM spend", money(sum(now, "llm_cost_usd")), delta(sum(now, "llm_cost_usd"), sum(before, "llm_cost_usd"), "down"), series.map((b) => sum(b.items, "llm_cost_usd")), "var(--llm)"],
+        ["Served from cache", now.length ? percent(now.filter(cachedRequest).length / now.length) : "-", cacheNote(), series.map((b) => b.items.filter(cachedRequest).length), "var(--accent)"],
       ];
       byId("stats").replaceChildren(...cards.map(([label, value, change, values, color]) => element("div", { className: "card stat" }, [
         element("span", { className: "label", textContent: label }),
         element("span", { className: "value", textContent: value }),
         sparkline(values, color),
-        element("span", { className: `delta ${change.tone}`, textContent: change.text }),
+        element("span", { className: `delta ${typeof change === "string" ? "" : change.tone}`, textContent: typeof change === "string" ? change : change.text }),
       ])));
+    }
+
+    // A request whose pages and LLM answers all came from the content caches.
+    const cachedRequest = (entry) => entry.page_cache_hits > 0 && entry.page_cache_hits >= (entry.pages || 1)
+      && !(entry.llm_cache_misses > 0);
+    function cacheNote() {
+      const caches = Object.values(state.caches || {});
+      if (!caches.length) return "Caching is off";
+      // Hit counters restart with the service; the share above comes from the records.
+      const used = caches.reduce((all, cache) => all + cache.bytes, 0), limit = caches.reduce((all, cache) => all + cache.max_bytes, 0);
+      return `${bytes(used)} of ${bytes(limit)} in use`;
     }
 
     function renderChart() {
@@ -506,9 +565,12 @@
       const width = 760, height = 200, left = 40, bottom = 24;
       const stacked = state.metric === "requests" || state.metric === "latency";
       const values = series.map((bucket) => state.metric === "latency"
-        ? (median(bucket.items.map((e) => e.ocr_seconds)) || 0) + (median(bucket.items.filter((e) => e.llm_crops > 0).map((e) => e.llm_seconds)) || 0)
+        ? timeSplit(bucket.items).reduce((all, [, value]) => all + value, 0)
         : metric.value(bucket.items) || 0);
-      const top = Math.max(...values, stacked ? 1 : 0) || 1;
+      const raw = Math.max(...values, 0) || 1;
+      // Counts get whole-number ticks; a lone request should not read as "0.5".
+      const whole = state.metric === "requests" || state.metric === "pages";
+      const top = whole ? Math.max(2, 2 * Math.ceil(raw / 2)) : raw * 1.1;
       const node = svg("svg", { viewBox: `0 0 ${width} ${height + bottom}`, role: "img", "aria-label": `${metric.label} over time` });
       const grid = svg("g", { class: "grid" });
       [0, 0.5, 1].forEach((share) => {
@@ -520,14 +582,14 @@
       });
       node.append(grid);
       const slot = (width - left) / series.length;
-      const bar = Math.max(2, Math.min(34, slot * 0.62));
+      const bar = Math.max(2, Math.min(22, slot * 0.5));
       const every = Math.ceil(series.length / 8);
       series.forEach((bucket, index) => {
         const x = left + index * slot + (slot - bar) / 2;
-        const parts = stacked
+        const parts = state.metric === "requests"
           ? [["bar", bucket.items.filter((e) => !(e.llm_crops > 0)).length, " OCR"], ["bar llm", bucket.items.filter((e) => e.llm_crops > 0).length, " OCR + LLM"]]
           : state.metric === "latency"
-          ? [["bar", median(bucket.items.map((e) => e.ocr_seconds)) || 0, " OCR"], ["bar llm", median(bucket.items.filter((e) => e.llm_crops > 0).map((e) => e.llm_seconds)) || 0, " LLM"]]
+          ? timeSplit(bucket.items).map(([name, value, suffix]) => [name, value, ` ${suffix}, average`])
           : [["bar", values[index], ""]];
         let base = height;
         const when = new Date(bucket.start);
@@ -551,8 +613,8 @@
       byId("chart").replaceChildren(node);
       byId("legend").replaceChildren(...(stacked
         ? state.metric === "latency"
-          ? [element("span", {}, [element("i", { style: "background: var(--accent-2)" }), "OCR time"]), element("span", {}, [element("i", { style: "background: var(--pink)" }), "LLM time, when used"])]
-          : [element("span", {}, [element("i", { style: "background: var(--accent-2)" }), "OCR"]), element("span", {}, [element("i", { style: "background: var(--pink)" }), "OCR + LLM"])]
+          ? [["var(--ocr)", "OCR"], ["var(--llm)", "LLM"], ["var(--wait)", "Waiting and upload"]].map(([color, name]) => element("span", {}, [element("i", { style: `background: ${color}` }), name]))
+          : [element("span", {}, [element("i", { style: "background: var(--ocr)" }), "OCR"]), element("span", {}, [element("i", { style: "background: var(--llm)" }), "OCR + LLM"])]
         : []));
     }
 
@@ -595,17 +657,25 @@
       byId("latest").replaceChildren(...now.slice(0, 6).map(logRow));
     }
 
+    // Average seconds per request spent reading, in the LLM, and everything else (waiting
+    // in line, upload, page rendering), so the parts add up to the whole request.
+    function timeSplit(entries) {
+      if (!entries.length) return [["bar", 0, "OCR"], ["bar llm", 0, "LLM"], ["bar wait", 0, "waiting and upload"]];
+      const mean = (key) => entries.reduce((all, entry) => all + (Number(entry[key]) || 0), 0) / entries.length;
+      const ocr = mean("ocr_seconds"), llm = mean("llm_seconds"), total = mean("total_seconds");
+      return [["bar", ocr, "OCR"], ["bar llm", llm, "LLM"], ["bar wait", Math.max(0, total - ocr - llm), "waiting and upload"]];
+    }
+
     function renderTiming(entries) {
-      const ocr = median(entries.map((entry) => entry.ocr_seconds));
-      const llm = median(entries.filter((entry) => entry.llm_crops > 0).map((entry) => entry.llm_seconds));
-      const total = median(entries.map((entry) => entry.total_seconds));
-      const parts = [[ocr, "var(--accent-2)"], [Number.isFinite(llm) ? llm : 0, "var(--pink)"]];
-      const whole = parts.reduce((all, [value]) => all + (Number.isFinite(value) ? value : 0), 0) || 1;
+      const split = timeSplit(entries);
+      const whole = split.reduce((all, [, value]) => all + value, 0);
+      const colors = ["var(--ocr)", "var(--llm)", "var(--wait)"];
       const routed = entries.length ? entries.filter((entry) => entry.llm_crops > 0).length / entries.length : NaN;
       byId("timing").replaceChildren(
-        element("div", { className: "timing-bar" }, parts.map(([value, color]) => element("i", { style: `width: ${(100 * (value || 0)) / whole}%; background: ${color}` }))),
+        element("div", { className: "timing-bar" }, split.map(([, value], index) => element("i", { style: `width: ${(100 * value) / (whole || 1)}%; background: ${colors[index]}` }))),
         element("div", { className: "timing-rows" }, [
-          ["OCR", seconds(ocr), "var(--accent-2)"], ["LLM, when used", seconds(llm), "var(--pink)"], ["Whole request", seconds(total), "var(--muted)"],
+          ...split.map(([, value, label], index) => [label[0].toUpperCase() + label.slice(1), seconds(entries.length ? value : NaN), colors[index]]),
+          ["Whole request", seconds(entries.length ? whole : NaN), "var(--text)"],
         ].map(([label, value, color]) => element("div", {}, [element("span", {}, [element("i", { style: `background: ${color}` }), label]), element("b", { textContent: value })]))),
         element("span", { className: "hint", textContent: Number.isFinite(routed) ? `Every request is read by OCR; ${percent(routed)} also had regions checked by the LLM.` : "" }),
       );
@@ -658,7 +728,11 @@
     }
 
     function statusBadge(entry) {
-      if (entry.status && entry.status !== "success") return element("span", { className: "badge bad", textContent: "Incomplete" });
+      const stages = entry.failure_stages || [];
+      if (entry.status && entry.status !== "success" && stages.length && stages.every((stage) => stage === "qwen-crop-refinement")) {
+        return element("span", { className: "badge warn", textContent: "Needs review", title: "Every page was read; a doubted region kept its OCR text because the LLM could not verify it" });
+      }
+      if (entry.status && entry.status !== "success") return element("span", { className: "badge bad", textContent: "Incomplete", title: "A page could not be read" });
       if (entry.llm_status === "pending") return element("span", { className: "badge warn", textContent: "Refining" });
       if (entry.llm_status === "failed") return element("span", { className: "badge warn", textContent: "OCR only" });
       return element("span", { className: "badge good", textContent: "Complete" });
@@ -680,7 +754,7 @@
         element("span", { className: "doc" }, [thumb, element("span", {}, [element("b", { textContent: entry.filename || "-", title: entry.filename || "" }), element("span", { textContent: `${entry.example ? "Example" : "Upload"} · ${bytes(entry.source_bytes)}` })])]),
         element("span", { className: "date" }, [element("b", { textContent: entry.client || "-" }), element("span", { textContent: device(entry.user_agent) })]), entry.pages ?? "-", seconds(entry.ocr_seconds), seconds(entry.llm_seconds), seconds(entry.total_seconds),
         entry.llm_crops ? element("span", { className: "badge llm", textContent: `${entry.llm_accepted} of ${entry.llm_crops}` }) : element("span", { className: "badge plain", textContent: "OCR only" }),
-        money(entry.llm_cost_usd), statusBadge(entry), verdictBadge(entry.feedback),
+        money(entry.llm_cost_usd), cachedRequest(entry) ? element("span", { className: "badge cache", textContent: "Cached", title: "OCR and LLM answers came from the cache" }) : statusBadge(entry), verdictBadge(entry.feedback),
       ];
       cells.forEach((content, index) => row.append(element("td", { className: [3, 4, 5, 6, 8].includes(index) ? "num" : "" }, [content])));
       row.addEventListener("click", () => openDrawer(entry));
@@ -724,6 +798,10 @@
 
     // The request panel: page, overlay, metrics, confidence, and each region's routing.
     async function openDrawer(entry) {
+      if (state.detail?.entry.id !== entry.id) {
+        state.regionFilter = entry.llm_crops ? "routed" : "all";
+        syncRegionFilter();
+      }
       state.detail = { entry, pages: [] };
       state.activeRegion = null;
       byId("drawer-title").textContent = entry.filename || entry.id;
@@ -743,21 +821,47 @@
       return state.detail.pages.flatMap((page) => page.regions.map((region) => ({ ...region, page: page.page_number })));
     }
 
+    const ICONS = {
+      ocr: '<path d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2M8 9h8M8 12h8M8 15h5"/>',
+      llm: '<path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/><circle cx="12" cy="12" r="3"/>',
+      kept: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
+    };
+    const icon = (name) => {
+      const node = document.createElementNS(svgNS, "svg");
+      node.setAttribute("class", "icon");
+      node.setAttribute("viewBox", "0 0 24 24");
+      node.innerHTML = ICONS[name];
+      return node;
+    };
+
     function renderDetail() {
       const { entry, pages } = state.detail;
+      const when = new Date(entry.created_at);
+      byId("drawer-subtitle").textContent = `${entry.example ? "Example" : "Upload"} · ${when.toLocaleDateString(undefined, { day: "numeric", month: "short" })}, ${when.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · ${entry.client || "unknown"}, ${device(entry.user_agent)}`;
+      const cached = entry.page_cache_hits == null ? "Off" : cachedRequest(entry) ? "Yes" : "No";
       byId("facts").replaceChildren(...[
-        ["When", new Date(entry.created_at).toLocaleString()], ["User", `${entry.client || "-"} · ${device(entry.user_agent)}`], ["Source", entry.example ? `Example: ${entry.example}` : "Upload"], ["File size", bytes(entry.source_bytes)],
-        ["Pages", entry.pages ?? "-"], ["Characters", count(entry.characters)], ["OCR time", seconds(entry.ocr_seconds)], ["LLM time", seconds(entry.llm_seconds)],
-        ["Total time", seconds(entry.total_seconds)], ["LLM crops", entry.llm_crops ? `${entry.llm_accepted} of ${entry.llm_crops} used` : "None"], ["Output tokens", count(entry.llm_output_tokens)], ["LLM cost", money(entry.llm_cost_usd)],
-        ["Status", entry.status || "-"], ["Refinement", entry.llm_status || "-"], ["Feedback", entry.feedback || "None"], ["Browser", (entry.user_agent || "-").slice(0, 60)],
-      ].map(([label, value]) => element("div", {}, [element("span", { textContent: label }), element("b", { textContent: String(value) })])));
+        ["Status", statusBadge(entry)], ["Feedback", verdictBadge(entry.feedback)], ["From cache", cached],
+        ["Pages", entry.pages ?? "-"], ["Characters", count(entry.characters)], ["File size", bytes(entry.source_bytes)],
+        ["LLM regions", entry.llm_crops ? `${entry.llm_accepted} of ${entry.llm_crops} used` : "None"], ["Output tokens", count(entry.llm_output_tokens)], ["Cost", money(entry.llm_cost_usd)],
+      ].map(([label, value]) => element("div", {}, [element("span", { className: "fact-label", textContent: label }), value instanceof Node ? element("b", {}, [value]) : element("b", { textContent: String(value) })])));
+      const ocr = entry.ocr_seconds || 0, llm = entry.llm_seconds || 0, total = entry.total_seconds || ocr + llm || 1;
+      byId("timeline").replaceChildren(element("i", { style: `width: ${(100 * ocr) / total}%; background: var(--ocr)` }), element("i", { style: `width: ${(100 * llm) / total}%; background: var(--llm)` }));
+      byId("timeline-legend").replaceChildren(...[["OCR", ocr, "var(--ocr)"], ["LLM", llm, "var(--llm)"], ["Total", total, "var(--line-strong)"]].map(([label, value, color]) =>
+        element("span", {}, [element("i", { style: `background: ${color}` }), `${label} ${seconds(value)}`])));
       const regions = detailRegions();
       const scored = regions.map((region) => region.confidence).filter((value) => Number.isFinite(value));
       const bins = Array(10).fill(0);
       scored.forEach((value) => { bins[Math.min(9, Math.floor(value * 10))] += 1; });
       const tallest = Math.max(1, ...bins);
-      byId("histogram").replaceChildren(...bins.map((value, index) => element("i", { style: `height: ${(100 * value) / tallest}%`, title: `${index * 10}-${index * 10 + 10}%: ${value} regions` })));
-      byId("confidence-note").textContent = scored.length ? `median ${percent(median(scored))} over ${scored.length} scored regions` : "no scored regions yet";
+      byId("histogram").replaceChildren(...bins.map((value, index) => element("i", {
+        style: `height: ${(100 * value) / tallest}%; --bin: ${value ? (index >= 9 ? "var(--llm)" : "var(--ocr)") : "var(--line)"}`,
+        title: `${index * 10} to ${index * 10 + 10}%: ${value} region${value === 1 ? "" : "s"}`,
+      })));
+      byId("confidence-note").textContent = scored.length ? `median ${percent(median(scored))}` : "";
+      const above = scored.filter((v) => v >= 0.9).length, middle = scored.filter((v) => v >= 0.7 && v < 0.9).length, below = scored.length - above - middle;
+      byId("levels").replaceChildren(...(scored.length ? [
+        element("b", { textContent: String(above) }), " at 90% or more · ", element("b", { textContent: String(middle) }), " from 70 to 90% · ", element("b", { textContent: String(below) }), " below 70%",
+      ] : ["No scored regions yet"]));
       drawOverlay(pages[0]);
       renderRegionList(regions);
     }
@@ -775,12 +879,17 @@
       page.regions.forEach((region) => {
         const box = region.box || {};
         if (![box.left, box.top, box.right, box.bottom].every(Number.isFinite)) return;
-        const rect = svg("rect", { x: box.left, y: box.top, width: box.right - box.left, height: box.bottom - box.top, rx: 2,
+        const rect = svg("rect", { x: box.left, y: box.top, width: box.right - box.left, height: box.bottom - box.top, rx: 3,
           class: `${regionClass(region)}${state.activeRegion === region.id ? " active" : ""}` });
         const title = svg("title");
         title.textContent = `${region.kind}: ${region.text.slice(0, 80)}${Number.isFinite(region.confidence) ? ` (${percent(region.confidence)})` : ""}`;
         rect.append(title);
-        rect.addEventListener("click", () => { state.activeRegion = region.id; state.regionFilter = "all"; syncRegionFilter(); renderDetail(); byId(`region-${region.id}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }); });
+        rect.addEventListener("click", () => {
+          state.activeRegion = region.id;
+          if (state.regionFilter === "routed" && !region.routing) { state.regionFilter = "all"; syncRegionFilter(); }
+          renderDetail();
+          byId(`region-${region.id}`)?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        });
         overlay.append(rect);
       });
     }
@@ -791,21 +900,22 @@
 
     function renderRegionList(regions) {
       const shown = regions.filter((region) => state.regionFilter === "all"
-        || (state.regionFilter === "routed" ? region.routing : Number.isFinite(region.confidence) && region.confidence < 0.7));
-      byId("region-count").textContent = `${shown.length} of ${regions.length}${state.detail.pages.length > 1 ? ` across ${state.detail.pages.length} pages` : ""}`;
+        || (state.regionFilter === "routed" ? region.routing : Number.isFinite(region.confidence) && region.confidence < 0.9));
+      byId("region-count").textContent = `${shown.length} of ${regions.length}`;
+      const plain = (text) => String(text || "").replace(/<[^>]+>/g, " ").replace(/[*#]/g, "").replace(/\s+/g, " ").trim();
       byId("region-list").replaceChildren(...(shown.length ? shown.map((region) => {
-        const top = element("div", { className: "region-top" }, [element("b", { textContent: String(region.kind || "region").replaceAll(/[-_]/g, " ") })]);
-        if (state.detail.pages.length > 1) top.append(element("span", { className: "badge plain", textContent: `Page ${region.page}` }));
-        if (region.routing) {
-          top.append(element("span", { className: `badge ${region.routing.accepted ? "llm" : "warn"}`, textContent: region.routing.accepted ? "OCR + LLM" : "OCR kept after LLM" }));
-          region.routing.reasons.forEach((reason) => top.append(element("span", { className: "badge plain", textContent: reasonLabel(reason) })));
-        } else {
-          top.append(element("span", { className: "badge plain", textContent: "OCR" }));
-        }
-        top.append(element("span", { className: "conf", textContent: Number.isFinite(region.confidence) ? `Confidence ${percent(region.confidence)}` : region.method === "qwen_crop_refinement" ? "LLM reading" : "No score" }));
-        const card = element("div", { className: `region${state.activeRegion === region.id ? " active" : ""}`, id: `region-${region.id}` }, [top, element("div", { className: "text", textContent: region.text || "(no text)" })]);
-        if (region.routing?.accepted && region.ocr_text && region.ocr_text.trim() !== region.text.trim()) {
-          card.append(element("div", { className: "was", textContent: `OCR read: ${region.ocr_text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()}` }));
+        const kind = regionClass(region);
+        const what = kind === "routed" ? "OCR + LLM" : kind === "kept" ? "LLM checked, OCR kept" : "OCR";
+        const why = region.routing?.reasons?.map(reasonLabel).join(", ");
+        const meta = element("span", { className: "meta" }, [element("b", { textContent: String(region.kind || "region").replaceAll(/[-_]/g, " ") }), ` · ${what}${why ? ` · ${why}` : ""}${state.detail.pages.length > 1 ? ` · page ${region.page}` : ""}`]);
+        meta.title = meta.textContent;
+        const conf = element("span", { className: "conf", textContent: Number.isFinite(region.confidence) ? percent(region.confidence) : region.method === "qwen_crop_refinement" ? "LLM" : "" });
+        const card = element("div", { className: `region${state.activeRegion === region.id ? " active" : ""}`, id: `region-${region.id}` }, [
+          element("span", { className: `mark ${kind === "routed" ? "llm" : kind}` }, [icon(kind === "routed" ? "llm" : kind === "kept" ? "kept" : "ocr")]),
+          meta, conf, element("div", { className: "text", textContent: plain(region.text) || "No text" }),
+        ]);
+        if (kind === "routed" && plain(region.ocr_text) && plain(region.ocr_text) !== plain(region.text)) {
+          card.append(element("div", { className: "was" }, [element("span", { textContent: "OCR" }), plain(region.ocr_text)]));
         }
         card.addEventListener("click", () => { state.activeRegion = region.id; renderDetail(); });
         return card;
@@ -837,6 +947,10 @@
       const payload = await response.json();
       state.entries = payload.entries;
       state.feedback = payload.feedback;
+      state.caches = payload.caches;
+      const queue = payload.queue || { reading: 0, waiting: 0 };
+      byId("queue").textContent = queue.reading ? `Reading 1 · ${queue.waiting} waiting` : "Idle";
+      byId("queue").classList.toggle("busy", queue.reading > 0);
       byId("login").hidden = true;
       byId("app").hidden = false;
       render();
@@ -884,7 +998,7 @@
     addEventListener("hashchange", () => show(location.hash.slice(1)));
     document.addEventListener("visibilitychange", () => byId("live").classList.toggle("paused", document.hidden));
     state.view = VIEWS[location.hash.slice(1)] ? location.hash.slice(1) : "overview";
-    load().then(() => show(state.view)).catch((error) => { byId("subtitle").textContent = error.message; });
+    load().then(() => show(state.view)).catch((error) => { console.error(error); byId("subtitle").textContent = "The dashboard could not load. Refresh to try again."; });
     setInterval(() => { if (!document.hidden && !byId("app").hidden) load().catch(() => byId("live").classList.add("paused")); }, LIVE_SECONDS * 1000);
   </script>
 </body>

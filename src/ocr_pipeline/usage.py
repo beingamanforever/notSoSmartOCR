@@ -21,6 +21,9 @@ from PIL import Image
 
 PAGE_SIDE = 1400  # the stored page image, long side in pixels
 THUMB_SIDE = 360
+# Below this much free space a record keeps its metrics but skips the images, so the
+# log never fills the disk the service and its sessions write to.
+MIN_FREE_BYTES = 2 * 1024**3
 
 
 class UsageLog:
@@ -41,7 +44,9 @@ class UsageLog:
         entry = {"id": entry_id, "created_at": now.isoformat(), **entry}
         with tempfile.TemporaryDirectory(prefix=".pending-", dir=self.root) as temporary:
             pending = Path(temporary)
-            if page_image is not None:
+            if page_image is not None and shutil.disk_usage(self.root).free < MIN_FREE_BYTES:
+                entry["image_skipped"] = "low disk space"
+            elif page_image is not None:
                 try:
                     with Image.open(page_image) as page:
                         page = page.convert("RGB")

@@ -260,6 +260,8 @@
     .status-line.busy::before { background: var(--accent); animation: status-pulse 1.2s ease-in-out infinite; }
     .status-line.success { color: var(--muted); border-color: var(--line); background: var(--panel); }
     .status-line.success::before { background: var(--positive); }
+    .status-line.review { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 30%, var(--line)); background: var(--warning-soft); }
+    .status-line.review::before { background: var(--warning); }
     @keyframes status-pulse { 0%, 100% { opacity: .3; } 50% { opacity: 1; } }
     .client-timer { display: none !important; }
     .client-timer-legacy {
@@ -1645,33 +1647,42 @@
           // The server expires sessions itself, so a failed delete needs no message.
           await deleteSession(previousSessionId).catch((error) => console.warn(error));
         }
-        const query = example
+        // randomUUID exists only on HTTPS and localhost; the demo is also served over plain HTTP.
+        const progressKey = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+        const query = (example
           ? `?defer_presentation=1&defer_refinement=1&compact=1&example=${encodeURIComponent(example)}`
-          : "?defer_presentation=1&defer_refinement=1&compact=1";
-        const response = await fetch(`/api/process${query}`, { method: "POST", body });
-        payload = await response.json();
+          : "?defer_presentation=1&defer_refinement=1&compact=1") + `&progress=${progressKey}`;
+        const watcher = watchPages(progressKey, resultRequest);
+        let response;
+        try {
+          const upload = fetch(`/api/process${query}`, { method: "POST", body }).catch(() => {
+            throw new Error("The OCR service could not be reached. Please try again in a minute.");
+          });
+          response = await Promise.race([upload, watcher.stalled]);
+        } finally {
+          watcher.stop();
+        }
+        // A proxy or a restarting service answers with a page, not JSON.
+        payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.detail || "The document could not be parsed");
         if (resultRequest !== state.resultRequest) return;
+        // Stay on the page the reader moved to while the rest were still being read.
+        const streamedPage = state.response?.streaming ? state.pageIndex : 0;
         state.response = payload;
         history.replaceState(null, "", `?session=${encodeURIComponent(payload.session_id)}`);
-        state.pageIndex = 0;
+        state.pageIndex = Math.min(streamedPage, Math.max(0, payload.result.pages.length - 1));
         state.selectedRegionKey = null;
         resetHiddenKinds();
         // The presentation draft and any pending LLM refinement are fetched
         // separately below, once refinement (if any) has finished.
         renderResult({ skipPresentation: payload.refinement?.status === "pending" });
         timerOutcome = "complete";
-        const pages = payload.result.pages.length;
-        setStatus(
-          `${payload.result.status === "success" ? "Complete" : "Incomplete extraction"} · ${pages} ${pages === 1 ? "page" : "pages"}`,
-          payload.result.status !== "success",
-          payload.result.status === "success" ? "success" : ""
-        );
+        showResultStatus(payload.result);
         byId("clear-button").disabled = false;
       } catch (error) {
         if (resultRequest === state.resultRequest) {
           resetResult();
-          setStatus(error.message, true);
+          setStatus(userMessage(error), true);
         }
       } finally {
         if (resultRequest === state.resultRequest) {
@@ -1684,8 +1695,10 @@
         if (resultRequest === state.resultRequest && state.response?.session_id === payload.session_id) {
           // When the refinement request itself fails loadRefinement hands back the same
           // OCR-only payload; keep the selection and run the deferred presentation fetch.
-          if (refined !== payload) applyRevisionResponse(refined);
-          else loadPresentation(payload);
+          if (refined !== payload) {
+            applyRevisionResponse(refined);
+            showResultStatus(refined.result);
+          } else loadPresentation(payload);
         }
       }
     });
@@ -2068,7 +2081,7 @@
         applyRevisionResponse(payload);
         setRereadStatus(recoveryStatusMessage(payload, successMessage));
       } catch (error) {
-        if (error.name !== "AbortError") setRereadStatus(error.message, true);
+        if (error.name !== "AbortError") setRereadStatus(userMessage(error), true);
       } finally {
         if (state.recoveryRequestId !== requestId) return;
         state.recoveryRequestId = null;
@@ -2147,6 +2160,10 @@
     }
 
     function updateReviewActions(region) {
+      if (state.response?.streaming) {
+        byId("review-actions").hidden = true;
+        return;
+      }
       const canonical = region && currentRegions().some((item) => item.id === region.id);
       const structuredTable = Boolean(region?.structure?.cells?.length);
       const alternatives = canonical
@@ -2340,6 +2357,80 @@
       detail.textContent = message || "Extracting text with its position.";
       loader.append(blocks, caption, detail);
       view.replaceChildren(loader);
+    }
+
+    // A long PDF shows each page as soon as it is read. The final result replaces this
+    // preview; until then editing and feedback wait. A server that stops answering ends
+    // the wait with a message instead of an endless spinner.
+    function watchPages(key, resultRequest) {
+      const pages = [];
+      let total = 0, failures = 0, stopped = false, timer = null, fail;
+      const stalled = new Promise((_, reject) => { fail = reject; });
+      stalled.catch(() => {});
+      const poll = async () => {
+        if (stopped) return;
+        try {
+          const reply = await fetch(`/api/progress/${key}?after=${pages.length}`, { cache: "no-store" });
+          if (reply.status >= 500) throw new Error(String(reply.status));
+          failures = 0;
+          if (reply.ok) {
+            const progress = await reply.json();
+            total = progress.total;
+            if (progress.ahead > 0 && !pages.length) {
+              setStatus(`Waiting in line · ${progress.ahead} ${progress.ahead === 1 ? "document" : "documents"} ahead of yours`, false, "busy");
+            } else if (progress.pages.length && !stopped && resultRequest === state.resultRequest) {
+              pages.push(...progress.pages);
+              showStreamedPages(key, total, pages);
+            } else if (!pages.length) {
+              setStatus(total > 1 ? `Reading ${total} pages…` : "Extracting text and structure.", false, "busy");
+            }
+          }
+        } catch {
+          if ((failures += 1) >= 25) {
+            fail(new Error("The OCR service stopped responding. Please try again in a minute."));
+            return;
+          }
+        }
+        timer = setTimeout(poll, 800);
+      };
+      timer = setTimeout(poll, 800);
+      return { stalled, stop: () => { stopped = true; clearTimeout(timer); } };
+    }
+
+    function showStreamedPages(key, total, pages) {
+      const first = !state.response?.streaming;
+      state.response = {
+        streaming: true, session_id: null, revision: 0, filename: state.selectedFile?.name || state.selectedExample,
+        result: { status: "partial", pages: [...pages], failures: [], table_continuations: [] },
+        page_images: Array.from({ length: total }, (_, index) => `/api/progress/${key}/pages/${index + 1}`),
+        presentation: null,
+      };
+      document.body.classList.add("has-document");
+      renderRendered(pages, []);
+      if (first || state.pageIndex === pages.length - 1 || state.pageIndex >= pages.length) renderPage();
+      setStatus(pages.length < total ? `Read ${pages.length} of ${total} pages · reading the rest` : `Read all ${total} pages · finishing`, false, "busy");
+    }
+
+    // Every page read but a doubted region left unverified is a review, not a failure;
+    // "Incomplete extraction" is kept for pages the reader could not read.
+    function showResultStatus(result) {
+      const pages = result.pages.length;
+      const count = `${pages} ${pages === 1 ? "page" : "pages"}`;
+      const stages = new Set((result.failures || []).map((failure) => failure.stage));
+      // A crop the LLM could not improve keeps its OCR text and confidence badge; the
+      // document is still complete, so that is no reason for a warning.
+      const ocrComplete = result.status === "success"
+        || (stages.size && [...stages].every((stage) => stage === "qwen-crop-refinement"));
+      if (ocrComplete) return setStatus(`Complete · ${count}`, false, "success");
+      setStatus(`Incomplete extraction · ${count}`, true);
+    }
+
+    // Messages our code wrote (plain Error) are for people; a TypeError or the like is a
+    // bug, logged for us and never shown as browser jargon.
+    function userMessage(error, fallback = "Something went wrong. Please try again.") {
+      if (error?.constructor === Error) return error.message;
+      console.error(error);
+      return fallback;
     }
 
     function setStatus(message, isError, tone = "") {
@@ -2540,7 +2631,7 @@
         if (!keepOpen) byId("feedback-problem").open = false;
         setCopyStatus(keepOpen ? "Thanks. Tell us what went wrong, or close this." : "Thanks, your feedback was saved.");
       } catch (error) {
-        setCopyStatus(error.message, true);
+        setCopyStatus(userMessage(error), true);
       } finally {
         pendingFeedback.delete(pendingKey);
       }
@@ -2709,7 +2800,7 @@
           state.response?.session_id !== sessionId
           || state.response?.revision !== revision
         ) return;
-        target.replaceChildren(renderMarkdownStatus(error.message));
+        target.replaceChildren(renderMarkdownStatus(userMessage(error)));
       }
     }
 
@@ -5066,7 +5157,7 @@
         byId("clear-button").disabled = false;
         setStatus(state.response.result.status === "success" ? "Document restored." : "Incomplete extraction. Some content could not be read.", state.response.result.status !== "success");
       } catch (error) {
-        setStatus(error.message, true);
+        setStatus(userMessage(error), true);
       } finally {
         setBusy(false);
       }

@@ -27,6 +27,7 @@ from .openrouter import (
     Transport,
     _call_openrouter,
     _default_transport,
+    _shape_error,
 )
 from .rendering import _canonical_layout_text, render_evidence, render_page_markdown
 from .table_topology import TableTopologyError, validate_table_topology
@@ -125,15 +126,15 @@ guess missing options, or omit visible unselected options. Set markdown to
 """
 
 
-def _finished_crops(text: str) -> list[dict[str, Any]]:
-    """Every crop record that closed in a reply cut off before its end."""
+def _finished_crops(text: str, crop_schema: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every well-formed crop record in a reply that was cut off or had a bad record."""
     decoder, crops = json.JSONDecoder(), []
     for match in re.finditer(r'\{\s*"region_id"', text):
         try:
             crop, _ = decoder.raw_decode(text, match.start())
         except ValueError:
             continue
-        if isinstance(crop, dict) and isinstance(crop.get("markdown"), str):
+        if _shape_error(crop, crop_schema) is None:
             crops.append(crop)
     return crops
 
@@ -677,8 +678,11 @@ def refine_page(
             except OpenRouterError as error:
                 # A dense form can run Qwen past its token limit (twice on the handwritten
                 # forms cohort). Crops it finished before the cut are still answers.
-                finished = _finished_crops(error.partial_content or "")
-                if error.code != "generation_truncated" or not finished:
+                finished = _finished_crops(
+                    error.partial_content or "",
+                    _crop_response_schema(requested_crops)["properties"]["crops"]["items"],
+                )
+                if error.code not in {"generation_truncated", "invalid_content"} or not finished:
                     raise
                 return OpenRouterResult(
                     content={"crops": finished},
@@ -688,7 +692,7 @@ def refine_page(
                     cost=None,
                     latency_ms=error.latency_ms or 0,
                     attempts=error.attempts or 1,
-                    finish_reason="length",
+                    finish_reason="length" if error.code == "generation_truncated" else "stop",
                 )
 
         # These requests have independent prompts and source crops. Keep their

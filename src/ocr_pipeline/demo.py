@@ -18,7 +18,7 @@ import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from html.parser import HTMLParser
@@ -98,8 +98,10 @@ def _display_response(response: dict[str, Any]) -> dict[str, Any]:
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 FEEDBACK_RETENTION = 1000
 ADMIN_COOKIE = "ocr_admin"
+PROGRESS_KEY = re.compile(r"[A-Za-z0-9_-]{8,64}")
+PROGRESS_RETENTION = 64
 # Finished sessions kept in memory; the oldest is dropped with its files beyond this.
-SESSION_RETENTION = 32
+SESSION_RETENTION = 96
 # Bounds the background pool that runs deferred LLM refinement jobs.
 REFINEMENT_WORKERS = 4
 # Long-poll ceiling for GET .../refinement; the hosted call itself is far shorter.
@@ -110,6 +112,12 @@ FEEDBACK_REASONS = frozenset(
 MAX_DOCUMENT_PAGES = 32
 MAX_PAGE_PIXELS = 32_000_000
 MAX_DECODED_PIXELS = 200_000_000
+# One parse runs and the rest wait in line; past this many (running and waiting) uploads
+# get a 503, the last guard against a flood rather than the normal way to wait.
+MAX_ACTIVE_PARSES = 32
+# Waiting parses each hold a worker thread; the pool must stay larger than the line so
+# the page, progress polls and the dashboard still get threads.
+WORKER_THREADS = 128
 ACCEPTED_SUFFIXES = IMAGE_SUFFIXES | {".pdf"}
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 MULTIPART_OVERHEAD_BYTES = 64 * 1024
@@ -411,6 +419,101 @@ class RequestLimitMiddleware:
             await _send_request_too_large(send, self.max_body_bytes)
 
 
+class FairQueue:
+    """First come, first served. A threading.Lock wakes its waiters in no set order, so
+    under load an upload could wait behind ones that arrived after it."""
+
+    def __init__(self) -> None:
+        self._turn = threading.Condition()
+        self._next = self._serving = 0
+
+    @contextmanager
+    def turn(self, on_ticket: Callable[[int], None] = lambda _: None):
+        with self._turn:
+            ticket = self._next
+            self._next += 1
+        on_ticket(ticket)
+        with self._turn:
+            while ticket != self._serving:
+                self._turn.wait()
+        try:
+            yield
+        finally:
+            with self._turn:
+                self._serving += 1
+                self._turn.notify_all()
+
+    def load(self) -> dict[str, int]:
+        with self._turn:
+            holding = self._next - self._serving
+        return {"reading": min(1, holding), "waiting": max(0, holding - 1)}
+
+    def ahead(self, ticket: int) -> int:
+        with self._turn:
+            return max(0, ticket - self._serving)
+
+
+class AdmissionMiddleware:
+    """Turn away GPU work past a bounded backlog with an immediate 503.
+
+    Parses run one at a time under the process lock; without a bound every waiting
+    upload holds a worker thread, a spooled file and memory until the thread pool is
+    exhausted and even the page itself stops loading. Counted on the event loop, so
+    the check needs no lock.
+    """
+
+    def __init__(self, app: Any, *, max_active: int) -> None:
+        self.app = app
+        self.max_active = max_active
+        self.active = 0
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if not _is_gpu_request(scope):
+            await self.app(scope, receive, send)
+            return
+        if self.active >= self.max_active:
+            await _send_json(
+                send,
+                503,
+                {"detail": "The OCR service is busy with other documents. Please try again in a minute."},
+                [(b"retry-after", b"30")],
+            )
+            return
+        self.active += 1
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            self.active -= 1
+
+
+def _is_gpu_request(scope: Any) -> bool:
+    path = scope.get("path", "")
+    return (
+        scope.get("type") == "http"
+        and scope.get("method") == "POST"
+        and (path == "/api/process" or path.endswith("/handwriting"))
+    )
+
+
+async def _send_json(
+    send: Any, status: int, payload: dict[str, Any], headers: list[tuple[bytes, bytes]] = ()
+) -> None:
+    body = json.dumps(payload).encode("utf-8")
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+                (b"cache-control", b"no-store"),
+                *headers,
+            ],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
 def _is_process_request(scope: Any) -> bool:
     return (
         scope.get("type") == "http"
@@ -421,21 +524,12 @@ def _is_process_request(scope: Any) -> bool:
 
 async def _send_request_too_large(send: Any, max_body_bytes: int) -> None:
     limit_mb = max_body_bytes // (1024 * 1024)
-    body = json.dumps(
-        {"detail": f"Request exceeds the {limit_mb} MB transfer limit"}
-    ).encode("utf-8")
-    await send(
-        {
-            "type": "http.response.start",
-            "status": 413,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body)).encode("ascii")),
-                (b"cache-control", b"no-store"),
-            ],
-        }
-    )
-    await send({"type": "http.response.body", "body": body})
+    await _send_json(send, 413, {"detail": f"Request exceeds the {limit_mb} MB transfer limit"})
+
+
+def _refinement_pending(session: dict[str, Any]) -> bool:
+    event = session.get("refinement_event")
+    return event is not None and not event.is_set()
 
 
 class SessionStore:
@@ -458,7 +552,14 @@ class SessionStore:
         with self._lock:
             self._sessions.pop(session_id, None)
             self._sessions[session_id] = session
-            expired = list(self._sessions)[:-SESSION_RETENTION]
+            # A session still waiting for its LLM refinement is never dropped: its
+            # browser is polling for the result, and a burst of other uploads would
+            # otherwise leave it waiting on a 404 forever.
+            expired = [
+                key
+                for key in list(self._sessions)[:-SESSION_RETENTION]
+                if not _refinement_pending(self._sessions[key])
+            ]
             dropped = [self._sessions.pop(key) for key in expired]
         for old in dropped:
             shutil.rmtree(old["directory"], ignore_errors=True)
@@ -640,6 +741,7 @@ def create_app(
     caches: Mapping[str, Any] | None = None,
     usage_log: UsageLog | None = None,
     admin_token: str | None = None,
+    max_active_parses: int = MAX_ACTIVE_PARSES,
     warmup_completed: bool = False,
     crop_refiner: Callable[[DocumentResult, list[Path]], None] | None = None,
 ) -> Any:
@@ -690,10 +792,12 @@ def create_app(
     backend_version = _backend_version(active_reader)
     prepare_lock = threading.Lock()
     process_lock = threading.Lock()
+    parse_queue = FairQueue()
     # Keep hosted calls within the existing serial reservation budget.
     refine_lock = threading.Lock()
     state_lock = threading.Lock()
     refinement_previews: dict[str, dict[int, dict[str, str]]] = {}
+    page_progress: dict[str, dict[str, Any]] = {}
     recovery_lock = threading.Lock()
     # Runs deferred LLM refinement jobs off the request thread; bounded so a burst of
     # uploads cannot spawn unbounded hosted-call concurrency.
@@ -703,6 +807,9 @@ def create_app(
 
     @asynccontextmanager
     async def handle_lifespan(_: Any):
+        import anyio.to_thread
+
+        anyio.to_thread.current_default_thread_limiter().total_tokens = WORKER_THREADS
         try:
             yield
         finally:
@@ -725,6 +832,8 @@ def create_app(
         max_body_bytes=max_upload_bytes + MULTIPART_OVERHEAD_BYTES,
     )
     app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+    # Added last, so it runs first: a turned-away upload is never read.
+    app.add_middleware(AdmissionMiddleware, max_active=max_active_parses)
 
     @app.middleware("http")
     async def handle_no_store(request: Any, call_next: Any) -> Any:
@@ -822,6 +931,7 @@ def create_app(
         defer_refinement: bool = False,
         compact: bool = False,
         example: str | None = None,
+        progress: str | None = None,
     ) -> Any:
         # A named example already lives on this host, so sending its bytes down to the
         # browser and straight back costs two transfers of a file nobody changed.
@@ -865,13 +975,55 @@ def create_app(
                 )
                 preview_seconds = time.perf_counter() - preview_started
             preview_paths = list(prepared_pages.pages) if prepared_pages else []
+            # A browser-chosen key under which finished pages appear while the rest are
+            # read, so a long PDF shows its first page in seconds.
+            progress_key = progress if progress and PROGRESS_KEY.fullmatch(progress) else None
+            if progress_key:
+                with state_lock:
+                    while len(page_progress) >= PROGRESS_RETENTION:
+                        page_progress.pop(next(iter(page_progress)))
+                    page_progress[progress_key] = {"total": len(preview_paths), "pages": [], "images": preview_paths}
+
+            def publish_page(page: PageResult) -> None:
+                if not progress_key:
+                    return
+                shown = asdict(page)
+                for region in shown["regions"]:
+                    asset = (region.get("structure") or {}).get("image")
+                    if asset and asset.get("data"):
+                        del asset["data"]  # figure crops arrive with the finished result
+                with state_lock:
+                    if progress_key in page_progress:
+                        page_progress[progress_key]["pages"].append(shown)
             queued = time.perf_counter()
             pipeline_timings: dict[str, float] = {}
             stage_execution: list[dict[str, object]] = []
             page_execution: list[dict[str, object]] = []
-            with process_lock:
+            # Parses and refinements each hold a lock, so a cache's counters moving
+            # across one step belong to this request alone.
+            cache_use: dict[str, int] = {}
+
+            def count_cache(name: str, prefix: str, before: dict[str, Any] | None) -> None:
+                cache = (caches or {}).get(name)
+                if cache is None or before is None:
+                    return
+                after = cache.stats()
+                cache_use[f"{prefix}_hits"] = after["hits"] - before["hits"]
+                cache_use[f"{prefix}_misses"] = after["misses"] - before["misses"]
+
+            def cache_stats(name: str) -> dict[str, Any] | None:
+                cache = (caches or {}).get(name)
+                return cache.stats() if cache is not None else None
+
+            def hold_ticket(ticket: int) -> None:
+                with state_lock:
+                    if progress_key in page_progress:
+                        page_progress[progress_key]["ticket"] = ticket
+
+            with parse_queue.turn(hold_ticket), process_lock:
                 queue_seconds = time.perf_counter() - queued
                 started = time.perf_counter()
+                pages_before = cache_stats("pages")
                 document = process_document(
                     source,
                     active_reader,
@@ -886,7 +1038,9 @@ def create_app(
                     max_pages=max_pages,
                     max_page_pixels=max_page_pixels,
                     max_pixels=max_decoded_pixels,
+                    on_page=publish_page,
                 )
+                count_cache("pages", "page_cache", pages_before)
                 coverage = _coverage_assessment(active_reader, len(document.pages))
                 reader_review = getattr(active_reader, "page_needs_review", None)
                 reader_review_pages = [
@@ -909,6 +1063,7 @@ def create_app(
                                 previews.setdefault(page_number, {}).update(updates)
 
                         streams = "on_partial" in inspect.signature(crop_refiner).parameters
+                        replies_before = cache_stats("llm_replies")
                         try:
                             crop_refiner(
                                 document,
@@ -916,6 +1071,7 @@ def create_app(
                                 **({"on_partial": preview} if streams else {}),
                             )
                         finally:
+                            count_cache("llm_replies", "llm_cache", replies_before)
                             with state_lock:
                                 refinement_previews.pop(session_id, None)
                         pipeline_timings["stage.qwen-crop-refinement"] = (
@@ -1129,6 +1285,7 @@ def create_app(
                             "user_agent": request.headers.get("user-agent", "")[:200],
                             "example": example if example_source is not None else None,
                             **_usage_metrics(response),
+                            **cache_use,
                         },
                         preview_paths[0] if preview_paths else None,
                         _usage_details(response),
@@ -1162,7 +1319,7 @@ def create_app(
                         try:
                             usage_log.update(
                                 usage_id,
-                                _usage_metrics(refined_response),
+                                {**_usage_metrics(refined_response), **cache_use},
                                 _usage_details(refined_response),
                             )
                         except OSError:
@@ -1180,7 +1337,17 @@ def create_app(
                             current["revision"] = 2
                     refinement_event.set()
 
-                app.state.refinement_executor.submit(finish_deferred_refinement)
+                def finish_safely() -> None:
+                    # An executor keeps a job's exception to itself; log it, and never
+                    # leave the browser's long poll waiting on an event nobody sets.
+                    try:
+                        finish_deferred_refinement()
+                    except Exception:
+                        LOGGER.exception("Deferred refinement job failed")
+                    finally:
+                        refinement_event.set()
+
+                app.state.refinement_executor.submit(finish_safely)
 
             return JSONResponse(_display_response(response) if compact else response)
         except HTTPException:
@@ -1196,6 +1363,9 @@ def create_app(
         finally:
             if file is not None:
                 file.file.close()
+            if progress:
+                with state_lock:
+                    page_progress.pop(progress, None)
 
     @app.head("/api/sessions/{session_id}")
     def handle_session_status(session_id: str) -> Any:
@@ -1335,6 +1505,7 @@ def create_app(
             "entries": entries,
             "feedback": feedback,
             "caches": {name: cache.stats() for name, cache in (caches or {}).items()},
+            "queue": parse_queue.load(),
         }
 
     @app.get("/api/admin/usage/{entry_id}/details")
@@ -1359,6 +1530,30 @@ def create_app(
     def handle_cache_stats() -> Any:
         """Entries, bytes and hit counts of each enabled content cache."""
         return {name: cache.stats() for name, cache in (caches or {}).items()}
+
+    @app.get("/api/progress/{key}")
+    def handle_progress(key: str, after: int = 0) -> Any:
+        """Pages finished so far for a parse still running, from index `after` on."""
+        with state_lock:
+            entry = page_progress.get(key)
+            if entry is None:
+                raise HTTPException(404, "No parse in progress under this key")
+            ticket = entry.get("ticket")
+            return {
+                "total": entry["total"],
+                "done": len(entry["pages"]),
+                # Parses ahead of this one in line; 0 once it is being read.
+                "ahead": parse_queue.ahead(ticket) if ticket is not None else 0,
+                "pages": entry["pages"][max(0, after):],
+            }
+
+    @app.get("/api/progress/{key}/pages/{page_number}")
+    def handle_progress_page(key: str, page_number: int) -> Any:
+        with state_lock:
+            images = (page_progress.get(key) or {}).get("images") or []
+        if not 1 <= page_number <= len(images):
+            raise HTTPException(404, "Page not found")
+        return FileResponse(images[page_number - 1], media_type="image/png")
 
     @app.get("/api/sessions/{session_id}/refinement/preview")
     def handle_refinement_preview(session_id: str) -> Any:
@@ -1972,6 +2167,9 @@ def _usage_metrics(response: dict[str, Any]) -> dict[str, Any]:
         "pages": len(pages),
         "characters": sum(len((page.get("text") or {}).get("value") or "") for page in pages),
         "status": result.get("status"),
+        # Which stages fell short: only "qwen-crop-refinement" means every page was read
+        # and some doubted regions kept their OCR text unverified.
+        "failure_stages": sorted({f.get("stage") for f in result.get("failures") or [] if f.get("stage")}),
         "total_seconds": timing.get("total_seconds"),
         "ocr_seconds": steps.get("reader"),
         "llm_seconds": max((r.get("elapsed_seconds") or 0 for r in refinements), default=0) or None,

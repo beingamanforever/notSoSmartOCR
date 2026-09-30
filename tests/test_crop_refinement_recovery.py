@@ -1697,6 +1697,38 @@ def test_a_reply_cut_at_its_token_limit_keeps_the_crops_it_finished(tmp_path, mo
     assert result["rejected_crop_ids"] == ["crop-2"]
 
 
+def test_one_malformed_crop_record_costs_only_that_crop(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    image = tmp_path / "two-lines.png"
+    Image.new("RGB", (400, 300), "white").save(image)
+    page = {
+        "page_number": 1, "width": 400, "height": 300,
+        "regions": [
+            {"id": f"line-{index}", "kind": "handwriting", "text": f"old {index}", "resolution": "unreadable",
+             "bounding_box": {"left": 20, "top": top, "right": 380, "bottom": top + 40}}
+            for index, top in ((1, 20), (2, 200))
+        ],
+    }
+    # Qwen once answered a control's group_label with null; the reply failed its schema.
+    reply = json.dumps({"crops": [
+        {"region_id": "crop-1", "markdown": "new 1"},
+        {"region_id": "crop-2", "markdown": "new 2", "controls": [
+            {"label": "Urgent", "group_label": None, "state": "selected", "bbox_2d": [0, 0, 10, 10]}]},
+    ]})
+
+    def transport(request, timeout):
+        return (200, {}, json.dumps({
+            "model": json.loads(request.data)["model"],
+            "choices": [{"message": {"content": reply}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 10},
+        }).encode())
+
+    result = refine_page(image, page, "old 1\n\nold 2", transport=transport)
+
+    assert result["accepted_crop_ids"] == ["crop-1"]
+    assert result["rejected_crop_ids"] == ["crop-2"]
+
+
 def test_a_blank_answer_replaces_a_doubted_cell_but_keeps_a_confident_one():
     from ocr_pipeline.markdown_refinement import _refined_table_cell
     from ocr_pipeline.table_topology import validate_table_topology

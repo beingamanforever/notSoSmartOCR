@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
@@ -90,6 +90,36 @@ def falcon_pipeline(
     return reader, stages
 
 
+def _checked_results(
+    results: Iterator[Any], expected: int, timings: dict[str, float] | None
+) -> Iterator[list[TextRegion] | ReaderError]:
+    """A reader's page results, one per page, each a region list or a ReaderError.
+
+    Time spent waiting on the reader is added to `timings["reader"]` when given.
+    """
+    delivered = 0
+    while delivered < expected:
+        started = time.perf_counter()
+        try:
+            item = next(results)
+        except StopIteration:
+            item = ReaderError(
+                "invalid_batch_output",
+                "Batch reader returned the wrong number of page results",
+            )
+        except ReaderError as error:
+            item = error
+        finally:
+            _add_timing(timings, "reader", started)
+        delivered += 1
+        yield (
+            item
+            if isinstance(item, ReaderError)
+            or (isinstance(item, list) and all(isinstance(region, TextRegion) for region in item))
+            else ReaderError("invalid_batch_output", "Batch reader returned an invalid page result")
+        )
+
+
 def process_document(
     source: str | Path,
     reader: LocalReader,
@@ -105,7 +135,10 @@ def process_document(
     max_pages: int | None = None,
     max_page_pixels: int | None = None,
     max_pixels: int | None = None,
+    on_page: Callable[[PageResult], None] | None = None,
 ) -> DocumentResult:
+    """`on_page` receives each page as soon as it is read and staged, in page order;
+    a reader with `read_iter` streams pages, so a long PDF's first page arrives early."""
     if timings is not None:
         timings.clear()
     if stage_execution is not None:
@@ -168,56 +201,39 @@ def process_document(
                 raise PipelineError(
                     "render", "no_pages", "Prepared input contained no pages"
                 )
-            batch_results: list[list[TextRegion] | ReaderError] | None = None
+            batch_results: Iterator[list[TextRegion] | ReaderError] | None = None
+            read_iter = getattr(reader, "read_iter", None)
             read_batch = getattr(reader, "read_batch", None)
-            if (
+            batched = (
                 len(pages) > 1
-                and callable(read_batch)
+                and (callable(read_iter) or callable(read_batch))
                 and getattr(reader, "batch_size", 1) > 1
-            ):
+            )
+            numbers = list(range(1, len(pages) + 1))
+            if batched and callable(read_iter):
+                batch_results = _checked_results(read_iter(pages, numbers), len(pages), timings)
+            elif batched:
                 reader_started = time.perf_counter()
                 try:
-                    batch_results = read_batch(
-                        pages,
-                        list(range(1, len(pages) + 1)),
-                    )
+                    listed = read_batch(pages, numbers)
                 except ReaderError as error:
-                    batch_results = [ReaderError(error.code, str(error)) for _ in pages]
+                    listed = [ReaderError(error.code, str(error)) for _ in pages]
                 finally:
                     _add_timing(timings, "reader", reader_started)
-                if not isinstance(batch_results, list) or len(batch_results) != len(
-                    pages
-                ):
-                    batch_results = [
+                if not isinstance(listed, list) or len(listed) != len(pages):
+                    listed = [
                         ReaderError(
                             "invalid_batch_output",
                             "Batch reader returned the wrong number of page results",
                         )
                         for _ in pages
                     ]
-                else:
-                    batch_results = [
-                        item
-                        if isinstance(item, ReaderError)
-                        or (
-                            isinstance(item, list)
-                            and all(isinstance(region, TextRegion) for region in item)
-                        )
-                        else ReaderError(
-                            "invalid_batch_output",
-                            "Batch reader returned an invalid page result",
-                        )
-                        for item in batch_results
-                    ]
+                batch_results = _checked_results(iter(listed), len(pages), None)
             pages_queued = time.perf_counter()
             for page_number, page_path in enumerate(pages, start=1):
                 page_started = time.perf_counter()
                 page_timings: dict[str, float] = {}
-                reader_result = (
-                    batch_results[page_number - 1]
-                    if batch_results is not None
-                    else None
-                )
+                reader_result = next(batch_results) if batch_results is not None else None
                 result.pages.append(
                     _read_page(
                         page_path,
@@ -231,6 +247,8 @@ def process_document(
                     )
                 )
                 _merge_timings(timings, page_timings)
+                if on_page is not None:
+                    on_page(result.pages[-1])
                 if page_execution is not None:
                     page_execution.append(
                         {

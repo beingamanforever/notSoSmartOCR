@@ -477,6 +477,8 @@ def _parse_result(
             code="invalid_content",
             attempts=attempts,
             latency_ms=_elapsed_ms(started),
+            # One malformed record need not cost the well-formed ones beside it.
+            partial_content=content_text,
         )
 
     usage = response.get("usage")
@@ -605,6 +607,14 @@ def _error_message(response_body: bytes) -> str:
         return "invalid error response"
 
 
+class StreamError(Exception):
+    """The provider failed after the reply had started, so the HTTP status still says 200."""
+
+    def __init__(self, body: bytes) -> None:
+        super().__init__("error event in the reply stream")
+        self.body = body
+
+
 def _collected_stream(lines: Any, on_content: Callable[[str], None]) -> bytes:
     """Reassemble OpenRouter's server-sent events into the non-streamed reply body.
 
@@ -617,7 +627,7 @@ def _collected_stream(lines: Any, on_content: Callable[[str], None]) -> bytes:
             continue  # comments keep the connection alive
         event = json.loads(line[6:])
         if "error" in event:
-            return json.dumps(event).encode()
+            raise StreamError(json.dumps(event).encode())
         reply.update({key: event[key] for key in ("id", "model", "provider", "usage") if event.get(key)})
         for item in event.get("choices") or []:
             choice.update({key: item[key] for key in ("finish_reason", "native_finish_reason") if item.get(key)})
@@ -640,6 +650,9 @@ def _default_transport(
                 else response.read()
             )
             return response.status, dict(response.headers.items()), body
+    except StreamError as error:
+        # Retried like the provider error it is; it carries no usable content.
+        return 502, {}, error.body
     except HTTPError as error:
         headers = dict(error.headers.items()) if error.headers else {}
         return error.code, headers, error.read()

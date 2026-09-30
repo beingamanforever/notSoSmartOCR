@@ -119,6 +119,7 @@ def create_verified_app(
         )
     if caches:
         app_options["caches"] = caches
+    app_options["max_active_parses"] = args.max_active_parses
     if args.usage_root is not None:
         app_options["usage_log"] = UsageLog(args.usage_root, keep=args.usage_retention)
         # The dashboard shows what people send, so it stays off without a token.
@@ -150,6 +151,12 @@ def _parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=4,
         help="Concurrent page requests; the GPU service controls model execution",
+    )
+    parser.add_argument(
+        "--max-active-parses",
+        type=_positive_int,
+        default=32,
+        help="Parses running or waiting before new uploads get a 503 busy reply",
     )
     parser.add_argument(
         "--usage-root",

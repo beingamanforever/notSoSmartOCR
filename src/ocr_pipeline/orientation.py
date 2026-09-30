@@ -358,11 +358,20 @@ class OrientationReader:
         self, image_paths: list[Path], page_numbers: list[int]
     ) -> list[list[TextRegion] | ReaderError]:
         """Overlap page preparation and I/O with an explicitly thread-safe reader."""
+        return list(self.read_iter(image_paths, page_numbers))
+
+    def read_iter(
+        self, image_paths: list[Path], page_numbers: list[int]
+    ) -> Iterator[list[TextRegion] | ReaderError]:
+        """Page results in page order, each as soon as it and those before it are read.
+
+        Pages are still read `batch_size` at a time; a long PDF can show its first page
+        while the rest are being read.
+        """
         if len(image_paths) != len(page_numbers):
             raise ValueError("image_paths and page_numbers must have equal lengths")
         if not image_paths:
-            return []
-        results: list[list[TextRegion] | ReaderError] = []
+            return
         with ThreadPoolExecutor(
             max_workers=min(self.batch_size, len(image_paths))
         ) as pool:
@@ -372,10 +381,9 @@ class OrientationReader:
             ]
             for future in futures:
                 try:
-                    results.append(future.result())
+                    yield future.result()
                 except ReaderError as error:
-                    results.append(error)
-        return results
+                    yield error
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
         if self.page_cache is None:
