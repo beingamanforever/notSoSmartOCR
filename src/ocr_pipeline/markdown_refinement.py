@@ -125,6 +125,19 @@ guess missing options, or omit visible unselected options. Set markdown to
 """
 
 
+def _finished_crops(text: str) -> list[dict[str, Any]]:
+    """Every crop record that closed in a reply cut off before its end."""
+    decoder, crops = json.JSONDecoder(), []
+    for match in re.finditer(r'\{\s*"region_id"', text):
+        try:
+            crop, _ = decoder.raw_decode(text, match.start())
+        except ValueError:
+            continue
+        if isinstance(crop, dict) and isinstance(crop.get("markdown"), str):
+            crops.append(crop)
+    return crops
+
+
 def _crop_response_schema(crops):
     return {
         "type": "object",
@@ -643,23 +656,40 @@ def refine_page(
                 if finished:
                     on_partial(finished)
 
-            return _call_openrouter(
-                model,
-                messages,
-                _crop_response_schema(requested_crops),
-                schema_name,
-                16384,
-                None,
-                180,
-                QWEN_ATTEMPTS,
-                strict,
-                transport or _default_transport,
-                time.sleep,
-                zero_data_retention=zero_data_retention,
-                reasoning_enabled=False,
-                session_id=session_id,
-                on_content=stream_crops if on_partial else None,
-            )
+            try:
+                return _call_openrouter(
+                    model,
+                    messages,
+                    _crop_response_schema(requested_crops),
+                    schema_name,
+                    16384,
+                    None,
+                    180,
+                    QWEN_ATTEMPTS,
+                    strict,
+                    transport or _default_transport,
+                    time.sleep,
+                    zero_data_retention=zero_data_retention,
+                    reasoning_enabled=False,
+                    session_id=session_id,
+                    on_content=stream_crops if on_partial else None,
+                )
+            except OpenRouterError as error:
+                # A dense form can run Qwen past its token limit (twice on the handwritten
+                # forms cohort). Crops it finished before the cut are still answers.
+                finished = _finished_crops(error.partial_content or "")
+                if error.code != "generation_truncated" or not finished:
+                    raise
+                return OpenRouterResult(
+                    content={"crops": finished},
+                    model=model,
+                    provider=None,
+                    usage={},
+                    cost=None,
+                    latency_ms=error.latency_ms or 0,
+                    attempts=error.attempts or 1,
+                    finish_reason="length",
+                )
 
         # These requests have independent prompts and source crops. Keep their
         # original merge order and primary-failure behavior while overlapping I/O.

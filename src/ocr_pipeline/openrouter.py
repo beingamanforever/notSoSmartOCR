@@ -70,12 +70,15 @@ class OpenRouterError(RuntimeError):
         status_code: int | None = None,
         attempts: int | None = None,
         latency_ms: float | None = None,
+        partial_content: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.status_code = status_code
         self.attempts = attempts
         self.latency_ms = latency_ms
+        # What a truncated generation wrote before it hit its token limit.
+        self.partial_content = partial_content
 
 
 @dataclass(frozen=True)
@@ -454,6 +457,7 @@ def _parse_result(
             code=code,
             attempts=attempts,
             latency_ms=_elapsed_ms(started),
+            partial_content=content_text if finish_reason == "length" else None,
         )
     try:
         content = json.loads(content_text)

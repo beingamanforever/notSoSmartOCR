@@ -1668,3 +1668,30 @@ def test_streamed_crops_preview_as_each_answer_completes(tmp_path, monkeypatch):
 
     assert previews == [{"line-1": 'new "1"'}, {"line-2": "new 2"}]
     assert streamed["accepted_crop_ids"] == ["crop-1", "crop-2"]
+
+
+def test_a_reply_cut_at_its_token_limit_keeps_the_crops_it_finished(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    image = tmp_path / "two-lines.png"
+    Image.new("RGB", (400, 300), "white").save(image)
+    page = {
+        "page_number": 1, "width": 400, "height": 300,
+        "regions": [
+            {"id": f"line-{index}", "kind": "handwriting", "text": f"old {index}", "resolution": "unreadable",
+             "bounding_box": {"left": 20, "top": top, "right": 380, "bottom": top + 40}}
+            for index, top in ((1, 20), (2, 200))
+        ],
+    }
+    cut = '{"crops":[{"region_id":"crop-1","markdown":"new 1"},{"region_id":"crop-2","markdown":"new 2 and on and on'
+
+    def transport(request, timeout):
+        return (200, {}, json.dumps({
+            "model": json.loads(request.data)["model"],
+            "choices": [{"message": {"content": cut}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 16384},
+        }).encode())
+
+    result = refine_page(image, page, "old 1\n\nold 2", transport=transport)
+
+    assert result["accepted_crop_ids"] == ["crop-1"]
+    assert result["rejected_crop_ids"] == ["crop-2"]
