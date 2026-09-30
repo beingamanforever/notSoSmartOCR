@@ -1709,11 +1709,10 @@ def test_one_malformed_crop_record_costs_only_that_crop(tmp_path, monkeypatch):
             for index, top in ((1, 20), (2, 200))
         ],
     }
-    # Qwen once answered a control's group_label with null; the reply failed its schema.
+    # A record without its markdown fails the reply's schema; its sibling is still usable.
     reply = json.dumps({"crops": [
         {"region_id": "crop-1", "markdown": "new 1"},
-        {"region_id": "crop-2", "markdown": "new 2", "controls": [
-            {"label": "Urgent", "group_label": None, "state": "selected", "bbox_2d": [0, 0, 10, 10]}]},
+        {"region_id": "crop-2", "markdown": None},
     ]})
 
     def transport(request, timeout):
@@ -1727,6 +1726,54 @@ def test_one_malformed_crop_record_costs_only_that_crop(tmp_path, monkeypatch):
 
     assert result["accepted_crop_ids"] == ["crop-1"]
     assert result["rejected_crop_ids"] == ["crop-2"]
+
+
+def test_many_crops_go_out_in_bounded_parallel_requests_that_fail_alone(tmp_path, monkeypatch):
+    from ocr_pipeline.markdown_refinement import CROPS_PER_REQUEST
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    count = 2 * CROPS_PER_REQUEST + 3
+    image = tmp_path / "many-lines.png"
+    Image.new("RGB", (400, 60 * count + 20), "white").save(image)
+    page = {
+        "page_number": 1, "width": 400, "height": 60 * count + 20,
+        "regions": [
+            {"id": f"line-{index}", "kind": "handwriting", "text": f"old {index}", "resolution": "unreadable",
+             "bounding_box": {"left": 20, "top": 20 + 60 * index, "right": 380, "bottom": 60 + 60 * index}}
+            for index in range(count)
+        ],
+    }
+    sizes = []
+
+    def transport(request, timeout):
+        payload = json.loads(request.data)
+        ids = json.loads(payload["messages"][1]["content"][0]["text"].split("\n")[0])
+        sizes.append(len(ids))
+        if "crop-1" in ids:  # the first request fails outright
+            return (500, {}, b'{"error": {"message": "provider down"}}')
+        return (200, {}, json.dumps({
+            "model": payload["model"],
+            "choices": [{"message": {"content": json.dumps({"crops": [{"region_id": i, "markdown": f"new {i}"} for i in ids]})}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 10},
+        }).encode())
+
+    result = refine_page(image, page, "\n\n".join(f"old {i}" for i in range(count)), transport=transport)
+
+    assert max(sizes) <= CROPS_PER_REQUEST and sum(set(sizes)) >= count - CROPS_PER_REQUEST
+    assert len(result["accepted_crop_ids"]) == count - CROPS_PER_REQUEST
+    assert len(result["rejected_crop_ids"]) == CROPS_PER_REQUEST
+
+
+def test_a_malformed_control_does_not_cost_its_crop():
+    from ocr_pipeline.markdown_refinement import _finished_crops, _salvage_schema
+
+    reply = json.dumps({"crops": [{"region_id": "crop-1", "markdown": "[form options extracted]", "controls": [
+        {"label": "Yes", "group_label": "Smoker", "state": "selected", "bbox_2d": [0, 0, 10, 10]},
+        {"label": "No", "group_label": "Smoker", "state": "unselected"},
+    ]}]})
+
+    (crop,) = _finished_crops(reply, _salvage_schema([{"region_id": "crop-1"}]))
+    assert len(crop["controls"]) == 2  # the control check then drops only "No"
 
 
 def test_a_blank_answer_replaces_a_doubted_cell_but_keeps_a_confident_one():

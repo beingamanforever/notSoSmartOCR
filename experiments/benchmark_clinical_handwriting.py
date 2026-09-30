@@ -46,6 +46,10 @@ def main():
     parser.add_argument("--dpi", type=int, default=300)
     parser.add_argument("--pipeline-only", action="store_true")
     parser.add_argument("--labeled-pages-only", action="store_true")
+    parser.add_argument(
+        "--workers", type=int, default=4,
+        help="Pages in flight; use 1 against a shared demo so users wait behind one page at most",
+    )
     args = parser.parse_args()
     if urlsplit(args.pipeline_url).hostname not in {"127.0.0.1", "localhost", "::1"}:
         parser.error("Use a loopback endpoint or SSH tunnel for the private pipeline")
@@ -62,6 +66,7 @@ def main():
         dpi=args.dpi,
         arms=("pipeline",) if args.pipeline_only else ("pipeline", "full-page"),
         labeled_pages_only=args.labeled_pages_only,
+        workers=args.workers,
     )
 
 
@@ -76,6 +81,7 @@ def run(
     dpi=300,
     arms=("pipeline", "full-page"),
     labeled_pages_only=False,
+    workers=4,
 ):
     import fitz
 
@@ -149,7 +155,7 @@ def run(
             raise RuntimeError(
                 "Model access failed on the first page; remaining pages were not sent"
             )
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [
                 pool.submit(
                     run_page,

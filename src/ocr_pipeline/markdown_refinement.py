@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import io
 import json
 import math
@@ -207,6 +208,25 @@ def _crop_response_schema(crops):
         "required": ["crops"],
         "additionalProperties": False,
     }
+
+
+# Crops per hosted request. One reply for 76 crops answered 1 of them and a 26-crop reply
+# took 100 s (handwritten forms, 2026-09-30); bounded requests run in parallel instead, so
+# every reply stays short. Only the shared instructions repeat; each crop image is sent once.
+CROPS_PER_REQUEST = 12
+
+
+def _salvage_schema(crops):
+    """The crop record shape, leaving each form control to the per-control check in
+    `_form_control_regions`, which drops only a malformed control (one missing bbox_2d
+    once cost all 16 controls of its crop)."""
+    schema = copy.deepcopy(_crop_response_schema(crops)["properties"]["crops"]["items"])
+    schema["properties"]["controls"]["items"] = {"type": "object"}
+    return schema
+
+
+def _chunks(crops):
+    return [crops[start : start + CROPS_PER_REQUEST] for start in range(0, len(crops), CROPS_PER_REQUEST)]
 
 
 def _combine_openrouter_results(results):
@@ -485,7 +505,11 @@ def refine_page(
         crop for crop in crops if "owned_form_row" in crop["routing_reasons"]
     ]
     primary_crops = [crop for crop in crops if crop not in owned_row_crops]
-    primary_messages = [
+
+    def primary_messages_for(chunk):
+        chunk_ids = {crop["region_id"] for crop in chunk}
+        chunk_grids = {key: grid for key, grid in table_grids.items() if key in chunk_ids}
+        return [
         {
             "role": "system",
             "content": PROMPT
@@ -506,7 +530,7 @@ def refine_page(
             "content": [
                 {
                     "type": "text",
-                    "text": json.dumps([g["region_id"] for g in primary_crops])
+                    "text": json.dumps([g["region_id"] for g in chunk])
                     + (
                         "\nThe source reader's canonical table topology follows. Return exactly these "
                         "cell IDs in table_cells for each listed crop. Each ID owns one "
@@ -525,16 +549,32 @@ def refine_page(
                                         for cell in grid["cells"]
                                     ],
                                 }
-                                for key, grid in table_grids.items()
+                                for key, grid in chunk_grids.items()
                             }
                         )
-                        if table_grids
+                        if chunk_grids
                         else ""
                     ),
                 },
+                *(
+                    part
+                    for crop in chunk
+                    for part in (
+                        {
+                            "type": "text",
+                            "text": (
+                                f"{crop['region_id']} "
+                                f"{(source_index[crop['source_ids'][0]].get('structure') or {}).get('role', 'content')}: "
+                                f"{panels_by_id[crop['region_id']].width} x {panels_by_id[crop['region_id']].height} pixels"
+                            ),
+                        },
+                        _image_content(panels_by_id[crop["region_id"]]),
+                    )
+                ),
             ],
         },
-    ]
+        ]
+
     panels = []
     panels_by_id = {}
     for crop in crops:
@@ -562,21 +602,6 @@ def refine_page(
         crop["panel_size"] = {"width": panel.width, "height": panel.height}
         panels.append(panel)
         panels_by_id[crop["region_id"]] = panel
-    for crop in primary_crops:
-        panel = panels_by_id[crop["region_id"]]
-        primary_messages[1]["content"].extend(
-            [
-                {
-                    "type": "text",
-                    "text": (
-                        f"{crop['region_id']} "
-                        f"{(source_index[crop['source_ids'][0]].get('structure') or {}).get('role', 'content')}: "
-                        f"{panel.width} x {panel.height} pixels"
-                    ),
-                },
-                _image_content(panel),
-            ]
-        )
     # Pin the shared prefix's route without putting document identifiers in logs.
     # Qwen uses implicit caching; affinity is not evidence of a cache hit.
     session_id = (
@@ -589,9 +614,9 @@ def refine_page(
         failed_crops = []
         request_errors = []
         requests = []
-        if primary_crops:
-            requests.append((primary_crops, primary_messages, "page_crops"))
-        if owned_row_crops:
+        for chunk in _chunks(primary_crops):
+            requests.append((chunk, primary_messages_for(chunk), "page_crops"))
+        for chunk in _chunks(owned_row_crops):
             row_messages = [
                 {
                     "role": "system",
@@ -612,7 +637,7 @@ def refine_page(
                         {
                             "type": "text",
                             "text": json.dumps(
-                                [crop["region_id"] for crop in owned_row_crops]
+                                [crop["region_id"] for crop in chunk]
                             ),
                         },
                         {"type": "text", "text": "page_context"},
@@ -620,7 +645,7 @@ def refine_page(
                     ],
                 },
             ]
-            for crop in owned_row_crops:
+            for crop in chunk:
                 panel = panels_by_id[crop["region_id"]]
                 row_messages[1]["content"].extend(
                     [
@@ -634,7 +659,7 @@ def refine_page(
                         _image_content(panel),
                     ]
                 )
-            requests.append((owned_row_crops, row_messages, "owned_form_rows"))
+            requests.append((chunk, row_messages, "owned_form_rows"))
 
         def read_crops(request):
             requested_crops, messages, schema_name = request
@@ -678,10 +703,7 @@ def refine_page(
             except OpenRouterError as error:
                 # A dense form can run Qwen past its token limit (twice on the handwritten
                 # forms cohort). Crops it finished before the cut are still answers.
-                finished = _finished_crops(
-                    error.partial_content or "",
-                    _crop_response_schema(requested_crops)["properties"]["crops"]["items"],
-                )
+                finished = _finished_crops(error.partial_content or "", _salvage_schema(requested_crops))
                 if error.code not in {"generation_truncated", "invalid_content"} or not finished:
                     raise
                 return OpenRouterResult(
@@ -695,8 +717,10 @@ def refine_page(
                     finish_reason="length" if error.code == "generation_truncated" else "stop",
                 )
 
-        # These requests have independent prompts and source crops. Keep their
-        # original merge order and primary-failure behavior while overlapping I/O.
+        # These requests have independent prompts and source crops. Keep their merge
+        # order while overlapping I/O; a failed request costs only its own crops, and
+        # the page fails only when every request did.
+        first_error = None
         with ThreadPoolExecutor(max_workers=len(requests)) as pool:
             futures = [pool.submit(read_crops, request) for request in requests]
             for (requested_crops, _, schema_name), future in zip(
@@ -706,8 +730,7 @@ def refine_page(
                     results.append(future.result())
                     completed_crops.extend(requested_crops)
                 except OpenRouterError as error:
-                    if not results:
-                        raise
+                    first_error = first_error or error
                     failed_crops.extend(requested_crops)
                     request_errors.append(
                         {
@@ -719,6 +742,8 @@ def refine_page(
                             "latency_ms": error.latency_ms or 0,
                         }
                     )
+        if not results:
+            raise first_error
         result = _combine_openrouter_results(results)
         if request_errors:
             result = OpenRouterResult(

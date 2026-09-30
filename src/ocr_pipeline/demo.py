@@ -793,8 +793,10 @@ def create_app(
     prepare_lock = threading.Lock()
     process_lock = threading.Lock()
     parse_queue = FairQueue()
-    # Keep hosted calls within the existing serial reservation budget.
-    refine_lock = threading.Lock()
+    # Refinements of different documents overlap: one dense form's 100 s reply must not
+    # hold every other user's LLM pass. The spending ledger reserves each call inside a
+    # SQLite write transaction, so parallel calls stay within the budget.
+    refine_lock = threading.BoundedSemaphore(REFINEMENT_WORKERS)
     state_lock = threading.Lock()
     refinement_previews: dict[str, dict[int, dict[str, str]]] = {}
     page_progress: dict[str, dict[str, Any]] = {}
@@ -999,8 +1001,10 @@ def create_app(
             pipeline_timings: dict[str, float] = {}
             stage_execution: list[dict[str, object]] = []
             page_execution: list[dict[str, object]] = []
-            # Parses and refinements each hold a lock, so a cache's counters moving
-            # across one step belong to this request alone.
+            # Parses run one at a time, so the page cache's counters moving across one
+            # parse belong to this request alone.
+            # ponytail: refinements overlap, so LLM-cache deltas can include another
+            # request's calls; count per call in ReplyCache if that matters.
             cache_use: dict[str, int] = {}
 
             def count_cache(name: str, prefix: str, before: dict[str, Any] | None) -> None:
