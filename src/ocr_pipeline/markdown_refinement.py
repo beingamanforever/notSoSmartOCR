@@ -793,7 +793,7 @@ def refine_page(
             errors.append(f"{record['region_id']} returned empty content")
             rejected.add(record["region_id"])
     answers = {r["region_id"]: r["markdown"] for r in records}
-    form_controls, control_errors, marked_ids = (
+    form_controls, control_errors = (
         _form_control_regions(
             [crop for crop in completed_crops if crop["region_id"] not in unanswered],
             records,
@@ -803,7 +803,7 @@ def refine_page(
             rotation_degrees,
         )
         if records
-        else ([], [], set())
+        else ([], [])
     )
     errors.extend(control_errors)
     controls_by_crop = {
@@ -1025,20 +1025,6 @@ def refine_page(
         else region
         for region in regions
     ]
-    refined = [
-        {
-            **r,
-            "structure": {
-                **r["structure"],
-                "state": "selected",
-                "state_source": "qwen_form_option_extraction",
-                "detector_state": "unselected",
-            },
-        }
-        if r["id"] in marked_ids
-        else r
-        for r in refined
-    ]
     refined.extend(form_controls)
     index = {r["id"]: r for r in refined}
     control_owner_ids = {
@@ -1255,7 +1241,6 @@ def _form_control_regions(
     records_by_id = {record["region_id"]: record for record in records}
     controls = []
     errors = []
-    marked_ids = set()
     existing = [region for region in regions if region.get("kind") == "checkbox"]
     for crop in crops:
         source = source_index[crop["source_ids"][0]]
@@ -1298,14 +1283,10 @@ def _form_control_regions(
             )
             if duplicate is not None:
                 prior_state = (duplicate.get("structure") or {}).get("state")
-                detected = (duplicate.get("text_provenance") or {}).get(
-                    "method"
-                ) == "learned_checkbox_detection"
-                # Heron misses a pen mark over a printed box: on handwritten forms Qwen's
-                # "selected" was right in 6 of the 7 cases where the two disagreed.
-                if detected and prior_state == "unselected" and state == "selected":
-                    marked_ids.add(duplicate["id"])
-                elif prior_state in {"selected", "unselected"} and prior_state != state:
+                # The detector keeps its state when Qwen disagrees. Letting Qwen mark a
+                # box Heron left unselected was right in 6 of 7 handwritten-form cases
+                # but 1 of 18 on the domain forms (2026-09-30), so it was withdrawn.
+                if prior_state in {"selected", "unselected"} and prior_state != state:
                     errors.append(
                         f"{crop['region_id']} disagrees with an existing physical control"
                     )
@@ -1353,7 +1334,7 @@ def _form_control_regions(
                     },
                 }
             )
-    return controls, errors, marked_ids
+    return controls, errors
 
 
 def _owned_label_ids(source, option_box, source_index):

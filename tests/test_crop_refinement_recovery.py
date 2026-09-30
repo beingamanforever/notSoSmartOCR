@@ -1468,11 +1468,11 @@ def test_qwen_marks_a_pen_ticked_box_the_detector_calls_unselected():
             [crop], records, {"form": form, "box": box}, [form, box], "qwen", 0
         )
 
-    assert merge("unselected", "selected") == ([], [], {"box"})
-    # A detected mark is never cleared by the reader.
-    controls, errors, marked = merge("selected", "unselected")
-    assert (controls, marked) == ([], set())
-    assert errors == ["crop-1 disagrees with an existing physical control"]
+    # The detector keeps its state either way; the disagreement is recorded.
+    for heron, qwen in (("unselected", "selected"), ("selected", "unselected")):
+        controls, errors = merge(heron, qwen)
+        assert controls == []
+        assert errors == ["crop-1 disagrees with an existing physical control"]
 
 
 def test_a_glyph_sized_crop_is_upscaled_without_padding():
