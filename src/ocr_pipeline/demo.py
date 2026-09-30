@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import asdict, dataclass
@@ -28,6 +28,7 @@ from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
 
+from .usage import UsageLog
 from .contracts import (
     BoundingBox,
     DocumentResult,
@@ -96,6 +97,7 @@ def _display_response(response: dict[str, Any]) -> dict[str, Any]:
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 FEEDBACK_RETENTION = 1000
+ADMIN_COOKIE = "ocr_admin"
 # Finished sessions kept in memory; the oldest is dropped with its files beyond this.
 SESSION_RETENTION = 32
 # Bounds the background pool that runs deferred LLM refinement jobs.
@@ -635,6 +637,9 @@ def create_app(
     max_presentation_pages: int = 4,
     katex_asset_root: Path | None = None,
     feedback_root: Path | None = None,
+    caches: Mapping[str, Any] | None = None,
+    usage_log: UsageLog | None = None,
+    admin_token: str | None = None,
     warmup_completed: bool = False,
     crop_refiner: Callable[[DocumentResult, list[Path]], None] | None = None,
 ) -> Any:
@@ -1114,6 +1119,22 @@ def create_app(
             if deferring_refinement:
                 session_state["refinement_event"] = threading.Event()
             sessions.save(session_id, session_state)
+            usage_id = None
+            if usage_log is not None:
+                try:
+                    usage_id = usage_log.record(
+                        {
+                            "session_id": session_id,
+                            "client": request.client.host if request.client else None,
+                            "user_agent": request.headers.get("user-agent", "")[:200],
+                            "example": example if example_source is not None else None,
+                            **_usage_metrics(response),
+                        },
+                        preview_paths[0] if preview_paths else None,
+                        _usage_details(response),
+                    )
+                except OSError:
+                    LOGGER.exception("Usage record failed")
 
             if deferring_refinement:
                 refinement_event = session_state["refinement_event"]
@@ -1137,6 +1158,15 @@ def create_app(
                             "message": str(error),
                         }
                     refined_response = build_response(2, refinement_payload)
+                    if usage_id is not None:
+                        try:
+                            usage_log.update(
+                                usage_id,
+                                _usage_metrics(refined_response),
+                                _usage_details(refined_response),
+                            )
+                        except OSError:
+                            LOGGER.exception("Usage update failed")
                     with state_lock:
                         try:
                             current = sessions.get(session_id)
@@ -1253,6 +1283,82 @@ def create_app(
                     session["response"]["presentation"] = payload
                     session["response"]["stage_execution"].extend(stage_execution)
                 return JSONResponse(session["response"]["presentation"])
+
+    def require_admin(request: Request) -> None:
+        """Only the holder of the admin token sees what people send."""
+        supplied = request.cookies.get(ADMIN_COOKIE) or request.headers.get(
+            "authorization", ""
+        ).removeprefix("Bearer ")
+        if not admin_token or usage_log is None:
+            raise HTTPException(404, "Not found")
+        if not secrets.compare_digest(supplied.encode(), admin_token.encode()):
+            raise HTTPException(401, "Admin token required")
+
+    @app.get("/admin", response_class=HTMLResponse)
+    def handle_admin_page() -> Any:
+        if not admin_token or usage_log is None:
+            raise HTTPException(404, "Not found")
+        return HTMLResponse(Path(__file__).with_name("admin.html").read_text(encoding="utf-8"))
+
+    @app.post("/api/admin/login")
+    def handle_admin_login(payload: dict[str, Any]) -> Any:
+        token = str(payload.get("token") or "")
+        if not admin_token or usage_log is None:
+            raise HTTPException(404, "Not found")
+        if not secrets.compare_digest(token.encode(), admin_token.encode()):
+            raise HTTPException(401, "That token is not valid")
+        reply = JSONResponse({"status": "ok"})
+        reply.set_cookie(ADMIN_COOKIE, token, httponly=True, samesite="strict", max_age=12 * 3600)
+        return reply
+
+    @app.post("/api/admin/logout")
+    def handle_admin_logout() -> Any:
+        reply = JSONResponse({"status": "ok"})
+        reply.delete_cookie(ADMIN_COOKIE)
+        return reply
+
+    @app.get("/api/admin/usage")
+    def handle_admin_usage(request: Request, limit: int = 500) -> Any:
+        require_admin(request)
+        entries = usage_log.entries(max(1, min(limit, 2000)))
+        feedback = []
+        if feedback_dir.is_dir():
+            for path in feedback_dir.glob("*/record.json"):
+                try:
+                    feedback.append(json.loads(path.read_text(encoding="utf-8")))
+                except (OSError, ValueError):
+                    continue
+        verdicts = {item.get("session_id"): item.get("verdict") for item in feedback}
+        for entry in entries:
+            entry["feedback"] = verdicts.get(entry.get("session_id"))
+        return {
+            "entries": entries,
+            "feedback": feedback,
+            "caches": {name: cache.stats() for name, cache in (caches or {}).items()},
+        }
+
+    @app.get("/api/admin/usage/{entry_id}/details")
+    def handle_admin_details(request: Request, entry_id: str) -> Any:
+        require_admin(request)
+        details = usage_log.details(entry_id)
+        if details is None:
+            raise HTTPException(404, "Details not found")
+        return details
+
+    @app.get("/api/admin/usage/{entry_id}/{name}")
+    def handle_admin_image(request: Request, entry_id: str, name: str) -> Any:
+        require_admin(request)
+        path = usage_log.image(entry_id, name)
+        if path is None:
+            raise HTTPException(404, "Image not found")
+        return FileResponse(
+            path, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=3600"}
+        )
+
+    @app.get("/api/cache")
+    def handle_cache_stats() -> Any:
+        """Entries, bytes and hit counts of each enabled content cache."""
+        return {name: cache.stats() for name, cache in (caches or {}).items()}
 
     @app.get("/api/sessions/{session_id}/refinement/preview")
     def handle_refinement_preview(session_id: str) -> Any:
@@ -1850,6 +1956,85 @@ def create_app(
         return response
 
     return app
+
+
+def _usage_metrics(response: dict[str, Any]) -> dict[str, Any]:
+    """What one parse cost and produced, from its API response."""
+    result = response.get("result") or {}
+    pages = result.get("pages") or []
+    timing = response.get("timing") or {}
+    steps = timing.get("pipeline_steps") or {}
+    refinements = [page.get("refinement") or {} for page in pages]
+    costs = [r.get("cost") for r in refinements if isinstance(r.get("cost"), (int, float))]
+    return {
+        "filename": response.get("filename"),
+        "source_bytes": response.get("source_bytes"),
+        "pages": len(pages),
+        "characters": sum(len((page.get("text") or {}).get("value") or "") for page in pages),
+        "status": result.get("status"),
+        "total_seconds": timing.get("total_seconds"),
+        "ocr_seconds": steps.get("reader"),
+        "llm_seconds": max((r.get("elapsed_seconds") or 0 for r in refinements), default=0) or None,
+        "llm_status": (response.get("refinement") or {}).get("status")
+        or next((r.get("status") for r in refinements if r.get("status")), None),
+        "llm_crops": sum(len(r.get("crops") or []) for r in refinements),
+        "llm_accepted": sum(len(r.get("accepted_crop_ids") or []) for r in refinements),
+        "llm_cost_usd": round(sum(costs), 6) if costs else None,
+        "llm_output_tokens": sum((r.get("usage") or {}).get("completion_tokens") or 0 for r in refinements),
+        "llm_reasons": dict(
+            Counter(
+                reason
+                for r in refinements
+                for crop in r.get("crops") or []
+                for reason in crop.get("routing_reasons") or []
+            )
+        ),
+    }
+
+
+USAGE_HIDDEN_KINDS = {"word", "table_cell", "coverage_risk", "layout_block", "table_candidate"}
+
+
+def _usage_details(response: dict[str, Any]) -> dict[str, Any]:
+    """Each page's regions with why any went to the LLM and what came back."""
+    pages = []
+    for page in (response.get("result") or {}).get("pages") or []:
+        refinement = page.get("refinement") or {}
+        accepted = set(refinement.get("accepted_crop_ids") or [])
+        routed = {}
+        for crop in refinement.get("crops") or []:
+            for source_id in crop.get("source_ids") or []:
+                routed[source_id] = {
+                    "crop_id": crop.get("region_id"),
+                    "reasons": crop.get("routing_reasons") or [],
+                    "accepted": crop.get("region_id") in accepted,
+                }
+        regions = []
+        for region in page.get("regions") or []:
+            if region.get("kind") in USAGE_HIDDEN_KINDS:
+                continue
+            provenance = region.get("text_provenance") or {}
+            source = provenance.get("source_provenance") or {}
+            key = provenance.get("source_region_id") or region.get("id")
+            regions.append({
+                "id": region.get("id"),
+                "kind": region.get("kind"),
+                "box": region.get("bounding_box"),
+                "confidence": region.get("confidence"),
+                "resolution": region.get("resolution"),
+                "text": str(region.get("text") or "")[:240],
+                "ocr_text": str(source.get("raw_text") or "")[:240] if source else None,
+                "method": provenance.get("method"),
+                "routing": routed.get(key),
+            })
+        pages.append({
+            "page_number": page.get("page_number"),
+            "width": page.get("width"),
+            "height": page.get("height"),
+            "llm": {key: refinement.get(key) for key in ("status", "elapsed_seconds", "cost", "validation_errors")},
+            "regions": regions,
+        })
+    return {"pages": pages}
 
 
 def _safe_child(root: Path, candidate: Path) -> bool:

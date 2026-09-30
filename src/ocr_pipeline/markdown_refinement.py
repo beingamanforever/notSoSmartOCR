@@ -1135,7 +1135,10 @@ def _refined_table_cell(
 ):
     source_cell = source_cell or {}
     source_text = str(source_cell.get("text") or "")
-    use_source = not text.strip()
+    # A blank answer keeps the source cell (Qwen sometimes skips one, and an unreadable
+    # cell stays unread) except where the source text is a likely misread: Falcon once
+    # filled blank cells with Georgian "კვეთა".
+    use_source = not text.strip() and source_cell.get("resolution") != "conflicting"
     selected_text = source_text if use_source else text
     if use_source:
         return {

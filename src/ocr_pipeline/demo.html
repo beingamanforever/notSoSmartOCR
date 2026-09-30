@@ -146,6 +146,25 @@
     .credit a { color: var(--accent); font-weight: 500; text-decoration: none; }
     .credit a:hover { text-decoration: underline; text-underline-offset: 3px; }
     .has-document .examples { display: none; }
+    /* Landing: a slow particle field in perspective behind the hero, as on jina.ai. */
+    .backdrop { display: block; position: fixed; inset: 0; z-index: -1; width: 100%; height: 100%; pointer-events: none; opacity: 1; transition: opacity 400ms var(--motion); }
+    .has-document .backdrop { opacity: 0; }
+    .drop-overlay { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 24px; background: color-mix(in srgb, var(--background) 70%, transparent); backdrop-filter: blur(6px); opacity: 0; pointer-events: none; transition: opacity 160ms var(--motion); }
+    .dropping .drop-overlay { opacity: 1; }
+    .drop-card { display: grid; justify-items: center; gap: 8px; width: min(520px, 100%); padding: 44px 24px; border: 2px dashed var(--accent); border-radius: 24px; background: var(--panel); box-shadow: var(--shadow-pop); color: var(--muted); font-size: .86rem; transform: scale(.97); transition: transform 200ms var(--motion); }
+    .dropping .drop-card { transform: none; }
+    .drop-card svg { width: 40px; height: 40px; padding: 10px; border-radius: 14px; background: var(--accent-soft); fill: none; stroke: var(--accent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; box-sizing: content-box; }
+    .drop-card strong { color: var(--text); font-size: 1.1rem; }
+    .hero-art { display: block; width: 150px; margin: 0 auto 6px; overflow: visible; }
+    .hero-art > g > g, .hero-art > g > path { transition: transform 400ms var(--motion); }
+    header:hover .hero-art > g > g:first-child { transform: translate(-4px, -2px) rotate(-3deg); transform-origin: 38px 62px; }
+    header:hover .hero-art > g > g:nth-child(2) { transform: translate(4px, -2px) rotate(3deg); transform-origin: 132px 60px; }
+    .has-document .hero-art { display: none; }
+    body:not(.has-document) .brand-logo { display: none; }
+    body:not(.has-document) .brand { text-align: center; }
+    body:not(.has-document) h1 { font-size: clamp(2rem, 4vw, 2.9rem); font-weight: 720; letter-spacing: -.045em; }
+    body:not(.has-document) .subtitle { font-size: 1.02rem; }
+    body:not(.has-document) .toolbar, body:not(.has-document) .example-button { background: color-mix(in srgb, var(--panel) 88%, transparent); backdrop-filter: blur(6px); }
     /* With a document open, brand and upload share one bar so the panes get the height. */
     .has-document .shell { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 20px; align-items: center; }
     .has-document header { margin: 0; }
@@ -523,34 +542,35 @@
     .card-head .elapsed-chip { margin-right: auto; }
     .elapsed-chip[data-state="running"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
 
-    .doc-metrics { display: flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; }
-    .doc-metrics .metric + .metric::before { display: block; content: "·"; margin-right: 3px; color: var(--line-strong); }
+    .doc-metrics { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+    /* Result metrics as tinted chips, each with its own glyph. */
     .metric {
       display: inline-flex;
       align-items: center;
       gap: 5px;
-      padding: 3px 0;
-      border: 0;
-      border-radius: 0;
-      background: transparent;
-      color: var(--muted);
-      font-size: .7rem;
+      height: 24px;
+      padding: 0 9px 0 7px;
+      border-radius: 999px;
+      background: color-mix(in srgb, var(--metric-tint) 12%, var(--panel));
+      color: color-mix(in srgb, var(--metric-tint) 82%, var(--text));
+      font-size: .72rem;
+      font-weight: 600;
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
     .metric::before {
-      display: none;
-      font-size: .78rem;
-      content: attr(data-icon);
-      color: var(--metric-tint);
-      font-size: .78rem;
-      line-height: 1;
+      content: "";
+      width: 13px;
+      height: 13px;
+      background: currentColor;
+      -webkit-mask: var(--metric-icon) center / contain no-repeat;
+      mask: var(--metric-icon) center / contain no-repeat;
     }
     .metric[hidden] { display: none; }
-    #metric-time { --metric-tint: var(--accent); }
-    #metric-pages { --metric-tint: var(--confidence-high); }
-    #metric-chars { --metric-tint: var(--positive); }
-    #metric-size { --metric-tint: var(--confidence-medium); }
+    #metric-time { --metric-tint: #8b5cf6; --metric-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='13' r='8'/%3E%3Cpath d='M12 9v4l2 2M9 2h6'/%3E%3C/svg%3E"); }
+    #metric-pages { --metric-tint: #3b82f6; --metric-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z'/%3E%3Cpath d='M14 3v5h5M9 13h6M9 17h4'/%3E%3C/svg%3E"); }
+    #metric-chars { --metric-tint: #ea580c; --metric-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 7V5h10v2M9 5v14M7 19h4M14 12v-1h6v1M17 11v8M15.5 19h3'/%3E%3C/svg%3E"); }
+    #metric-size { --metric-tint: #16a34a; --metric-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cellipse cx='12' cy='5' rx='8' ry='3'/%3E%3Cpath d='M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3'/%3E%3C/svg%3E"); }
 
     .feedback { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line-strong); border-radius: 999px; }
     .feedback-button {
@@ -724,18 +744,29 @@
     .technical-details { grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 8px; }
     .technical-details summary { cursor: pointer; color: var(--muted); font-size: .74rem; font-weight: 700; }
     .technical-grid { display: grid; gap: 12px; margin-top: 10px; }
-    .technical-grid .value {
-      display: grid;
-      max-height: 320px;
-      overflow: auto;
-      margin-top: 6px;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      font-size: .76rem;
-    }
-    .detail-row { display: grid; grid-template-columns: minmax(120px, 38%) minmax(0, 1fr); gap: 12px; padding: 7px 12px; font-variant-numeric: tabular-nums; }
-    .detail-row + .detail-row { border-top: 1px solid var(--line); }
-    .detail-key { color: var(--muted); text-transform: capitalize; }
+    /* Technical details: one card per evidence group, values typed by what they mean. */
+    .technical-grid .value { display: grid; gap: 10px; margin-top: 8px; font-weight: 400; }
+    .detail-group { display: grid; grid-template-columns: minmax(110px, 34%) minmax(0, 1fr); overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+    .detail-group h4 { grid-column: 1 / -1; margin: 0; padding: 9px 14px; border-bottom: 1px solid var(--line); background: var(--surface); color: var(--text); font-size: .74rem; font-weight: 650; letter-spacing: .01em; }
+    .detail-row { display: contents; }
+    .detail-row > * { padding: 8px 14px; border-bottom: 1px solid var(--line); }
+    .detail-row:last-child > * { border-bottom: 0; }
+    .detail-key { color: var(--muted); font-size: .74rem; }
+    .detail-value { min-width: 0; color: var(--text); font-size: .78rem; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .detail-wide > .detail-key { grid-column: 1 / -1; padding-bottom: 2px; border-bottom: 0; }
+    .detail-wide > .detail-value { grid-column: 1 / -1; padding-top: 4px; }
+    .detail-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .72rem; color: var(--text-2); }
+    .detail-code { display: block; max-height: 180px; overflow: auto; padding: 10px 12px !important; border-radius: 8px; background: var(--surface-2); font: .72rem/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+    .detail-meter { display: flex; align-items: center; gap: 10px; }
+    .detail-meter::before { content: ""; flex: 0 0 96px; height: 6px; border-radius: 999px; background: linear-gradient(var(--accent), var(--accent)) 0 0 / var(--value) 100% no-repeat, var(--surface-2); }
+    .detail-flag { display: inline-block; padding: 1px 9px; border-radius: 999px; font-weight: 600; }
+    .detail-flag[data-on="true"] { background: var(--positive-soft); color: var(--positive); }
+    .detail-flag[data-on="false"] { background: var(--surface-2); color: var(--muted); }
+    .detail-bars { display: grid; gap: 6px; }
+    .detail-bar { display: grid; grid-template-columns: 120px minmax(0, 1fr) 36px; align-items: center; gap: 10px; }
+    .detail-bar::after { content: ""; grid-column: 2; grid-row: 1; height: 6px; border-radius: 999px; background: linear-gradient(var(--accent), var(--accent)) 0 0 / var(--value) 100% no-repeat, var(--surface-2); }
+    .detail-bar b { grid-column: 1; font-weight: 500; color: var(--text-2); }
+    .detail-bar em { grid-column: 3; font-style: normal; color: var(--muted); text-align: right; }
     .region-list {
       position: relative;
       display: grid;
@@ -1146,13 +1177,30 @@
 <body>
   <p class="credit">Built by <strong>Aman Behera</strong><span class="separator" aria-hidden="true">·</span>For any issues, reach out at
     <a href="mailto:aman.behera@hilabs.com">aman.behera@hilabs.com</a></p>
+  <canvas class="backdrop" id="backdrop" aria-hidden="true"></canvas>
+  <div class="drop-overlay" aria-hidden="true">
+    <div class="drop-card">
+      <svg viewBox="0 0 24 24"><path d="M12 15V3m-5 5 5-5 5 5"></path><path d="M20 15v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4"></path></svg>
+      <strong>Drop to parse</strong>
+      <span>PDF, PNG, JPG, TIFF, WEBP or BMP</span>
+    </div>
+  </div>
   <main class="shell">
     <header>
+      <svg class="hero-art" viewBox="0 0 170 104" aria-hidden="true">
+        <defs><filter id="doc-shadow" x="-30%" y="-30%" width="160%" height="170%"><feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#172033" flood-opacity=".18"/></filter></defs>
+        <g filter="url(#doc-shadow)">
+          <g transform="rotate(-14 38 62)"><path d="M16 26h32l14 14v48a6 6 0 0 1-6 6H16a6 6 0 0 1-6-6V32a6 6 0 0 1 6-6z" fill="#2f6bf2"/><path d="M48 26v10a4 4 0 0 0 4 4h10z" fill="#a9c3ff"/><path d="M22 58h28M22 66h28M22 74h20" stroke="#fff" stroke-width="3.2" stroke-linecap="round"/></g>
+          <g transform="rotate(12 132 60)"><path d="M112 28h30l14 14v46a6 6 0 0 1-6 6h-38a6 6 0 0 1-6-6V34a6 6 0 0 1 6-6z" fill="#4cc3e6"/><path d="M142 28v10a4 4 0 0 0 4 4h10z" fill="#bdeaf7"/><rect x="116" y="56" width="30" height="24" rx="4" fill="#fff"/><path d="m118 78 8-9 6 6 4-4 8 7" fill="#4cc3e6"/><circle cx="138" cy="63" r="3" fill="#4cc3e6"/></g>
+          <path d="M66 6h34l16 16v62a7 7 0 0 1-7 7H66a7 7 0 0 1-7-7V13a7 7 0 0 1 7-7z" fill="#ef4444"/><path d="M100 6v12a4 4 0 0 0 4 4h12z" fill="#fca5a5"/>
+          <path d="M87 36c-2 9-7 21-15 28 6-3 18-6 26-5-7-5-10-14-11-23zm0 0c1-6 0-9-2-9s-2 5 2 9z" fill="none" stroke="#fff" stroke-width="3" stroke-linejoin="round"/>
+        </g>
+      </svg>
       <div class="brand">
         <img class="brand-logo" src="/assets/logo.png" alt="" width="44" height="44">
         <div>
           <h1>Not So Smart OCR</h1>
-          <p class="subtitle">Evidence-linked document extraction.</p>
+          <p class="subtitle">Extract text from your documents, with the evidence behind every word.</p>
         </div>
       </div>
 
@@ -1206,7 +1254,7 @@
       <button class="example-button" type="button" data-example="contracts">
         <img class="example-preview" src="/api/examples/contracts?thumb=1" alt="" loading="lazy">
         <span class="example-name">Contracts</span>
-        <span class="example-kind">Handwritten signatures and fields</span>
+        <span class="example-kind">Signatures and fields</span>
       </button>
     </nav>
 
@@ -1446,7 +1494,6 @@
     };
     const byId = (id) => document.getElementById(id);
     const INLINE_MAX_GAP_HEIGHTS = 3;
-    const cleanupWarning = " The previous temporary session could not be removed and will be cleared when the server stops.";
     const fileInput = byId("source-file");
     const form = byId("upload-form");
     const canvas = byId("page-canvas");
@@ -1489,18 +1536,44 @@
       byId("clear-button").disabled = !file && !state.response;
     });
 
-    const fileField = byId("file-field");
-    fileField.addEventListener("dragover", (event) => {
-      event.preventDefault();
-      fileField.classList.add("dragging");
-    });
-    fileField.addEventListener("dragleave", () => fileField.classList.remove("dragging"));
-    fileField.addEventListener("drop", (event) => {
-      event.preventDefault();
-      fileField.classList.remove("dragging");
-      fileInput.files = event.dataTransfer.files;
-      fileInput.dispatchEvent(new Event("change"));
-    });
+    // The whole window takes a dropped file; a drop anywhere else used to make the
+    // browser open the file itself. The first supported file is parsed straight away.
+    (() => {
+      let depth = 0;
+      const carriesFiles = (event) => [...(event.dataTransfer?.types || [])].includes("Files");
+      const accepted = fileInput.accept.split(",");
+      const done = () => { depth = 0; document.body.classList.remove("dropping"); };
+      addEventListener("dragenter", (event) => {
+        if (!carriesFiles(event)) return;
+        event.preventDefault();
+        depth += 1;
+        document.body.classList.add("dropping");
+      });
+      addEventListener("dragover", (event) => {
+        if (!carriesFiles(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      });
+      addEventListener("dragleave", (event) => {
+        if (carriesFiles(event) && (depth = Math.max(0, depth - 1)) === 0) done();
+      });
+      addEventListener("drop", (event) => {
+        if (!carriesFiles(event)) return;
+        event.preventDefault();
+        done();
+        const file = [...event.dataTransfer.files].find((item) =>
+          accepted.some((suffix) => item.name.toLowerCase().endsWith(suffix)));
+        if (!file) {
+          setStatus("That file type is not supported. Drop a PDF, PNG, JPG, TIFF, WEBP or BMP.", true);
+          return;
+        }
+        const transfer = new DataTransfer();
+        transfer.items.add(file);
+        fileInput.files = transfer.files;
+        fileInput.dispatchEvent(new Event("change"));
+        if (form.getAttribute("aria-busy") !== "true") form.requestSubmit();
+      });
+    })();
 
     function hasSelection() {
       return Boolean(state.selectedFile || state.selectedExample);
@@ -1565,16 +1638,12 @@
       );
       const body = new FormData();
       if (file) body.append("file", file);
-      let cleanupFailed = false;
       let timerOutcome = "error";
       let payload = null;
       try {
         if (previousSessionId) {
-          try {
-            await deleteSession(previousSessionId);
-          } catch {
-            cleanupFailed = true;
-          }
+          // The server expires sessions itself, so a failed delete needs no message.
+          await deleteSession(previousSessionId).catch((error) => console.warn(error));
         }
         const query = example
           ? `?defer_presentation=1&defer_refinement=1&compact=1&example=${encodeURIComponent(example)}`
@@ -1592,10 +1661,9 @@
         // separately below, once refinement (if any) has finished.
         renderResult({ skipPresentation: payload.refinement?.status === "pending" });
         timerOutcome = "complete";
-        const cleanupNote = cleanupFailed ? cleanupWarning : "";
         const pages = payload.result.pages.length;
         setStatus(
-          `${payload.result.status === "success" ? "Complete" : "Incomplete extraction"} · ${pages} ${pages === 1 ? "page" : "pages"}${cleanupNote}`,
+          `${payload.result.status === "success" ? "Complete" : "Incomplete extraction"} · ${pages} ${pages === 1 ? "page" : "pages"}`,
           payload.result.status !== "success",
           payload.result.status === "success" ? "success" : ""
         );
@@ -1603,7 +1671,7 @@
       } catch (error) {
         if (resultRequest === state.resultRequest) {
           resetResult();
-          setStatus(`${error.message}${cleanupFailed ? cleanupWarning : ""}`, true);
+          setStatus(error.message, true);
         }
       } finally {
         if (resultRequest === state.resultRequest) {
@@ -1633,16 +1701,9 @@
       byId("parse-button").disabled = true;
       resetResult();
       resetClientTimer();
-      try {
-        if (sessionId) await deleteSession(sessionId);
-        // A cleared view needs no confirmation; only a failed cleanup is worth a message.
-        byId("activity-line").hidden = true;
-      } catch {
-        setStatus(
-          "The local view was cleared, but the temporary server session could not be removed. It will be cleared when the server stops.",
-          true
-        );
-      }
+      // A cleared view needs no confirmation, and the server expires sessions itself.
+      byId("activity-line").hidden = true;
+      if (sessionId) await deleteSession(sessionId).catch((error) => console.warn(error));
     });
 
     byId("copy-icon").addEventListener("click", () => {
@@ -1748,6 +1809,69 @@
     })();
 
     window.addEventListener("pagehide", cancelRecovery, { once: true });
+
+    // Particles on a gently rolling plane seen in perspective. Drawn only on the start
+    // screen, paused in background tabs, and a single still frame for reduced motion.
+    (() => {
+      const backdrop = byId("backdrop");
+      const paint = backdrop.getContext("2d");
+      const hues = ["#10b981", "#10b981", "#14b8a6", "#6366f1", "#f59e0b", "#ef4444"];
+      const dots = Array.from({ length: 1600 }, (_, index) => ({
+        x: Math.random() * 2 - 1, z: Math.random(), size: 0.5 + Math.random(),
+        color: hues[index % hues.length], phase: Math.random() * Math.PI * 2,
+      }));
+      const still = matchMedia("(prefers-reduced-motion: reduce)");
+      let width = 0, height = 0, frame = 0;
+      const resize = () => {
+        const ratio = Math.min(2, devicePixelRatio || 1);
+        width = backdrop.clientWidth; height = backdrop.clientHeight;
+        backdrop.width = width * ratio; backdrop.height = height * ratio;
+        paint.setTransform(ratio, 0, 0, ratio, 0, 0);
+      };
+      const draw = (time) => {
+        const t = time / 1000;
+        const horizon = height * 0.3;
+        paint.clearRect(0, 0, width, height);
+        // A few faint ribbons sweep through the field, as on jina.ai.
+        paint.lineWidth = 1.2;
+        [["#d946ef", 0.34, 0], ["#a855f7", 0.26, 1.7], ["#94a3b8", 0.2, 3.1]].forEach(([color, alpha, phase]) => {
+          paint.globalAlpha = alpha;
+          paint.strokeStyle = color;
+          paint.beginPath();
+          for (let step = 0; step <= 60; step += 1) {
+            const u = step / 60;
+            const x = -0.05 * width + u * width * 1.1;
+            const y = horizon + height * (0.18 + 0.1 * Math.sin(u * 3.2 + t * 0.15 + phase) + 0.05 * Math.sin(u * 7.1 - t * 0.22 + phase * 2));
+            if (step) paint.lineTo(x, y); else paint.moveTo(x, y);
+          }
+          paint.stroke();
+        });
+        dots.forEach((dot) => {
+          const z = (dot.z + t * 0.01) % 1;  // 0 at the horizon, 1 at the viewer; drifts closer
+          const near = z * z;
+          const wave = Math.sin(dot.x * 4 + t * 0.4 + dot.phase * 0.15) * Math.cos(z * 6 - t * 0.3);
+          const x = width * 0.5 + dot.x * width * (0.35 + near * 1.6);
+          const y = horizon + near * height * 0.85 + wave * (4 + near * 26);
+          if (x < -8 || x > width + 8 || y > height + 8) return;
+          paint.globalAlpha = Math.min(0.85, 0.08 + z * 0.8) * (dot.color === "#ef4444" ? 0.75 : 1);
+          paint.fillStyle = dot.color;
+          const side = dot.size * (0.8 + near * 4.2);
+          paint.fillRect(x - side / 2, y - side / 2, side, side);
+        });
+      };
+      const loop = (time) => {
+        frame = 0;
+        if (document.body.classList.contains("has-document") || document.hidden) return;
+        draw(time);
+        if (!still.matches) frame = requestAnimationFrame(loop);
+      };
+      const start = () => { if (!frame) frame = requestAnimationFrame(loop); };
+      resize();
+      addEventListener("resize", () => { resize(); if (still.matches) draw(0); });
+      document.addEventListener("visibilitychange", start);
+      new MutationObserver(start).observe(document.body, { attributes: true, attributeFilter: ["class"] });
+      start();
+    })();
 
     function activeTabId() {
       return document.querySelector('.tab[aria-selected="true"]')?.id || "tab-rendered";
@@ -2342,14 +2466,11 @@
         0
       );
       const seconds = Number(payload.timing?.total_seconds);
-      setMetric("metric-time", "\u23F1", Number.isFinite(seconds) ? `${seconds.toFixed(2)} s` : "");
-      setMetric(
-        "metric-pages",
-        "\u25A4",
-        pages.length ? `${pages.length} ${pages.length === 1 ? "page" : "pages"}` : ""
-      );
-      setMetric("metric-chars", "Tt", characters ? `${formatCount(characters)} chars` : "");
-      setMetric("metric-size", "\u{1F5AB}", formatBytes(payload.source_bytes || 0));
+      // Compact values: each chip's glyph says what it counts, its title says it in words.
+      setMetric("metric-time", "", Number.isFinite(seconds) ? `${seconds.toFixed(1)}s` : "");
+      setMetric("metric-pages", "", pages.length ? String(pages.length) : "");
+      setMetric("metric-chars", "", characters ? formatCount(characters) : "");
+      setMetric("metric-size", "", formatBytes(payload.source_bytes || 0).replace(" ", ""));
       const metrics = byId("doc-metrics");
       metrics.hidden = !Array.from(metrics.children).some((item) => !item.hidden);
     }
@@ -2473,6 +2594,7 @@
           const reasons = item.reasons.map((reason) => ({
             likely_misread_text: "The initial reader had a low recognition score",
             second_reader_doubt: "The second reader was unsure about this region",
+            letter_among_digits: "A letter among numbers is likely a misread digit",
             sampled_retry_read: "The initial read needed a retry"
           }[reason] || reason.replaceAll("_", " "))).join(". ");
           const refined = source.text_provenance?.method === "qwen_crop_refinement";
@@ -2751,42 +2873,96 @@
     const TEXT_LAYER_NOTE = "Exact text from the PDF text layer · no recognition score";
     // The review UI names the routing, not the vendor; exports keep raw provenance.
     const withoutModelNames = (key, value) => typeof value === "string" && /qwen/i.test(value) ? "LLM" : value;
-    // Technical details stay complete but readable: per-token scores are counted, class
-    // scores keep their top three, and long floats are rounded. Downloads keep everything.
+    // Technical details stay complete but readable: per-token scores are counted, long
+    // floats rounded and model names hidden. Downloads keep the raw evidence.
     function readableDetail(key, value) {
-      if (key === "tokens" && Array.isArray(value)) return `${value.length} token scores`;
-      if (key === "class_scores" && value && typeof value === "object") {
-        return Object.entries(value).sort((a, b) => b[1] - a[1]).slice(0, 3)
-          .map(([name, score]) => `${name.replaceAll("_", " ")} ${score.toFixed(2)}`).join(" · ");
-      }
+      if (key === "tokens" && Array.isArray(value)) return `${value.length} scored`;
       if (typeof value === "number" && !Number.isInteger(value)) return Number(value.toFixed(3));
       return withoutModelNames(key, value);
     }
 
-    // Nested evidence as labelled rows ("generation › token score  0.978"), not JSON.
+    const DETAIL_LABELS = { query_id: "Query", reading_order_method: "Reading order", raw_text: "Raw output",
+      layout_category: "Category", layout_detection_score: "Detection score", confidence_meaning: "Confidence means",
+      generated_tokens: "Tokens generated", stop_token_seen: "Stopped cleanly", token_score: "Token score",
+      token_score_min: "Lowest token", min_word_confidence: "Lowest word", unread_words: "Unread words" };
+
+    function detailLabel(key) {
+      const label = DETAIL_LABELS[key] || String(key).replaceAll("_", " ");
+      return label.charAt(0).toUpperCase() + label.slice(1);
+    }
+
+    // One value, typed: probabilities get a meter, flags a chip, raw output a code block.
+    function detailValue(key, value) {
+      const node = document.createElement("span");
+      node.className = "detail-value";
+      const scored = typeof value === "number" && value >= 0 && value <= 1 && /score|confidence|probab|share|angle_conf/i.test(key);
+      if (key === "class_scores" && value && typeof value === "object") {
+        node.classList.add("detail-bars");
+        Object.entries(value).sort((a, b) => b[1] - a[1]).slice(0, 4).forEach(([name, score]) => {
+          const bar = document.createElement("span");
+          bar.className = "detail-bar";
+          bar.style.setProperty("--value", `${Math.round(score * 100)}%`);
+          bar.append(Object.assign(document.createElement("b"), { textContent: detailLabel(name) }),
+            Object.assign(document.createElement("em"), { textContent: score.toFixed(2) }));
+          node.append(bar);
+        });
+      } else if (scored) {
+        node.classList.add("detail-meter");
+        node.style.setProperty("--value", `${Math.round(value * 100)}%`);
+        node.textContent = value.toFixed(3);
+      } else if (typeof value === "boolean") {
+        const flag = Object.assign(document.createElement("span"), { className: "detail-flag", textContent: value ? "Yes" : "No" });
+        flag.dataset.on = String(value);
+        node.append(flag);
+      } else if (key === "raw_text" || (typeof value === "string" && value.length > 90)) {
+        node.classList.add("detail-code");
+        node.textContent = value;
+      } else if (Array.isArray(value)) {
+        node.textContent = value.length === 2 && value.every(Number.isFinite) ? `${value[0]} × ${value[1]}` : value.length ? value.join(", ") : "None";
+      } else {
+        node.textContent = String(value);
+        if (typeof value === "string" && /^[\w./:-]+$/.test(value) && /[_./]/.test(value)) node.classList.add("detail-mono");
+      }
+      return node;
+    }
+
+    // Evidence as titled cards: scalars under Overview, each nested object its own card.
     function renderDetails(target, value) {
-      const rows = [];
-      const walk = (item, path) => {
-        if (item && typeof item === "object" && (!Array.isArray(item) || item.some((entry) => entry && typeof entry === "object"))) {
-          Object.entries(item).forEach(([key, child]) => walk(child, [...path, key]));
-        } else rows.push([path, Array.isArray(item) ? item.join(", ") : item]);
-      };
-      if (value != null) walk(JSON.parse(JSON.stringify(value, readableDetail)), []);
-      const kept = rows.filter(([, item]) => item !== "" && item != null);
-      if (!kept.length) {
+      if (value == null || typeof value !== "object" || !Object.keys(value).length) {
         target.textContent = "-";
         return;
       }
-      target.replaceChildren(...kept.map(([path, item]) => {
-        const row = document.createElement("span");
-        row.className = "detail-row";
-        const key = document.createElement("span");
-        key.className = "detail-key";
-        key.textContent = path.map((part) => /^\d+$/.test(part) ? `#${Number(part) + 1}` : part.replaceAll("_", " ")).join(" › ");
-        const text = document.createElement("span");
-        text.textContent = item === true ? "Yes" : item === false ? "No" : String(item);
-        row.append(key, text);
-        return row;
+      const readable = JSON.parse(JSON.stringify(value, readableDetail));
+      const groups = new Map();
+      const isGroup = (key, item) => item && typeof item === "object" && key !== "class_scores"
+        && (!Array.isArray(item) || item.some((entry) => entry && typeof entry === "object"));
+      // Each object is one card titled by its path; its plain values are the rows.
+      const walk = (title, item) => {
+        const rows = [];
+        groups.set(title, rows);
+        Object.entries(item).forEach(([key, child]) => {
+          const label = /^\d+$/.test(key) ? `Item ${Number(key) + 1}` : detailLabel(key);
+          if (isGroup(key, child)) walk(title === "Overview" ? label : `${title} · ${label}`, child);
+          else if (child !== "" && child != null) rows.push([[key], child]);
+        });
+      };
+      walk("Overview", readable);
+      target.replaceChildren(...[...groups].filter(([, rows]) => rows.length).map(([title, rows]) => {
+        const card = document.createElement("section");
+        card.className = "detail-group";
+        card.append(Object.assign(document.createElement("h4"), { textContent: title }));
+        rows.forEach(([path, item]) => {
+          const row = document.createElement("div");
+          row.className = "detail-row";
+          const key = path.at(-1);
+          row.append(Object.assign(document.createElement("span"), {
+            className: "detail-key",
+            textContent: [...path.slice(0, -1), detailLabel(key)].join(" › "),
+          }), detailValue(key, item));
+          row.classList.toggle("detail-wide", key === "raw_text" || key === "class_scores" || (typeof item === "string" && item.length > 90));
+          card.append(row);
+        });
+        return card;
       }));
     }
 

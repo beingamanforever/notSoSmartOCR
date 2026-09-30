@@ -1695,3 +1695,20 @@ def test_a_reply_cut_at_its_token_limit_keeps_the_crops_it_finished(tmp_path, mo
 
     assert result["accepted_crop_ids"] == ["crop-1"]
     assert result["rejected_crop_ids"] == ["crop-2"]
+
+
+def test_a_blank_answer_replaces_a_doubted_cell_but_keeps_a_confident_one():
+    from ocr_pipeline.markdown_refinement import _refined_table_cell
+    from ocr_pipeline.table_topology import validate_table_topology
+
+    topology = validate_table_topology({
+        "row_count": 1, "column_count": 2,
+        "cells": [{"cell_id": "r1c1", "row_nums": [0], "column_nums": [0]},
+                  {"cell_id": "r1c2", "row_nums": [0], "column_nums": [1]}],
+    })
+    doubted, confident = topology.cells
+    misread = _refined_table_cell(doubted, "", {"text": "კვეთა", "resolution": "conflicting"}, "t", "crop-1", "qwen", "falcon")
+    kept = _refined_table_cell(confident, "", {"text": "MO 63703", "resolution": "resolved"}, "t", "crop-1", "qwen", "falcon")
+
+    assert misread["text"] == "" and misread["alternatives"][0]["text"] == "კვეთა"
+    assert kept["text"] == "MO 63703"

@@ -603,6 +603,11 @@ def _flag_foreign_scripts(regions: list[TextRegion]) -> None:
             continue
         region.resolution = "conflicting"
         region.text_provenance["foreign_script"] = sorted(foreign)
+        # A table renders cell by cell, so each misread cell carries the doubt itself:
+        # a roster once showed "კვეთა" in four cells of a table marked conflicting.
+        for cell in (region.structure or {}).get("cells", []):
+            if set(_script_letters(str(cell.get("text") or ""))) & minor:
+                cell["resolution"] = "conflicting"
 
 
 
@@ -1033,9 +1038,9 @@ def _plain_text(text: str, kind: str) -> tuple[str, str]:
     its own prefix ("### # Title") and the text lane shows the bare marker to a reviewer.
     Table and formula markup is the region's content, so it passes through untouched.
     An HTML table in any other region becomes a table only when its content spans two
-    rows and two columns; Falcon wraps a ruled handwritten line in an empty grid
-    ("FORENSIC TESTING SERVICES" in one cell of a 2 x 2), and other markup flattens to
-    plain text.
+    rows and two columns without repeating whole rows; Falcon wraps a ruled handwritten
+    line in an empty grid ("FORENSIC TESTING SERVICES" in one cell of a 2 x 2), and other
+    markup flattens to plain text.
     """
     if re.fullmatch(r"(`{3,}|~{3,})[^\n]*\n[\s\S]*\n\1\s*", text):
         return text, "code"
@@ -1043,7 +1048,11 @@ def _plain_text(text: str, kind: str) -> tuple[str, str]:
         return text, kind
     rows = _table_rows(text) if "<table" in text.casefold() else None
     filled = [(r, c) for r, row in enumerate(rows or []) for c, cell in enumerate(row) if cell.strip()]
-    if len({r for r, _ in filled}) > 1 and len({c for _, c in filled}) > 1:
+    # Repeated whole rows are a decoder loop, not a table: an address line once came
+    # back as four rows of "კვეთა | 2006". Blank rows of a ruled form do not count.
+    lines = [tuple(cell.strip() for cell in row) for row in rows or [] if any(cell.strip() for cell in row)]
+    looping = 2 * (len(lines) - len(set(lines))) >= len(lines) > 2
+    if len({r for r, _ in filled}) > 1 and len({c for _, c in filled}) > 1 and not looping:
         return text, "table"
     text = _unmarked_text(text)
     level = 0

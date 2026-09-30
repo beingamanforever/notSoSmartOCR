@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from PIL import Image, UnidentifiedImageError
@@ -14,6 +15,9 @@ PROVIDER = "deterministic-evidence-risk"
 REASON = "likely_misread_text"
 RETRY_REASON = "sampled_retry_read"
 SECOND_READER_REASON = "second_reader_doubt"
+# Character-class consistency: in a numeric field a lone letter beside the numbers is
+# nearly always a misread digit (a boxed date "2 | 16 | 09" once decoded as "a 16 09").
+MIXED_CLASS_REASON = "letter_among_digits"
 # docTR's printed-text reader doubts a word it holds. Falcon's likelihood stays high on
 # confident handwriting misreads, and a monotone calibration cannot reorder those; routing
 # on this too sent 42 of 81 missed handwritten snippets to Qwen instead of 22, for 19.5%
@@ -77,4 +81,18 @@ def _risk(region: TextRegion) -> str | None:
         "unread_words"
     ):
         return SECOND_READER_REASON
+    if provenance.get("confidence_meaning") == CALIBRATED_CONFIDENCE and _letter_among_digits(region.text):
+        return MIXED_CLASS_REASON
     return None
+
+
+def _letter_among_digits(text: str) -> bool:
+    tokens = re.findall(r"[^\W_]+", text)
+    numeric = [token.isdigit() for token in tokens]
+    if sum(numeric) < 2 or 2 * sum(numeric) < len(tokens):
+        return False
+    return any(
+        len(token) == 1 and token.isalpha()
+        and any(numeric[j] for j in (index - 1, index + 1) if 0 <= j < len(tokens))
+        for index, token in enumerate(tokens)
+    )

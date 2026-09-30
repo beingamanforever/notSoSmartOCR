@@ -17,6 +17,8 @@ from ocr_pipeline.demo import (
     create_app,
 )
 from ocr_pipeline.markdown_refinement import refine_document
+from ocr_pipeline.cache import BoundedCache
+from ocr_pipeline.usage import UsageLog
 from ocr_pipeline.openrouter import ReplyCache, budgeted_transport
 from ocr_pipeline.orientation import (
     OFFICIAL_TEMPERATURE,
@@ -45,6 +47,13 @@ def create_verified_app(
     app_factory: Callable[..., Any] = create_app,
     warmup_runner: Callable[..., object] = process_document,
 ) -> Any:
+    # Opt-in, in-memory caches keyed by content; both are off unless sized.
+    ttl = args.cache_ttl_hours * 3600
+    caches = {
+        name: BoundedCache(size << 20, ttl)
+        for name, size in (("pages", args.page_cache_mb), ("llm_replies", args.qwen_reply_cache_mb))
+        if size > 0
+    }
     reader, stages = falcon_pipeline(
         args.falcon_layout_url,
         device=args.device,
@@ -56,6 +65,7 @@ def create_verified_app(
             temperature=args.orientation_temperature,
             upright_prior=args.orientation_upright_prior,
         ),
+        page_cache=caches.get("pages"),
     )
     configured_stages = [stage.name for stage in stages]
     if args.qwen_crops:
@@ -94,8 +104,7 @@ def create_verified_app(
             refine_document,
             workers=args.qwen_workers,
             zero_data_retention=not args.qwen_allow_non_zdr,
-            # Re-parsed pages (every rerun of an example) reuse their earlier reply.
-            transport=ReplyCache(
+            transport=_with_reply_cache(
                 partial(
                     budgeted_transport,
                     database=args.qwen_spend_database,
@@ -104,9 +113,16 @@ def create_verified_app(
                     # $0.003; the default $0.25 hold left by a killed request locked $4.50
                     # of a $5 budget while real spend was $0.08.
                     reserve_usd=0.01,
-                )
+                ),
+                caches.get("llm_replies"),
             ),
         )
+    if caches:
+        app_options["caches"] = caches
+    if args.usage_root is not None:
+        app_options["usage_log"] = UsageLog(args.usage_root, keep=args.usage_retention)
+        # The dashboard shows what people send, so it stays off without a token.
+        app_options["admin_token"] = os.environ.get(args.admin_token_env) or None
     if args.katex_asset_root is not None:
         app_options["katex_asset_root"] = args.katex_asset_root
     if args.feedback_root is not None:
@@ -134,6 +150,48 @@ def _parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=4,
         help="Concurrent page requests; the GPU service controls model execution",
+    )
+    parser.add_argument(
+        "--usage-root",
+        type=Path,
+        default=None,
+        help="Directory for per-parse usage records and first-page images (off by default)",
+    )
+    parser.add_argument(
+        "--usage-retention",
+        type=_positive_int,
+        default=2000,
+        help="Usage records kept; older ones are deleted with their images",
+    )
+    parser.add_argument(
+        "--admin-token-env",
+        default="OCR_ADMIN_TOKEN",
+        help="Environment variable holding the token that opens /admin",
+    )
+    parser.add_argument(
+        "--page-cache-mb",
+        type=int,
+        default=0,
+        help=(
+            "Memory for readings of byte-identical pages, compressed (0, the default, "
+            "disables it). A page result is 140 KB median as JSON before compression, so "
+            "1024 holds thousands of pages"
+        ),
+    )
+    parser.add_argument(
+        "--qwen-reply-cache-mb",
+        type=int,
+        default=0,
+        help=(
+            "Memory for LLM replies to byte-identical requests (0, the default, disables "
+            "it). Replies are 0.6 KB median and 3.4 KB at most, so 64 holds tens of thousands"
+        ),
+    )
+    parser.add_argument(
+        "--cache-ttl-hours",
+        type=float,
+        default=24.0,
+        help="Age after which a cached page reading or reply is no longer used",
     )
     parser.add_argument(
         "--qwen-workers",
@@ -225,6 +283,10 @@ def _positive_int(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("value must be positive")
     return parsed
+
+
+def _with_reply_cache(transport: Any, cache: BoundedCache | None) -> Any:
+    return ReplyCache(transport, cache) if cache is not None else transport
 
 
 if __name__ == "__main__":

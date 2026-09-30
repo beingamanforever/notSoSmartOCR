@@ -63,6 +63,7 @@ def falcon_pipeline(
     page_workers: int = 4,
     layout_reader_factory: Callable[[str], Any] | None = None,
     detector_factory: Callable[..., Any] | None = None,
+    page_cache: Any | None = None,
 ) -> tuple[LocalReader, tuple[RegionStage, ...]]:
     """The served composition: docTR orientation, Heron and Falcon regions, assembly."""
     from .evidence_layout import EvidenceLayoutStage
@@ -80,6 +81,7 @@ def falcon_pipeline(
         detector=(detector_factory or DocTROrientationDetector)(device=device),
         defer_restore=True,
         batch_size=page_workers,
+        page_cache=page_cache,
     )
     stages = (
         EvidenceRiskStage(),

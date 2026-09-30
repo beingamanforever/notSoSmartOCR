@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import tempfile
 import threading
@@ -14,6 +15,7 @@ from typing import Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from .cache import BoundedCache
 from .contracts import BoundingBox, TextRegion
 from .providers import LocalReader, ReaderError
 from .text_layer import sidecar
@@ -336,7 +338,9 @@ class OrientationReader:
         detector: Callable[[Image.Image], PageOrientation] | None = None,
         defer_restore: bool = False,
         batch_size: int = 1,
+        page_cache: BoundedCache | None = None,
     ) -> None:
+        """`page_cache` returns the stored reading of a byte-identical page."""
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
         self.reader = reader
@@ -348,6 +352,7 @@ class OrientationReader:
         self._assessments: dict[int, dict[str, object]] = {}
         self._lock = threading.Lock()
         self._speculation = ThreadPoolExecutor(max_workers=batch_size)
+        self.page_cache = page_cache
 
     def read_batch(
         self, image_paths: list[Path], page_numbers: list[int]
@@ -373,6 +378,26 @@ class OrientationReader:
         return results
 
     def read(self, image_path: Path, page_number: int) -> list[TextRegion]:
+        if self.page_cache is None:
+            return self._read(image_path, page_number)
+        # Region ids carry the page number, and a text layer changes the reading.
+        digest = hashlib.sha256(image_path.read_bytes())
+        if sidecar(image_path).is_file():
+            digest.update(sidecar(image_path).read_bytes())
+        key = f"{self.name}:{digest.hexdigest()}:{page_number}"
+
+        def reading():
+            regions = self._read(image_path, page_number)
+            with self._lock:
+                return regions, self._views[page_number], self._assessments[page_number]
+
+        regions, view, assessment = self.page_cache.get_or_compute(key, reading)
+        with self._lock:
+            self._views[page_number] = view
+            self._assessments[page_number] = assessment
+        return regions
+
+    def _read(self, image_path: Path, page_number: int) -> list[TextRegion]:
         born_digital = sidecar(image_path).is_file()
         # Scans are nearly always upright, so the reader's word detection starts beside
         # orientation on the source image and is kept only if no rotation follows.
