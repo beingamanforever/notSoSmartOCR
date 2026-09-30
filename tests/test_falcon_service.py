@@ -1263,3 +1263,23 @@ def test_retry_crop_floor_respects_request_ceiling() -> None:
     assert body['elements'][0]['text'] == 'recovered'
     assert engine.retry_calls
     assert all(call['min_image_size'] == 128 for call in engine.retry_calls)
+
+
+def test_a_detection_holding_several_printed_boxes_becomes_one_control_per_box() -> None:
+    from ocr_pipeline.contracts import BoundingBox, TextRegion
+    from ocr_pipeline.falcon_layout import _split_merged_controls
+
+    merged = TextRegion(
+        id="p1-falcon-7", kind="checkbox", text="R", confidence=0.9,
+        bounding_box=BoundingBox(100, 10, 400, 30), reading_order=7, provider="falcon",
+        text_provenance={"raw_text": "□ R ☑ L □ Heberden's node"},
+        structure={"state": "unselected", "label": "R"},
+    )
+    parts = _split_merged_controls(merged)
+    assert [(p.text, p.structure["state"]) for p in parts] == [
+        ("R", "unselected"), ("L", "selected"), ("Heberden's node", "unselected"),
+    ]
+    assert parts[0].bounding_box.left == 100 and parts[-1].bounding_box.right == 400
+    assert all(p.text_provenance["split_from"] == "p1-falcon-7" for p in parts)
+    single = TextRegion(**{**merged.__dict__, "text_provenance": {"raw_text": "☐ Please Comment"}})
+    assert _split_merged_controls(single) == [single]
