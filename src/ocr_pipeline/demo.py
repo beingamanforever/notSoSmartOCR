@@ -575,11 +575,16 @@ class SessionStore:
         return session
 
     def delete(self, session_id: str) -> bool:
+        """Callers hold the app's state lock, which the refinement job takes when it ends."""
         with self._lock:
             session = self._sessions.pop(session_id, None)
         if session is None:
             return False
-        shutil.rmtree(session["directory"], ignore_errors=True)
+        if _refinement_pending(session):
+            # Its refinement still reads the page images; the job removes them when done.
+            session["discard_when_refined"] = True
+        else:
+            shutil.rmtree(session["directory"], ignore_errors=True)
         return True
 
     def cleanup(self) -> None:
@@ -1349,7 +1354,11 @@ def create_app(
                     except Exception:
                         LOGGER.exception("Deferred refinement job failed")
                     finally:
-                        refinement_event.set()
+                        with state_lock:
+                            refinement_event.set()
+                            discard = session_state.get("discard_when_refined")
+                        if discard:
+                            shutil.rmtree(session_dir, ignore_errors=True)
 
                 app.state.refinement_executor.submit(finish_safely)
 
