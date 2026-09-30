@@ -1791,3 +1791,32 @@ def test_a_blank_answer_replaces_a_doubted_cell_but_keeps_a_confident_one():
 
     assert misread["text"] == "" and misread["alternatives"][0]["text"] == "კვეთა"
     assert kept["text"] == "MO 63703"
+
+
+def test_control_boxes_drifting_from_the_grid_are_registered_to_detected_boxes():
+    from ocr_pipeline.markdown_refinement import _registered_frame
+
+    crop = {"box": {"left": 0, "top": 0, "right": 2000, "bottom": 3000}}
+    labels = ["DASH", "RENAL", "DIABETIC", "Puree", "Wheelchair"]
+    detected = [
+        {"kind": "checkbox", "text": label, "structure": {"label": label},
+         "bounding_box": {"left": 200 + 300 * i, "top": 400 + 200 * i, "right": 500 + 300 * i, "bottom": 440 + 200 * i}}
+        for i, label in enumerate(labels)
+    ]
+
+    def reply(scale_x, scale_y):
+        # Page centres expressed on the grid, then distorted as a shrunken read would be.
+        return [
+            {"label": d["text"], "state": "unselected", "bbox_2d": [
+                round(scale_x * 1000 * d["bounding_box"]["left"] / 2000), round(scale_y * 1000 * d["bounding_box"]["top"] / 3000),
+                round(scale_x * 1000 * d["bounding_box"]["right"] / 2000), round(scale_y * 1000 * d["bounding_box"]["bottom"] / 3000)]}
+            for d in detected
+        ]
+
+    drifted = _registered_frame(reply(0.6, 1.5), detected, crop, 0)
+    placed = drifted([90, 300, 150, 312])
+    assert placed is not None and abs(placed["left"] - 300) <= 2 and abs(placed["top"] - 600) <= 2
+    # An accurate reply keeps the grid it was asked for.
+    assert _registered_frame(reply(1, 1), detected, crop, 0) is None
+    # Too few anchors: no fit.
+    assert _registered_frame(reply(0.6, 1.5)[:2], detected, crop, 0) is None

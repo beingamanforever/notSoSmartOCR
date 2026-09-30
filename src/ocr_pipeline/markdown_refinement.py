@@ -1250,12 +1250,17 @@ def _form_control_regions(
         if not isinstance(items, list) or not items:
             errors.append(f"{crop['region_id']} returned no structured form controls")
             continue
+        registered = _registered_frame(items, existing, crop, rotation_degrees)
         for item in sorted(
             items,
             key=lambda value: tuple(value.get("bbox_2d") or [math.inf] * 4)[1::-1],
         ):
             label = str(item.get("label") or "").strip()
-            box = _option_page_box(item.get("bbox_2d"), crop, rotation_degrees)
+            box = (
+                registered(item.get("bbox_2d"))
+                if registered
+                else _option_page_box(item.get("bbox_2d"), crop, rotation_degrees)
+            )
             state = item.get("state")
             if (
                 not label
@@ -1365,6 +1370,89 @@ def _owned_label_ids(source, option_box, source_index):
         if set(("left", "top", "right", "bottom")) <= box.keys()
         and _box_overlap(option_box, box)
     ]
+
+
+def _registered_frame(items, detected, crop, rotation_degrees):
+    """Page placement fitted to the detector's boxes when that explains the reply better
+    than the 0-1000 grid Qwen was asked for.
+
+    Qwen shrinks a large crop before reading it, and its boxes drift from the grid: on
+    one whole-form crop (2701 x 3555) none of 10 controls whose label names a detected box
+    overlapped it, and in another run 23 of 54 boxes left the grid entirely. A per-axis
+    scale and offset fitted on those anchors placed them within a box of the detection
+    (median 14-26 px of 46 in y, 126-168 px of 400 in x; 17 of 20 held-out anchors
+    landed on their box, against 0 on the grid). The fit needs three anchors, a grid
+    missing them by over half a box, and a fit missing by under a box and by less than
+    the grid; otherwise the grid stands and out-of-grid boxes are rejected.
+    """
+    if rotation_degrees:
+        return None
+    source = crop["box"]
+    key = lambda text: re.sub(r"\W+", "", _checkbox_label(str(text or "")).casefold())
+    anchors = {}
+    for region in detected:
+        box = region["bounding_box"]
+        inside = (
+            source["left"] <= box["left"] and box["right"] <= source["right"]
+            and source["top"] <= box["top"] and box["bottom"] <= source["bottom"]
+        )
+        if inside:
+            label = (region.get("structure") or {}).get("label") or region.get("text")
+            anchors.setdefault(key(label), []).append(box)
+    valid = lambda b: (
+        isinstance(b, list) and len(b) == 4
+        and all(isinstance(v, (int, float)) for v in b) and b[0] < b[2] and b[1] < b[3]
+    )
+    pairs = [
+        (item["bbox_2d"], anchors[key(item.get("label"))][0])
+        for item in items
+        if valid(item.get("bbox_2d")) and len(anchors.get(key(item.get("label")), [])) == 1
+    ]
+    if len(pairs) < 3:
+        return None
+
+    def fit(reply, page):
+        mean_r, mean_p = sum(reply) / len(reply), sum(page) / len(page)
+        spread = sum((r - mean_r) ** 2 for r in reply)
+        if spread == 0:
+            return None
+        scale = sum((r - mean_r) * (q - mean_p) for r, q in zip(reply, page)) / spread
+        return (scale, mean_p - scale * mean_r) if scale > 0 else None
+
+    centre = lambda b: ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+    page_centre = lambda p: ((p["left"] + p["right"]) / 2, (p["top"] + p["bottom"]) / 2)
+    x = fit([centre(r)[0] for r, _ in pairs], [page_centre(p)[0] for _, p in pairs])
+    y = fit([centre(r)[1] for r, _ in pairs], [page_centre(p)[1] for _, p in pairs])
+    if x is None or y is None:
+        return None
+    median = lambda values: sorted(values)[len(values) // 2]
+
+    def miss(placed, target):
+        # In boxes, on the worse axis: 1 means off by a whole detected box.
+        (px, py), (tx, ty) = placed, page_centre(target)
+        return max(
+            abs(px - tx) / (target["right"] - target["left"]),
+            abs(py - ty) / (target["bottom"] - target["top"]),
+        )
+
+    fitted = median([miss((x[0] * centre(r)[0] + x[1], y[0] * centre(r)[1] + y[1]), p) for r, p in pairs])
+    grid_boxes = [(_option_page_box(r, crop, 0), p) for r, p in pairs]
+    grid = median([miss(page_centre(g), p) if g else math.inf for g, p in grid_boxes])
+    # The grid Qwen was asked for stands unless it misses the anchors by half a box.
+    if grid <= 0.5 or fitted > 1 or fitted >= grid:
+        return None
+
+    def place(value):
+        if not valid(value):
+            return None
+        return {
+            "left": round(x[0] * value[0] + x[1]),
+            "top": round(y[0] * value[1] + y[1]),
+            "right": round(x[0] * value[2] + x[1]),
+            "bottom": round(y[0] * value[3] + y[1]),
+        }
+
+    return place
 
 
 def _option_page_box(value, crop, rotation_degrees):
