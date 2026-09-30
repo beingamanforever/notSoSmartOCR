@@ -8,7 +8,7 @@
 
 Text · Tables · Handwriting · Formulas · Source-linked review
 
-[Examples](#examples) · [Pipeline](#pipeline) · [Walkthroughs](#walkthroughs)
+[Examples](#examples) · [Pipeline](#pipeline) · [Serving](#serving-and-dashboard) · [Walkthroughs](#walkthroughs)
 
 </div>
 
@@ -28,6 +28,8 @@ OCR turns text in images, PDFs, and scanned or handwritten documents into editab
 - Saved edits update Text output, Markdown, and JSON together while retaining the original reading in the evidence history.
 - Fit the full page, navigate multi-page documents, and use the responsive light or dark interface.
 - Save feedback with its image and result, retaining 1,000 records locally.
+- Watch long PDFs fill in page by page, and see your place in line while other documents are read.
+- Follow usage, routing, latency, spend, and the live queue in a separate, token-protected admin dashboard.
 
 ## Examples
 
@@ -49,7 +51,7 @@ OCR turns text in images, PDFs, and scanned or handwritten documents into editab
 | --- | --- |
 | ![Visual inspector with the source crop, transcription, and score provenance](artifacts/demo/visual-inspector.png) | ![Source-linked editing with an option to keep uncertain text unresolved](artifacts/demo/region-editing.png) |
 
-The workbench, academic paper, source-selection, and inspector screenshots were updated on 29 September 2026.
+The workbench and inspector screenshots were updated on 30 September 2026; the academic paper and source-selection screenshots on 29 September 2026.
 Screenshots show actual output, including errors.
 Overlapping regions can still produce duplicates; handwriting, numeric fields, and reading order remain imperfect.
 Model scores are uncalibrated, and a hosted reread may not provide a recognition score.
@@ -80,6 +82,30 @@ Four paired native OCR comparisons preserved the complete response except timing
 Single-page hosted latency remains a bottleneck; see the [measurements and preservation limits](docs/walkthroughs/latency-preservation.md).
 The UI loads source crops on demand; downloaded JSON retains their original PNG data.
 
+## Serving and dashboard
+
+Parses reach the GPU one at a time, in arrival order.
+Waiting uploads see how many documents are ahead of them; past 32 running or waiting parses, new uploads get a `503` with `Retry-After`.
+Long PDFs show each page as soon as it is read.
+In a burst of ten concurrent uploads on the A10G host, all ten were served in order, and the page still loaded in under 0.09 s.
+
+Two in-memory, byte-bounded caches with a time limit reuse page readings and complete LLM replies for byte-identical input; repeated parses took 0.1 to 0.8 s instead of 9 to 16 s, with identical results.
+An LLM reply that is cut off or has one malformed record keeps every crop it answered correctly; a provider failure in the middle of a streamed reply is retried.
+
+`/admin` is off unless an admin token is configured.
+It shows requests, pages, users, latency split into OCR, LLM, and waiting time, LLM spend, cache use, routing reasons, and the live queue, with each request's page, routed regions, and confidence scores.
+
+![Admin dashboard](artifacts/demo/admin-dashboard.png)
+
+```bash
+OPENROUTER_API_KEY=... OCR_ADMIN_TOKEN=... python experiments/serve_gpu_demo.py --falcon-layout-url http://127.0.0.1:8196 \
+  --qwen-crops --qwen-budget-usd 5 --usage-root ~/ocr-state/usage --feedback-root ~/ocr-state/feedback \
+  --page-cache-mb 1024 --qwen-reply-cache-mb 64 --max-active-parses 32
+```
+
+Keep usage records, feedback, and the spending ledger on persistent storage; instance storage is erased when a cloud instance stops.
+See [Serving under load](docs/walkthroughs/09-serving-queue-cache-dashboard.md) for measurements, the failure that motivated these changes, and operating advice.
+
 ## Walkthroughs
 
 Walkthroughs grounded in the code, technical reports, and measured runs:
@@ -94,6 +120,7 @@ Walkthroughs grounded in the code, technical reports, and measured runs:
 | [Document-parsing strategies](docs/walkthroughs/06-document-parsing-strategies.md) | Seven OCR systems and their architectural trade-offs |
 | [From research to implementation](docs/walkthroughs/07-research-to-implementation.md) | What we reused, what each paper taught us, and observed improvements |
 | [Fidelity repairs and routing results](docs/walkthroughs/08-fidelity-and-routing.md) | Current runtime, preserved table content, paired Qwen comparison, and remaining failures |
+| [Serving under load](docs/walkthroughs/09-serving-queue-cache-dashboard.md) | Fair queue, page streaming, caching, robust LLM replies, the admin dashboard, and operations |
 
 **Hardware:** exercised on a 24 GB-class NVIDIA A10G. Minimum VRAM is not established; see the [memory breakdown](docs/walkthroughs/04-model-internals-and-hardware.md#vram-and-performance).
 

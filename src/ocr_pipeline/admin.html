@@ -82,11 +82,13 @@
     .link { margin-left: auto; padding: 0; border: 0; background: none; color: var(--text-2); font-size: .8rem; font-weight: 500; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
 
     .stats { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
-    .stat { display: grid; grid-template-columns: minmax(0, 1fr) 96px; align-items: end; gap: 4px 12px; padding: 16px 18px; }
-    .stat .label { grid-column: 1 / -1; color: var(--muted); font-size: .8rem; font-weight: 500; }
+    /* Stacked, so a wide value such as $0.0020 never runs into its sparkline. */
+    .stat { display: grid; align-content: start; gap: 6px; padding: 16px 18px; }
+    .stat .label { color: var(--muted); font-size: .8rem; font-weight: 500; }
     .stat .value { font-size: 1.6rem; font-weight: 700; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
-    .stat svg { width: 96px; height: 30px; overflow: visible; }
-    .stat .delta { grid-column: 1 / -1; color: var(--muted); font-size: .76rem; }
+    .stat svg { width: 100%; height: 28px; overflow: visible; }
+    .stat .delta { color: var(--muted); font-size: .76rem; }
+    .stat .delta:empty { display: none; }
     .delta.up { color: var(--positive); }
     .delta.down { color: var(--danger); }
 
@@ -513,14 +515,12 @@
     }
 
     function sparkline(values, color) {
-      const node = svg("svg", { viewBox: "0 0 96 30", "aria-hidden": "true" });
+      const node = svg("svg", { viewBox: "0 0 96 30", preserveAspectRatio: "none", "aria-hidden": "true" });
       const top = Math.max(0, ...values.map((value) => value || 0));
       const coords = values.map((value, index) => [(index / Math.max(1, values.length - 1)) * 96, top ? 27 - (24 * (value || 0)) / top : 27]);
       const line = coords.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ");
       node.append(svg("polygon", { points: `0,30 ${line} 96,30`, fill: color, opacity: 0.1 }));
-      node.append(svg("polyline", { points: line, fill: "none", stroke: color, "stroke-width": 1.6, "stroke-linejoin": "round", "stroke-linecap": "round" }));
-      const [x, y] = coords.at(-1);
-      node.append(svg("circle", { cx: x, cy: y, r: 2.4, fill: color }));
+      node.append(svg("polyline", { points: line, fill: "none", stroke: color, "stroke-width": 1.6, "stroke-linejoin": "round", "stroke-linecap": "round", "vector-effect": "non-scaling-stroke" }));
       return node;
     }
 
@@ -553,7 +553,7 @@
       if (!caches.length) return "Caching is off";
       // Hit counters restart with the service; the share above comes from the records.
       const used = caches.reduce((all, cache) => all + cache.bytes, 0), limit = caches.reduce((all, cache) => all + cache.max_bytes, 0);
-      return `${bytes(used)} of ${bytes(limit)} in use`;
+      return `${bytes(used)} of ${bytes(limit)}`;
     }
 
     function renderChart() {
