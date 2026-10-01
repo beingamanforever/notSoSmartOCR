@@ -122,6 +122,7 @@ Walkthroughs grounded in the code, technical reports, and measured runs:
 | [Fidelity repairs and routing results](docs/walkthroughs/08-fidelity-and-routing.md) | Current runtime, preserved table content, paired Qwen comparison, and remaining failures |
 | [Serving under load](docs/walkthroughs/09-serving-queue-cache-dashboard.md) | Fair queue, page streaming, caching, robust LLM replies, the admin dashboard, and operations |
 | [Routing between Falcon and Qwen](docs/walkthroughs/10-routing-evaluation.md) | What each routing signal is worth, controlled A/B arms, cost per 1,000 pages, and what was rejected |
+| [Public benchmarks](docs/walkthroughs/11-public-benchmarks.md) | OmniDocBench v1.6 English (overall 88.2) and ParseBench (51.0), scored with the official tools |
 
 **Hardware:** exercised on a 24 GB-class NVIDIA A10G. Minimum VRAM is not established; see the [memory breakdown](docs/walkthroughs/04-model-internals-and-hardware.md#vram-and-performance).
 
