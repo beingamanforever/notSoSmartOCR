@@ -68,6 +68,7 @@ def falcon_pipeline(
     """The served composition: docTR orientation, Heron and Falcon regions, assembly."""
     from .evidence_layout import EvidenceLayoutStage
     from .orientation import DocTROrientationDetector, OrientationReader
+    from .panel_split import PanelSplitStage
     from .risk import EvidenceRiskStage
 
     layout_reader = (
@@ -84,6 +85,7 @@ def falcon_pipeline(
         page_cache=page_cache,
     )
     stages = (
+        PanelSplitStage(layout_reader),
         EvidenceRiskStage(),
         EvidenceLayoutStage(),
     )
@@ -136,9 +138,11 @@ def process_document(
     max_page_pixels: int | None = None,
     max_pixels: int | None = None,
     on_page: Callable[[PageResult], None] | None = None,
+    on_start: Callable[[DocumentResult], None] | None = None,
 ) -> DocumentResult:
     """`on_page` receives each page as soon as it is read and staged, in page order;
-    a reader with `read_iter` streams pages, so a long PDF's first page arrives early."""
+    a reader with `read_iter` streams pages, so a long PDF's first page arrives early.
+    `on_start` fires once the page list is known and non-empty, before the first read."""
     if timings is not None:
         timings.clear()
     if stage_execution is not None:
@@ -201,6 +205,8 @@ def process_document(
                 raise PipelineError(
                     "render", "no_pages", "Prepared input contained no pages"
                 )
+            if on_start is not None:
+                on_start(result)
             batch_results: Iterator[list[TextRegion] | ReaderError] | None = None
             read_iter = getattr(reader, "read_iter", None)
             read_batch = getattr(reader, "read_batch", None)
@@ -247,6 +253,17 @@ def process_document(
                     )
                 )
                 _merge_timings(timings, page_timings)
+                if cross_page_table_stage is None:
+                    # Nothing else still mutates this page before process_document
+                    # returns, so a refiner fed by on_page can read its final regions.
+                    # _identify_page_risks only looks at the one page it is given.
+                    page = result.pages[-1]
+                    if page.page_number in add_runtime_risk_evidence(
+                        DocumentResult(
+                            document_id="", source={}, status="pending", pages=[page]
+                        )
+                    ):
+                        page.route = "review"
                 if on_page is not None:
                     on_page(result.pages[-1])
                 if page_execution is not None:
@@ -307,10 +324,13 @@ def process_document(
     except PipelineError as error:
         result.failures.append(_failure(error.stage, error.code, str(error)))
 
-    review_pages = add_runtime_risk_evidence(result)
-    for page in result.pages:
-        if page.page_number in review_pages:
-            page.route = "review"
+    if cross_page_table_stage is not None:
+        # Otherwise already applied per page above, before cross-page stitching could
+        # still change a region's text and change what counts as risky.
+        review_pages = add_runtime_risk_evidence(result)
+        for page in result.pages:
+            if page.page_number in review_pages:
+                page.route = "review"
 
     result.status = _document_status(result)
     return result
@@ -753,6 +773,7 @@ def _prepare_pages(
             )
         )
 
+    _png_pages(temporary_dir)
     numbered_pages = []
     for page_path in temporary_dir.glob("page-*.png"):
         match = re.fullmatch(r"page-(\d+)\.png", page_path.name)
@@ -781,15 +802,29 @@ def _prepare_pages(
     return _PreparedPages(source.resolve(), tuple(pages))
 
 
+def _png_pages(directory: Path) -> None:
+    """Save each rendered page-N.ppm as page-N.png (lossless, low compression)."""
+
+    def save(raw: Path) -> None:
+        with Image.open(raw) as image:
+            image.save(raw.with_suffix(".png"), format="PNG", compress_level=1)
+        raw.unlink()
+
+    raws = sorted(directory.glob("page-*.ppm"))
+    with ThreadPoolExecutor(max(1, min(RENDER_WORKERS, len(raws)))) as pool:
+        list(pool.map(save, raws))
+
+
 def _render_pdf_pages(
     executable: str, dpi: int, source: Path, prefix: Path, pages: tuple[int, int]
 ) -> None:
+    # Raw PPM, then a fast PNG save in _png_pages: pdftoppm's own PNG encoder took 15 s on a
+    # noisy 300 dpi scan that renders in 0.25 s; the pixels are identical either way.
     command = [
         executable,
         "-cropbox",
         "-r",
         str(dpi),
-        "-png",
         "-f",
         str(pages[0]),
         "-l",

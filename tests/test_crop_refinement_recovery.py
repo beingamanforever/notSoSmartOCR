@@ -273,7 +273,19 @@ def test_owned_form_row_uses_single_row_evidence_for_nonoverlapping_controls(
         if schema_name == "page_crops":
             assert "page_context" not in prompt
             assert "owned_form_row" not in prompt
-            assert "form_source" in prompt
+            assert "form_source" not in prompt  # form crops are read only for their options
+            crops = [{"region_id": "crop-2", "markdown": "[signature]"}]
+        else:
+            assert schema_name == "form_controls"
+            assert "page_context" in prompt
+            assert "owned_form_row" in prompt and "form_source" in prompt
+            assert (
+                sum(
+                    item.get("type") == "image_url"
+                    for item in payload["messages"][1]["content"]
+                )
+                == 3
+            )
             crops = [
                 {
                     "region_id": "crop-1",
@@ -287,20 +299,6 @@ def test_owned_form_row_uses_single_row_evidence_for_nonoverlapping_controls(
                         }
                     ],
                 },
-                {"region_id": "crop-2", "markdown": "[signature]"},
-            ]
-        else:
-            assert schema_name == "owned_form_rows"
-            assert "page_context" in prompt
-            assert "owned_form_row" in prompt
-            assert (
-                sum(
-                    item.get("type") == "image_url"
-                    for item in payload["messages"][1]["content"]
-                )
-                == 2
-            )
-            crops = [
                 {
                     "region_id": "crop-3",
                     "markdown": "[form options extracted]",
@@ -318,7 +316,7 @@ def test_owned_form_row_uses_single_row_evidence_for_nonoverlapping_controls(
                             "bbox_2d": [500, 125, 950, 500],
                         },
                     ],
-                }
+                },
             ]
         answer = {"crops": crops}
         return (
@@ -415,25 +413,9 @@ def test_owned_form_row_failure_keeps_completed_primary_request(tmp_path, monkey
 
     def transport(request, timeout):
         payload = json.loads(request.data)
-        if payload["response_format"]["json_schema"]["name"] == "owned_form_rows":
-            return 500, {}, b'{"error":{"message":"row reader unavailable"}}'
-        answer = {
-            "crops": [
-                {
-                    "region_id": "crop-1",
-                    "markdown": "[form options extracted]",
-                    "controls": [
-                        {
-                            "label": "Uncovered option",
-                            "group_label": "Other",
-                            "state": "unselected",
-                            "bbox_2d": [100, 700, 600, 900],
-                        }
-                    ],
-                },
-                {"region_id": "crop-2", "markdown": "[signature]"},
-            ]
-        }
+        if payload["response_format"]["json_schema"]["name"] == "form_controls":
+            return 500, {}, b'{"error":{"message":"form reader unavailable"}}'
+        answer = {"crops": [{"region_id": "crop-2", "markdown": "[signature]"}]}
         return (
             200,
             {},
@@ -463,8 +445,8 @@ def test_owned_form_row_failure_keeps_completed_primary_request(tmp_path, monkey
     assert result["attempts"] == 1 + refinement.QWEN_ATTEMPTS
     assert result["accepted_crop_ids"] == ["crop-2"]
     assert result["rejected_crop_ids"] == ["crop-1", "crop-3"]
-    assert result["accepted_control_crop_ids"] == ["crop-1"]
-    assert result["request_errors"][0]["request"] == "owned_form_rows"
+    assert result["accepted_control_crop_ids"] == []  # the form and its row share the failed request
+    assert result["request_errors"][0]["request"] == "form_controls"
     assert "[signature]" in result["content"]["markdown"]
 
 
@@ -1553,9 +1535,9 @@ def test_thin_form_control_maps_sent_pixels_back_to_source(
             for part in body["messages"][1]["content"]
             if part["type"] == "image_url"
         ]
-        assert len(images) == 1
+        assert len(images) == 2  # the page overview, then the form crop
         with Image.open(
-            io.BytesIO(base64.b64decode(images[0].split(",", 1)[1]))
+            io.BytesIO(base64.b64decode(images[-1].split(",", 1)[1]))
         ) as sent:
             # Locate the actual synthetic mark in the submitted image, as the reader does.
             box = ImageOps.invert(sent.convert("RGB")).getbbox()
@@ -1820,3 +1802,96 @@ def test_control_boxes_drifting_from_the_grid_are_registered_to_detected_boxes()
     assert _registered_frame(reply(1, 1), detected, crop, 0) is None
     # Too few anchors: no fit.
     assert _registered_frame(reply(0.6, 1.5)[:2], detected, crop, 0) is None
+
+
+def _whole_form_merge(detected, replies):
+    """Merge Qwen options read from one whole-form crop of a 1000 x 1000 page."""
+    from ocr_pipeline.markdown_refinement import _form_control_regions
+
+    form = {
+        "id": "form",
+        "kind": "figure",
+        "reading_order": 1,
+        "bounding_box": {"left": 0, "top": 0, "right": 1000, "bottom": 1000},
+        "structure": {"role": "form_source", "presentation_rank": 1},
+    }
+    crop = {"region_id": "crop-1", "box": dict(form["bounding_box"]), "source_ids": ["form"]}
+    records = [{"region_id": "crop-1", "controls": replies}]
+    index = {region["id"]: region for region in [form, *detected]}
+    return _form_control_regions([crop], records, index, [form, *detected], "qwen", 0)
+
+
+def _detected_box(identifier, label, box, state, order):
+    left, top, right, bottom = box
+    return {
+        "id": identifier,
+        "kind": "checkbox",
+        "text": label,
+        "reading_order": order,
+        "bounding_box": {"left": left, "top": top, "right": right, "bottom": bottom},
+        "structure": {"state": state, "label": label, "presentation_rank": order},
+    }
+
+
+def test_a_drifted_option_with_the_same_label_is_not_added_again():
+    """OASIS form: Qwen's boxes sat a box width left and two heights low (2026-10-28)."""
+    detected = [
+        _detected_box("male", "Male", (500, 400, 560, 425), "unselected", 7),
+        _detected_box("na", "NA", (700, 200, 730, 225), "selected", 3),
+    ]
+    replies = [
+        {"label": "Male", "state": "unselected", "bbox_2d": [460, 450, 500, 475]},
+        {"label": "NA - Not Applicable", "state": "selected", "bbox_2d": [690, 240, 720, 265]},
+    ]
+    controls, errors = _whole_form_merge(detected, replies)
+    assert controls == []
+    assert errors == []
+
+
+def test_a_drifted_option_that_disagrees_keeps_the_detector_state():
+    detected = [_detected_box("female", "Female", (500, 440, 580, 465), "unselected", 8)]
+    replies = [{"label": "Female", "state": "selected", "bbox_2d": [460, 490, 500, 515]}]
+    controls, errors = _whole_form_merge(detected, replies)
+    assert controls == []
+    assert errors == ["crop-1 disagrees with an existing physical control"]
+
+
+def test_a_short_label_does_not_swallow_a_longer_different_one():
+    detected = [_detected_box("no", "No", (100, 300, 140, 325), "unselected", 5)]
+    replies = [{"label": "None of the above", "state": "selected", "bbox_2d": [100, 340, 140, 365]}]
+    controls, _ = _whole_form_merge(detected, replies)
+    assert [control["text"] for control in controls] == ["None of the above"]
+
+
+def test_a_new_option_reads_after_the_detected_box_on_its_line_not_the_form():
+    detected = [_detected_box("family", "Family", (100, 600, 200, 625), "selected", 42)]
+    replies = [{"label": "Other", "state": "unselected", "bbox_2d": [700, 600, 760, 625]}]
+    controls, _ = _whole_form_merge(detected, replies)
+    assert [(c["text"], c["reading_order"], c["structure"]["presentation_rank"]) for c in controls] == [
+        ("Other", 42, 42)
+    ]
+
+
+def test_options_far_from_their_boxes_still_take_them_by_label():
+    """Live OASIS page: Qwen put both "NA" options eight to twenty-six boxes off."""
+    detected = [
+        _detected_box("na-resumption", "NA", (700, 100, 730, 125), "selected", 3),
+        _detected_box("na-medicaid", "NA", (520, 300, 550, 325), "selected", 9),
+    ]
+    replies = [
+        {"label": "NA - Not Applicable", "state": "selected", "bbox_2d": [650, 320, 900, 345]},
+        {"label": "NA - No Medicaid", "state": "selected", "bbox_2d": [650, 760, 900, 785]},
+    ]
+    controls, errors = _whole_form_merge(detected, replies)
+    assert controls == []
+    assert errors == []
+
+
+def test_an_option_the_detector_missed_is_added_once():
+    detected = [_detected_box("yes-1", "Yes", (100, 100, 140, 125), "unselected", 4)]
+    replies = [
+        {"label": "Yes", "state": "unselected", "bbox_2d": [100, 140, 140, 165]},
+        {"label": "Yes", "state": "selected", "bbox_2d": [100, 400, 140, 425]},
+    ]
+    controls, _ = _whole_form_merge(detected, replies)
+    assert [(c["text"], c["structure"]["state"]) for c in controls] == [("Yes", "selected")]

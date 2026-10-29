@@ -32,16 +32,19 @@ DOCTR_MODEL = {
 MIN_SKEW_DEGREES = 1.0
 # jdeskew's DISE-2021 operating point (Pham et al., ICIP 2022): mean error 0.08 degrees.
 SKEW_ESTIMATE_HEIGHT = 2048
-# The page is read whole and as a 3x3 grid of tiles at 1650 px on its long side (150
-# dpi letter): a whole page at docTR's 512 px input blurs glyphs, so upright dense text
-# looked 180 degrees; tiles keep glyph shape (InternVL-style crops, arXiv 2511.04161).
-# Every view votes equally in log space. On 597 held-out real pages (11 sideways) this
-# fixed all sideways pages with no false rotation on contracts, forms or scans.
-TILE_GRID = 3
-TILE_MIN_INK = 0.01
+# Any angle is a tilt within 45 degrees plus a quarter turn. The page is levelled first
+# (jdeskew searching +-45) and only the level page is classified, as the 4-class model
+# was trained: on ORB this took arbitrary angles from 45.9% to 83.9% (Indic, 8 angles)
+# and 94% to 100% (English, 12 angles); 4-class splits were unchanged within 0.8 points.
+SKEW_SEARCH_DEGREES = 45.0
+# The level page is classified in its four quarter turns and the votes, rolled into one
+# frame, are averaged in log space; the model's bias towards one turn cancels. Tiles
+# were dropped: on dense Latin scans they helped by 1 point, on ORB Indic they cost 6.
 CLASSIFY_SIDE = 1650
-# Temperature (Guo et al. 2017) fitted by NLL on those pages and their exact turns.
-OFFICIAL_TEMPERATURE = 0.1135
+# Temperature (Guo et al. 2017) fitted by NLL on 597 real pages in all four turns
+# (document-grouped 5-fold CV 0.49-0.72; held out: 9 of 11 sideways pages fixed, none
+# of 586 upright pages turned under the prior and review rule below).
+OFFICIAL_TEMPERATURE = 0.6756
 # Smoothed label counts of the same pages: sideways either way, upside down almost never.
 OFFICIAL_UPRIGHT_PRIOR = 0.979
 UPSIDE_DOWN_PRIOR = 0.0008
@@ -79,18 +82,36 @@ class DocTROrientationDetector:
         weights: Path | None = None,
         temperature: float = OFFICIAL_TEMPERATURE,
         upright_prior: float = OFFICIAL_UPRIGHT_PRIOR,
+        prior: tuple[float, float, float, float] | None = None,
         classifier: Callable[[list[Any]], Any] | None = None,
         skew_estimator: Callable[[Any], float] | None = None,
     ) -> None:
+        """`prior` (turned 0, 1, 2, 3 quarter turns) replaces the intake prior that
+        `upright_prior` builds: the class mix is a property of the intake, not the model."""
         if not math.isfinite(temperature) or temperature <= 0:
             raise ValueError("temperature must be finite and positive")
         if not 0 < upright_prior < 1 - UPSIDE_DOWN_PRIOR:
             raise ValueError("upright_prior must be between 0 and 1")
+        if prior is not None and (
+            len(prior) != 4
+            or not all(math.isfinite(p) and p > 0 for p in prior)
+            or not math.isclose(sum(prior), 1.0, abs_tol=1e-6)
+        ):
+            raise ValueError("prior must be four positive probabilities summing to one")
         self.device = device
         self.weights = weights
         self.temperature = temperature
         sideways = (1 - upright_prior - UPSIDE_DOWN_PRIOR) / 2
-        self.prior = (upright_prior, sideways, UPSIDE_DOWN_PRIOR, sideways)
+        self.prior = (
+            tuple(prior)
+            if prior is not None
+            else (
+                upright_prior,
+                sideways,
+                UPSIDE_DOWN_PRIOR,
+                sideways,
+            )
+        )
         self._classifier = classifier
         self._skew_estimator = skew_estimator
         self._lock = threading.Lock()
@@ -98,15 +119,40 @@ class DocTROrientationDetector:
     def __call__(self, image: Image.Image) -> PageOrientation:
         import numpy as np
 
-        page = np.asarray(image.convert("RGB"))
-        # docTR makes each view contiguous when preprocessing it; keep views here.
-        views = [
-            np.rot90(crop, turn)
-            for crop in _orientation_crops(image)
-            for turn in range(4)
-        ]
+        page = image.convert("RGB")
         with self._lock:
             classify, estimate_skew = self._models()
+        try:
+            skew = float(estimate_skew(np.asarray(page)))
+        except Exception as error:
+            raise ReaderError("orientation_skew_failed", str(error)) from error
+        if not math.isfinite(skew):
+            raise ReaderError(
+                "invalid_orientation_skew_output", "the skew estimate must be finite"
+            )
+        if abs(skew) < MIN_SKEW_DEGREES:
+            skew = 0.0
+        # Quarter turns and the skew rotation commute, so the quarter turn found on the
+        # level page and the skew fold into one orientation of the source page.
+        turned, posterior = self._quarter_turn(_level(page, skew), classify)
+        return PageOrientation(
+            quarter_turns=(-turned) % 4,
+            skew=skew,
+            confidence=float(posterior[turned]),
+            probabilities=tuple(float(value) for value in posterior),
+        )
+
+    def _quarter_turn(
+        self, image: Image.Image, classify: Callable[[list[Any]], Any]
+    ) -> tuple[int, Any]:
+        """The counterclockwise class the page is turned by, and its posterior."""
+        import numpy as np
+
+        page = image.copy()
+        page.thumbnail((CLASSIFY_SIDE, CLASSIFY_SIDE))
+        # docTR makes each view contiguous when preprocessing it; keep views here.
+        views = [np.rot90(np.asarray(page), turn) for turn in range(4)]
+        with self._lock:
             try:
                 probabilities = np.asarray(classify(views), dtype=float)
             except Exception as error:
@@ -139,23 +185,7 @@ class DocTROrientationDetector:
         # pages as supplied, 1 of 5 such turns was right (upright slides were turned).
         if turned and posterior[turned] < REVIEW_CONFIDENCE:
             turned = 0
-        upright = np.ascontiguousarray(np.rot90(page, -turned))
-        try:
-            skew = float(estimate_skew(upright))
-        except Exception as error:
-            raise ReaderError("orientation_skew_failed", str(error)) from error
-        if not math.isfinite(skew):
-            raise ReaderError(
-                "invalid_orientation_skew_output", "the skew estimate must be finite"
-            )
-        if abs(skew) < MIN_SKEW_DEGREES:
-            skew = 0.0
-        return PageOrientation(
-            quarter_turns=(-turned) % 4,
-            skew=skew,
-            confidence=float(posterior[turned]),
-            probabilities=tuple(float(value) for value in posterior),
-        )
+        return turned, posterior
 
     def _models(self) -> tuple[Callable[[list[Any]], Any], Callable[[Any], float]]:
         if self._classifier is not None and self._skew_estimator is not None:
@@ -206,29 +236,32 @@ def _skew_angle(page: Any) -> float:
     """Counterclockwise degrees that level the page's text (Pillow's rotate sign)."""
     from jdeskew.estimator import get_angle
 
-    return get_angle(page, vertical_image_shape=SKEW_ESTIMATE_HEIGHT)
+    return get_angle(
+        page, vertical_image_shape=SKEW_ESTIMATE_HEIGHT, angle_max=SKEW_SEARCH_DEGREES
+    )
 
 
-def _orientation_crops(image: Image.Image) -> list[Any]:
-    """The page and its inked 3x3 tiles, at the scale the orientation rule was fitted."""
+def _level(image: Image.Image, skew: float) -> Image.Image:
+    """The page rotated level and cut to its ink, the corners filled with its own border."""
     import numpy as np
 
-    page = image.convert("RGB")
-    page.thumbnail((CLASSIFY_SIDE, CLASSIFY_SIDE))
-    pixels = np.asarray(page)
-    height, width = pixels.shape[:2]
-    tiles = [
-        pixels[
-            r * height // TILE_GRID : (r + 1) * height // TILE_GRID,
-            c * width // TILE_GRID : (c + 1) * width // TILE_GRID,
-        ]
-        for r in range(TILE_GRID)
-        for c in range(TILE_GRID)
-    ]
-    return [
-        pixels,
-        *(tile for tile in tiles if (tile.mean(2) < 128).mean() >= TILE_MIN_INK),
-    ]
+    if not skew:
+        return image
+    pixels = np.asarray(image)
+    edge = np.concatenate([pixels[0], pixels[-1], pixels[:, 0], pixels[:, -1]])
+    # White corners on a photographed or coloured page would add borders it never had.
+    fill = tuple(int(value) for value in np.median(edge, 0))
+    level = image.rotate(
+        skew, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=fill
+    )
+    # The expanded canvas leaves the page small in its margins; classify the ink.
+    ink = np.asarray(level.convert("L")) < 128
+    rows, cols = np.flatnonzero(ink.any(1)), np.flatnonzero(ink.any(0))
+    if not rows.size:
+        return level
+    return level.crop(
+        (int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1)
+    )
 
 
 TEXT_LAYER_UPRIGHT = PageOrientation(0, 0.0, 1.0, (1.0, 0.0, 0.0, 0.0))

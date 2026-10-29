@@ -186,9 +186,9 @@ def test_rotated_form_crops_and_returned_controls_share_source_coordinates(
             for part in message["content"]
             if part["type"] == "image_url"
         ]
-        assert len(images) == 1
+        assert len(images) == 2  # the page overview, then the form crop
         with Image.open(
-            io.BytesIO(base64.b64decode(images[0].split(",", 1)[1]))
+            io.BytesIO(base64.b64decode(images[-1].split(",", 1)[1]))
         ) as crop:
             assert crop.size == expected.size
             assert crop.convert("RGB").tobytes() == expected.tobytes()

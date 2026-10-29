@@ -93,6 +93,8 @@ class OpenRouterResult:
     attempts: int
     finish_reason: str = "stop"
     native_finish_reason: str | None = None
+    # (token, logprob) pairs of the reply when requested; they concatenate to the text.
+    token_logprobs: tuple[tuple[str, float], ...] = ()
 
 
 def repair_image(
@@ -260,6 +262,7 @@ def _call_openrouter(
     reasoning_enabled: bool | None = None,
     session_id: str | None = None,
     on_content: Callable[[str], None] | None = None,
+    logprobs: bool = False,
 ) -> OpenRouterResult:
     """`on_content` streams the reply: it receives the content written so far, and the
     result is the same reply a non-streamed call returns."""
@@ -320,6 +323,12 @@ def _call_openrouter(
         ),
         "provider": provider,
     }
+    if logprobs:
+        payload["logprobs"] = True
+        if not strict_schema:
+            # Alibaba, the only Qwen3.7 Flash host, returns no logprobs in JSON mode
+            # (measured 2026-10-29). The prompt asks for JSON and the reply is parsed below.
+            del payload["response_format"]
     if reasoning_enabled is not None:
         if not isinstance(reasoning_enabled, bool):
             raise OpenRouterError("reasoning_enabled must be a boolean")
@@ -452,7 +461,7 @@ def _parse_result(
             partial_content=content_text if finish_reason == "length" else None,
         )
     try:
-        content = json.loads(content_text)
+        content = _first_json(content_text)
     except json.JSONDecodeError as error:
         raise OpenRouterError(
             f"Invalid OpenRouter JSON response: {error}",
@@ -512,6 +521,27 @@ def _parse_result(
         native_finish_reason=(
             str(native_finish_reason) if native_finish_reason is not None else None
         ),
+        token_logprobs=_token_logprobs(choice),
+    )
+
+
+def _first_json(text: str) -> Any:
+    """The first JSON value in a reply. Out of JSON mode the model may wrap it in a Markdown
+    code fence or write more after it."""
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.removeprefix("```").removeprefix("json").lstrip()
+    return json.JSONDecoder().raw_decode(stripped)[0]
+
+
+def _token_logprobs(choice: Mapping[str, Any]) -> tuple[tuple[str, float], ...]:
+    tokens = ((choice.get("logprobs") or {}).get("content")) or []
+    return tuple(
+        (token["token"], float(token["logprob"]))
+        for token in tokens
+        if isinstance(token, Mapping)
+        and isinstance(token.get("token"), str)
+        and isinstance(token.get("logprob"), int | float)
     )
 
 
@@ -621,7 +651,7 @@ def _collected_stream(lines: Any, on_content: Callable[[str], None]) -> bytes:
     Every consumer (parsing, the spend ledger, the reply cache) then sees one shape;
     `on_content` gets the content written so far after each piece.
     """
-    content, reply, choice = "", {}, {}
+    content, reply, choice, logprobs = "", {}, {}, []
     for line in lines:
         if not line.startswith(b"data: ") or line.strip() == b"data: [DONE]":
             continue  # comments keep the connection alive
@@ -631,10 +661,13 @@ def _collected_stream(lines: Any, on_content: Callable[[str], None]) -> bytes:
         reply.update({key: event[key] for key in ("id", "model", "provider", "usage") if event.get(key)})
         for item in event.get("choices") or []:
             choice.update({key: item[key] for key in ("finish_reason", "native_finish_reason") if item.get(key)})
+            logprobs.extend((item.get("logprobs") or {}).get("content") or [])
             piece = (item.get("delta") or {}).get("content")
             if piece:
                 content += piece
                 on_content(content)
+    if logprobs:  # only when requested, so other replies stay byte-identical
+        choice["logprobs"] = {"content": logprobs}
     return json.dumps({**reply, "choices": [{**choice, "message": {"content": content}}]}).encode()
 
 

@@ -157,6 +157,32 @@ class FalconLayoutReader:
         return {"engine": "falcon-perception", "termination_observable": True}
 
     def transcribe_crops(self, images, categories) -> list[str]:
+        body = self._generate(images, categories)
+        texts = body.get("texts")
+        if (
+            not isinstance(texts, list)
+            or len(texts) != len(images)
+            or any(not isinstance(text, str) or not text.strip() for text in texts)
+        ):
+            raise ReaderError("falcon_crop_failed", "malformed crop payload")
+        return texts
+
+    def read_crops(self, images, category: str) -> list[dict[str, Any]]:
+        """Each crop's {"text", "generation"} with Falcon's own token scores, read as one
+        batch; a crop that did not finish cleanly comes back with empty text. A batch can
+        read a crop differently than a request of its own (see panel_split)."""
+        body = self._generate(images, [category] * len(images), return_generation=True)
+        results = body.get("results")
+        if not isinstance(results, list) or len(results) != len(images):
+            raise ReaderError("falcon_crop_failed", "malformed crop payload")
+        return [
+            {"text": item["text"], "generation": item["generation"]}
+            if item.get("status") == "success"
+            else {"text": "", "generation": {}}
+            for item in sorted(results, key=lambda item: item["index"])
+        ]
+
+    def _generate(self, images, categories, **options: bool) -> dict[str, Any]:
         from .falcon import FALCON_OCR_CATEGORIES
 
         if not images or len(images) != len(categories) or len(images) > 24:
@@ -168,17 +194,10 @@ class FalconLayoutReader:
             buffer = io.BytesIO()
             image.save(buffer, format="PNG")
             encoded.append(base64.b64encode(buffer.getvalue()).decode("ascii"))
-        body = self._request(
-            f"{self.url}/generate", {"images": encoded, "categories": list(categories)}
+        return self._request(
+            f"{self.url}/generate",
+            {"images": encoded, "categories": list(categories), **options},
         )
-        texts = body.get("texts")
-        if (
-            not isinstance(texts, list)
-            or len(texts) != len(images)
-            or any(not isinstance(text, str) or not text.strip() for text in texts)
-        ):
-            raise ReaderError("falcon_crop_failed", "malformed crop payload")
-        return texts
 
     def read(
         self,

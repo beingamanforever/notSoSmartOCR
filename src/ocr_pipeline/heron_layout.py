@@ -46,6 +46,25 @@ SAME_ELEMENT_IOU = 0.8
 # Classes added by the fine-tuned Heron. Docling has no label for them, so they are
 # resolved as their own group, as pictures, and never compete with text.
 NEW_LABELS = frozenset({"signature", "hand_mark"})
+# Containers that group a form's fields for reading order; nothing reads them directly.
+FORM_CONTAINER_LABELS = frozenset({"form", "key_value_region"})
+# Docling's table threshold: another detector's table must pass Heron's own bar.
+ADDED_TABLE_SCORE = 0.5
+# A table counts as already found when half of the smaller box is covered.
+SAME_TABLE_OVERLAP = 0.5
+# Heron classes that are page content, never part of a table.
+CONTENT_LABELS = frozenset(
+    {
+        "text",
+        "footnote",
+        "page_footer",
+        "page_header",
+        "section_header",
+        "caption",
+        "list_item",
+        "title",
+    }
+)
 
 Detection = dict[str, Any]
 
@@ -136,6 +155,121 @@ def _resolve_controls(controls: Sequence[Detection]) -> list[Detection]:
         )
         < 2
     ]
+
+
+def with_heron_controls(
+    content: Sequence[Detection], heron: Sequence[Detection]
+) -> list[Detection]:
+    """Another detector's resolved content plus Heron's checkboxes and form containers.
+
+    PP-DocLayoutV3 has no checkbox, form or key-value class: alone it lost every
+    checkbox state (handwritten forms 40.45% to 0%) and the form grouping reading order
+    uses. `heron` holds Heron's page and sliced proposals. A control the size of a
+    content line is that line, as in `resolve_layout`.
+    """
+    controls = [
+        item
+        for item in heron
+        if item["label"] in CONTROL_LABELS
+        and not any(
+            _iou(item["box"], other["box"]) > SAME_ELEMENT_IOU for other in content
+        )
+    ]
+    containers: list[Detection] = []
+    for item in sorted(heron, key=lambda item: -item["score"]):
+        if item["label"] in FORM_CONTAINER_LABELS and all(
+            _iou(item["box"], other["box"]) <= SAME_ELEMENT_IOU for other in containers
+        ):
+            containers.append(item)
+    return [*content, *containers, *_resolve_controls(controls)]
+
+
+def chosen_tables(
+    heron: Sequence[Detection], other: Sequence[Detection]
+) -> list[Detection]:
+    """Tables from the other detector, keeping Heron's where it found none or ran past.
+
+    Table detection at IoU 0.5 on 1,151 public pages (OmniDocBench English, DocLayNet
+    validation, ICDAR 2019 cTDaR) scored F1 0.767 for Heron and 0.828 for PP-DocLayoutV3
+    at 0.5 (archival cTDaR 0.299 vs 0.593). Keeping Heron's box wherever both found a
+    table reached only 0.885 recall on OmniDocBench: a misplaced Heron box blocked a
+    correct one. A PP box that grows past Heron's table over content Heron reads as text
+    swallowed a page's footnotes (handwritten cohort), so Heron's box wins there.
+    """
+    heron_tables = [item for item in heron if item["label"] in TABLE_LABELS]
+    found = [
+        {**item, "label": "table", "source": "pp-doclayout-v3"}
+        for item in other
+        if item["label"] in TABLE_LABELS and item["score"] >= ADDED_TABLE_SCORE
+    ]
+
+    def same(first: Detection, second: Detection) -> bool:
+        return _overlap_of_smaller(first["box"], second["box"]) >= SAME_TABLE_OVERLAP
+
+    tables: list[Detection] = []
+    for table in found:
+        under = [item for item in heron_tables if same(table, item)]
+        if (
+            len(under) == 1
+            and sum(same(under[0], other_table) for other_table in found) == 1
+            and _area(table["box"]) > _area(under[0]["box"])
+            and _runs_past(table["box"], under[0]["box"], heron)
+        ):
+            tables.append(under[0])
+        else:
+            tables.append(table)
+    missed = [item for item in heron_tables if not any(same(item, t) for t in found)]
+    return [*tables, *missed]
+
+
+def _runs_past(
+    big: Sequence[float], small: Sequence[float], heron: Sequence[Detection]
+) -> bool:
+    """Heron reads page content in the part of `big` that lies outside `small`."""
+    return any(
+        item["label"] in CONTENT_LABELS
+        and _inside(item["box"], big) >= 0.5
+        and _inside(item["box"], small) < 0.5
+        for item in heron
+    )
+
+
+def with_chosen_tables(
+    heron: Sequence[Detection], other: Sequence[Detection]
+) -> list[Detection]:
+    """Heron's proposals with their tables replaced by `chosen_tables`."""
+    return [
+        *(item for item in heron if item["label"] not in TABLE_LABELS),
+        *chosen_tables(heron, other),
+    ]
+
+
+def content_with_chosen_tables(
+    other: Sequence[Detection], heron: Sequence[Detection]
+) -> list[Detection]:
+    """The other detector's content with `chosen_tables` in place of its tables.
+
+    Where a Heron table is kept, the other detector's regions inside it are its cells.
+    """
+    tables = chosen_tables(heron, other)
+    heron_tables = [item["box"] for item in tables if "source" not in item]
+    return [
+        *(
+            item
+            for item in other
+            if item["label"] not in TABLE_LABELS
+            and not any(_inside(item["box"], box) >= 0.8 for box in heron_tables)
+        ),
+        *tables,
+    ]
+
+
+def _inside(first: Sequence[float], second: Sequence[float]) -> float:
+    """The share of `first` that lies inside `second`."""
+    width = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
+    height = max(0.0, min(first[3], second[3]) - max(first[1], second[1]))
+    area = _area(first)
+    return width * height / area if area > 0 else 0.0
 
 
 def _area(box: Sequence[float]) -> float:

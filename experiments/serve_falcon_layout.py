@@ -169,6 +169,16 @@ def _exclusive_form_indices(items: list[dict[str, Any]]) -> set[int]:
 # stage (routing, regions, rendering) is shared by both detectors.
 PP_LAYOUT_THRESHOLD = 0.3
 PP_CONTAINMENT = 0.8
+# Hybrids for the layout A/B, both with `chosen_tables`: PP-DocLayoutV3 content with
+# Heron's checkboxes and form containers, or Heron content.
+PP_WITH_HERON_CONTROLS = "pp-doclayout-v3+heron-controls"
+HERON_WITH_PP_TABLES = "heron+pp-tables"
+LAYOUT_BACKENDS = (
+    "heron",
+    "pp-doclayout-v3",
+    PP_WITH_HERON_CONTROLS,
+    HERON_WITH_PP_TABLES,
+)
 PP_TO_HERON = {
     "abstract": "text",
     "algorithm": "code",
@@ -226,7 +236,13 @@ def _route_detection(
             "score": item["score"],
             **{
                 key: item[key]
-                for key in ("query_id", "class_scores", "cell_text", "orphan_text")
+                for key in (
+                    "query_id",
+                    "class_scores",
+                    "cell_text",
+                    "orphan_text",
+                    "source",
+                )
                 if key in item
             },
         }
@@ -972,6 +988,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         CONTROL_REGION_LABELS,
         HeronTableDetector,
         resolve_layout,
+        content_with_chosen_tables,
+        with_chosen_tables,
+        with_heron_controls,
     )
 
     layout_categories = {
@@ -1028,21 +1047,48 @@ def main(argv: Sequence[str] | None = None) -> int:
         orphan_text = True
 
         def load_layout_model(self, layout_model=None):
-            # Paddle weights load only when explicitly chosen as the layout backend.
-            if self.layout_backend == "pp-doclayout-v3":
+            # Paddle weights load only when a layout backend uses them.
+            if self.layout_backend != "heron":
                 OCRInferenceEngine.load_layout_model(self)
+
+        def _heron_proposals(self, image):
+            proposals = self.layout_detector.detect_elements(image)
+            # Only tiles over control, form, key-value or table proposals are sliced.
+            regions = [
+                item["box"]
+                for item in proposals
+                if item["label"] in CONTROL_REGION_LABELS
+            ]
+            if self.control_slices and regions:
+                proposals += self.layout_detector.detect_sliced_controls(
+                    image,
+                    self.control_slices,
+                    regions,
+                    [item for item in proposals if item["label"] in CONTROL_LABELS],
+                )
+            return proposals
 
         def run_layout_detection(self, images, threshold=0.5, cells=None, words=None):
             detections = []
             for index, image in enumerate(images):
                 page_cells = cells[index] if cells else None
                 page_words = words[index] if words else None
-                if self.layout_backend == "pp-doclayout-v3":
-                    proposals = _official_proposals(
+                pp = (
+                    _official_proposals(
                         OCRInferenceEngine.run_layout_detection(
                             self, [image], threshold=PP_LAYOUT_THRESHOLD
                         )[0]
                     )
+                    if self.layout_backend != "heron"
+                    else []
+                )
+                if self.layout_backend.startswith("pp-doclayout-v3"):
+                    proposals = pp
+                    if self.layout_backend == PP_WITH_HERON_CONTROLS:
+                        heron = self._heron_proposals(image)
+                        proposals = with_heron_controls(
+                            content_with_chosen_tables(pp, heron), heron
+                        )
                     # A born-digital page still takes Docling's cell assignment.
                     resolved = (
                         resolve_layout(proposals, *image.size, page_cells)
@@ -1050,20 +1096,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         else proposals
                     )
                 else:
-                    proposals = self.layout_detector.detect_elements(image)
-                    # Only tiles over control, form, key-value or table proposals are sliced.
-                    regions = [
-                        item["box"]
-                        for item in proposals
-                        if item["label"] in CONTROL_REGION_LABELS
-                    ]
-                    if self.control_slices and regions:
-                        proposals += self.layout_detector.detect_sliced_controls(
-                            image,
-                            self.control_slices,
-                            regions,
-                            [item for item in proposals if item["label"] in CONTROL_LABELS],
-                        )
+                    proposals = self._heron_proposals(image)
+                    if self.layout_backend == HERON_WITH_PP_TABLES:
+                        proposals = with_chosen_tables(proposals, pp)
                     resolved = resolve_layout(proposals, *image.size, page_cells)
                 if page_words and not page_cells and self.orphan_text:
                     resolved = grown_tables(resolved, page_words)
@@ -1253,7 +1288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     # A local fine-tuned checkpoint directory is pinned by its path, not a hub revision.
     layout_revision = (
         None
-        if Path(args.layout_model).is_dir() or args.layout_backend != "heron"
+        if Path(args.layout_model).is_dir()
         else args.layout_model_revision
     )
     engine.layout_backend = args.layout_backend
@@ -1292,6 +1327,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "n_pages": args.n_pages,
             "max_seq_length": model.args.max_seq_len,
             "control_slices": args.control_slices,
+            "layout_backend": args.layout_backend,
             "orphan_text": {"enabled": not args.no_orphan_text, "word_detector": "docTR db_resnet50"},
         },
         model={
@@ -1299,9 +1335,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "revision": args.model_revision,
             "inference_repository_revision": FALCON_INFERENCE_REPOSITORY_REVISION,
             "engine": "falcon-perception ocr_layout",
-            "layout_model": args.layout_model
-            if args.layout_backend == "heron"
-            else "PaddlePaddle/PP-DocLayoutV3_safetensors",
+            "layout_model": {
+                "heron": args.layout_model,
+                "pp-doclayout-v3": "PaddlePaddle/PP-DocLayoutV3_safetensors",
+            }.get(
+                args.layout_backend,
+                f"PaddlePaddle/PP-DocLayoutV3_safetensors + {args.layout_model}",
+            ),
             "layout_model_revision": layout_revision,
             "origin": "TII, UAE",
             "license": "Apache-2.0",
@@ -1357,7 +1397,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--layout-model", default=DEFAULT_MODEL_ID)
     parser.add_argument(
-        "--layout-backend", choices=("heron", "pp-doclayout-v3"), default="heron"
+        "--layout-backend", choices=LAYOUT_BACKENDS, default="heron"
     )
     parser.add_argument(
         "--layout-model-revision",

@@ -387,8 +387,7 @@ def test_form_only_upload_preserves_crop_and_reports_unresolved_page() -> None:
             markdown = client.get(
                 f"/api/sessions/{payload['session_id']}/result.md"
             ).text
-            assert "Status: failed" in markdown
-            assert "ocr/no_text_detected" in markdown
+            assert "## Failures" in markdown and "ocr/no_text_detected" in markdown
             assert "## Page 1" in markdown
 
         class AcceptedRead:
@@ -703,7 +702,7 @@ def test_upload_renders_checkbox_label_instead_of_decoder_table_markup():
             assert "<table" not in markdown
             demo = client.get("/").text
             assert "Actual pixels" in demo
-            assert "Routed to LLM" in demo
+            assert "Routed to LLM" not in demo  # reviewers see scores, not which reader ran
     finally:
         server.shutdown()
         server.server_close()

@@ -1,0 +1,1942 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Enrollment review</title>
+<!--ENROLLMENT_BUNDLE-->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    color-scheme: light dark;
+    --background: #fafafa;
+    --panel: #ffffff;
+    --surface: #fcfcfc;
+    --surface-2: #f5f5f5;
+    --panel-raised: #f0f0f0;
+    --line: #f0f0f0;
+    --line-strong: #e6e6e6;
+    --text: #1f1f1f;
+    --text-2: #3d3d3d;
+    --muted: #666666;
+    --primary: #1f1f1f;
+    --primary-hover: #3d3d3d;
+    --on-primary: #ffffff;
+    --accent: #4250d5;
+    --accent-soft: #e8effc;
+    --accent-faint: #fafcff;
+    --accent-line: #d2dff9;
+    --positive: #496d21;
+    --positive-soft: #eef6e4;
+    --warning: #9a4f0a;
+    --warning-soft: #fdf1e3;
+    --danger: #b81514;
+    --danger-soft: #fdecec;
+    --focus: var(--accent);
+    --r-frame: 16px; --r-card: 12px; --r-control: 8px; --r-chip: 999px;
+    --shadow-1: 0 1px 2px rgb(16 24 40 / .05);
+    --shadow-pop: 0 12px 32px -8px rgb(16 24 40 / .2), 0 2px 6px rgb(16 24 40 / .06);
+    --motion: 160ms ease;
+    --motion-fast: 120ms ease;
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --background: #111113; --panel: #18181b; --surface: #1c1c20; --surface-2: #1f1f23; --panel-raised: #26262b;
+      --line: #2a2a2f; --line-strong: #3a3a40;
+      --text: #f5f5f5; --text-2: #d4d4d8; --muted: #a1a1aa;
+      --primary: #f5f5f5; --primary-hover: #d4d4d8; --on-primary: #18181b;
+      --accent: #9aa6ff; --accent-soft: #262a45; --accent-faint: #1d2033; --accent-line: #353b66;
+      --positive: #8fd16a; --positive-soft: #1e2a17;
+      --warning: #f5b35c; --warning-soft: #35260f;
+      --danger: #ff8a80; --danger-soft: #3a1a1a;
+      --focus: #9aa6ff;
+      --shadow-1: 0 1px 2px rgb(0 0 0 / .4); --shadow-pop: 0 16px 40px -8px rgb(0 0 0 / .6), 0 2px 6px rgb(0 0 0 / .3);
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+  .text-muted { color: var(--muted); }
+  body { margin: 0; min-height: 100vh; background: var(--background); color: var(--text); line-height: 1.45; }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button, a { -webkit-tap-highlight-color: transparent; }
+  button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
+    outline: 2px solid var(--focus); outline-offset: 2px;
+  }
+  .shell { max-width: 1480px; margin: 0 auto; padding: 16px 20px 40px; }
+
+  /* Header: brand left, floating pill nav right, quiet reviewer tag after it */
+  .topbar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 12px 0 18px; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; letter-spacing: -.02em; font-size: 1.05rem; margin-right: auto; }
+  .brand-mark { flex: none; width: 30px; height: 30px; border-radius: 8px; background: linear-gradient(135deg, var(--accent), #7c87e8); display: grid; place-items: center; }
+  .brand-mark svg { width: 17px; height: 17px; stroke: #fff; fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+  .brand-text { display: flex; flex-direction: column; line-height: 1.2; }
+  .brand-title { font-weight: 760; }
+  .brand-sub { font-size: .7rem; font-weight: 600; color: var(--muted); letter-spacing: 0; }
+  .reviewer-tag { color: var(--muted); font-size: .78rem; white-space: nowrap; }
+  .reviewer-tag strong { color: var(--text); font-weight: 650; }
+
+  /* Buttons / chips */
+  .button { display: inline-flex; align-items: center; gap: 7px; min-height: 38px; padding: 0 16px; border: 1px solid var(--line-strong); border-radius: 999px; background: var(--panel); color: var(--text); cursor: pointer; font-size: .82rem; font-weight: 600; text-decoration: none; transition: background-color var(--motion-fast), border-color var(--motion-fast), transform var(--motion-fast); }
+  .button:hover:not(:disabled) { background: var(--panel-raised); }
+  .button:active:not(:disabled) { transform: scale(.97); }
+  .button.primary { border-color: var(--primary); background: var(--primary); color: var(--on-primary); }
+  .button.primary:hover:not(:disabled) { background: var(--primary-hover); }
+  .button.danger { border-color: var(--danger); color: var(--danger); }
+  .button.danger:hover:not(:disabled) { background: var(--danger-soft); }
+  .button:disabled { opacity: .45; cursor: not-allowed; }
+  .button svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .icon-button { display: inline-grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 999px; background: transparent; color: var(--text); cursor: pointer; transition: background-color var(--motion-fast); }
+  .icon-button:hover:not(:disabled) { background: var(--panel-raised); }
+  .icon-button:disabled { opacity: .3; cursor: not-allowed; }
+  .icon-button svg { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+  .chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 10px; border-radius: 999px; font-size: .74rem; font-weight: 650; white-space: nowrap; flex: none; }
+  .chip svg { width: 13px; height: 13px; flex: none; }
+  .chip-ok { background: var(--positive-soft); color: var(--positive); }
+  .chip-quiet { background: transparent; color: var(--muted); padding-left: 0; padding-right: 0; font-weight: 500; }
+  .chip-warn { background: var(--warning-soft); color: var(--warning); }
+  .chip-bad { background: var(--danger-soft); color: var(--danger); }
+  .chip-neutral { background: var(--surface-2); color: var(--text-2); }
+  .tag { display: inline-flex; align-items: center; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); color: var(--text-2); font-size: .7rem; font-weight: 650; flex: none; }
+
+  .inline-message { margin: 10px 0; padding: 10px 14px; border: 1px solid var(--danger); border-radius: 10px; background: var(--danger-soft); color: var(--danger); font-size: .84rem; line-height: 1.5; }
+  .inline-message.notice { border-color: var(--accent-line); background: var(--accent-faint); color: var(--text-2); }
+  .inline-message button.dismiss { float: right; border: 0; background: none; cursor: pointer; color: inherit; font-weight: 700; }
+
+  /* Queue */
+  .card { border: 1px solid var(--line); background: var(--panel); border-radius: 14px; box-shadow: var(--shadow-1); }
+  .intake-card { padding: 18px 20px; margin-bottom: 22px; }
+  .intake-card h2 { margin: 0 0 14px; font-size: 1rem; }
+  .intake-grid { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 16px; align-items: end; }
+  .field { display: grid; gap: 5px; min-width: 0; }
+  .field label { font-size: .74rem; font-weight: 650; color: var(--muted); }
+  .field input[type="text"], .field select { height: 38px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: var(--r-control); background: var(--panel); color: var(--text); font-size: .85rem; }
+  .field select {
+    appearance: none; padding-right: 32px; cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23666666' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 11px center; background-size: 13px;
+  }
+  .field.checkbox { flex-direction: row; display: flex; align-items: center; gap: 8px; }
+  .intake-actions { margin-top: 16px; display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+
+  /* Custom styled file picker, matching the Read-a-document drop field */
+  .file-field { display: flex; min-width: 0; align-items: center; gap: 10px; height: 38px; padding: 0 12px; border: 1px dashed var(--line-strong); border-radius: var(--r-control); color: var(--muted); font-size: .8rem; cursor: pointer; transition: border-color var(--motion-fast), background-color var(--motion-fast); }
+  .file-field:hover, .file-field:focus-within, .file-field.dragging { border-color: var(--accent-line); background: var(--accent-faint); }
+  .file-field input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+  .file-field svg { flex: none; width: 15px; height: 15px; stroke: currentColor; stroke-width: 1.7; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+  .file-field .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file-field.has-file .file-name { color: var(--text); font-weight: 550; }
+
+  table.queue-table { width: 100%; border-collapse: collapse; }
+  table.queue-table th, table.queue-table td { padding: 11px 14px; border-bottom: 1px solid var(--line); text-align: left; font-size: .84rem; }
+  table.queue-table th { color: var(--muted); font-size: .7rem; text-transform: uppercase; letter-spacing: .05em; font-weight: 700; }
+  table.queue-table tr.case-row { cursor: pointer; }
+  table.queue-table tr.case-row:hover { background: var(--surface-2); }
+  table.queue-table a { color: inherit; text-decoration: none; display: block; }
+  table.queue-table td.row-chevron { width: 24px; color: var(--muted); }
+  table.queue-table td.row-chevron svg { display: block; width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; }
+  /* Underline tabs for the two top-level sections of this panel (Tickets / Metrics),
+     matching the reader page's output-view tabs exactly: same .tab-btn, just in its own strip. */
+  .top-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
+  .breadcrumb { margin: 0 0 8px; font-size: .82rem; color: var(--muted); }
+  .breadcrumb a { color: var(--accent); text-decoration: none; font-weight: 600; }
+  .breadcrumb a:hover { text-decoration: underline; }
+  .status-pill { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 999px; font-size: .74rem; font-weight: 650; background: var(--surface-2); color: var(--text-2); text-transform: capitalize; white-space: nowrap; }
+  .status-pill.status-review { background: var(--warning-soft); color: var(--warning); }
+  .status-pill.status-submitted { background: var(--positive-soft); color: var(--positive); }
+  .status-pill.status-rejected, .status-pill.status-failed { background: var(--danger-soft); color: var(--danger); }
+  .empty-note { padding: 30px; text-align: center; color: var(--muted); }
+
+  /* Case view */
+  .case-head { margin-bottom: 14px; }
+  .case-head-main { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .case-head h1 { margin: 0; font-size: 1.15rem; letter-spacing: -.01em; }
+  .case-head .muted { color: var(--muted); font-size: .82rem; }
+  .case-split { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); grid-template-rows: 1fr; height: max(560px, calc(100vh - 190px)); gap: 16px; align-items: stretch; }
+  .pane { position: relative; display: flex; flex-direction: column; height: 100%; min-width: 0; min-height: 0; overflow: hidden; }
+  .pane-head { min-height: 50px; display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .pane-head.sub { min-height: 42px; padding: 6px 16px; gap: 10px; }
+  .card-title { font-weight: 720; letter-spacing: -.01em; }
+  .muted.small { font-size: .78rem; color: var(--muted); text-transform: capitalize; }
+
+  /* Document switcher: pills with full names on hover, never bleeding into neighbours */
+  .doc-switcher { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--line); flex: none; max-height: 150px; overflow-y: auto; }
+  .doc-pill { flex: 0 0 auto; width: 168px; min-width: 0; text-align: left; padding: 8px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); cursor: pointer; transition: border-color var(--motion-fast), background-color var(--motion-fast); }
+  .doc-pill:hover { background: var(--surface-2); }
+  .doc-pill[aria-selected="true"] { border-color: var(--accent); background: var(--accent-faint); box-shadow: 0 0 0 1px var(--accent-line); }
+  .doc-pill-name { display: block; font-weight: 650; font-size: .8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .doc-pill-meta { display: block; color: var(--muted); font-size: .7rem; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .doc-banner { margin: 10px 14px 0; padding: 9px 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface-2); color: var(--text-2); font-size: .8rem; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .doc-banner.error-banner { border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
+
+  /* Page viewer: grey canvas, centred page with a soft shadow, floating pager pill */
+  .preview-wrap { flex: 1 1 0; min-height: 0; overflow: auto; background: var(--surface-2); padding: 26px 20px 68px; position: relative; }
+  .page-stage { position: relative; margin: 0 auto; background: var(--panel); border-radius: 4px; box-shadow: 0 0 0 1px var(--line), var(--shadow-pop); }
+  .page-stage img { display: block; border-radius: 4px; }
+  .region-box { position: absolute; border: 1px solid transparent; border-radius: 2px; pointer-events: auto; }
+  .region-box:hover, .region-box:focus-visible { border-color: color-mix(in srgb, var(--text) 35%, transparent); }
+  .region-box.suppressed { border-style: dashed; border-color: var(--warning); opacity: .55; }
+  .region-box.pickable { cursor: crosshair; }
+  .region-box.pickable:hover, .region-box.pickable:focus-visible { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .region-box.evidence-box { border: 2px solid var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); pointer-events: none; }
+  .picking-note { position: sticky; top: 0; z-index: 3; margin: 0 0 10px; padding: 8px 12px; border-radius: 10px; background: var(--accent); color: #fff; font-size: .8rem; display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+  .picking-note button { border: 0; background: rgba(255,255,255,.2); color: #fff; border-radius: 999px; padding: 3px 10px; cursor: pointer; font-size: .74rem; }
+
+  /* Floating page stepper over the page, as on the Read-a-document viewer */
+  .page-controls { position: absolute; z-index: 6; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; align-items: center; gap: 2px; padding: 4px; border: 1px solid var(--line); border-radius: 999px; background: color-mix(in srgb, var(--panel) 92%, transparent); box-shadow: var(--shadow-pop); backdrop-filter: blur(10px); }
+  .page-count { min-width: 56px; font-size: .8rem; font-variant-numeric: tabular-nums; color: var(--text); text-align: center; font-weight: 600; }
+
+  /* Compact "Fit page" zoom select, like the target's Fit/100% control */
+  .zoom-select { margin-left: auto; }
+  .zoom-select select {
+    height: 32px; padding: 0 30px 0 13px; border: 1px solid var(--line-strong); border-radius: 999px;
+    background-color: var(--panel); color: var(--text); font-size: .78rem; font-weight: 600; appearance: none; cursor: pointer;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23666666' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat; background-position: right 10px center; background-size: 12px;
+  }
+  .zoom-select select:hover { background-color: var(--panel-raised); }
+
+  /* Quiet "Open in OCR view" pill: present, but never competing with primary actions */
+  .ocr-view-btn.button { border-color: var(--line); background: transparent; min-height: 32px; padding: 0 13px; font-size: .76rem; color: var(--muted); }
+  .ocr-view-btn.button:hover:not(:disabled) { color: var(--text); border-color: var(--line-strong); background: var(--panel-raised); }
+
+  /* Right panel: underline tabs + action bar share the head, like the target's Download button row */
+  .values-pane .pane-head { justify-content: space-between; }
+  .tabs { display: flex; gap: 2px; flex: none; }
+  .tab-btn { margin-bottom: -1px; border: 0; background: transparent; padding: 10px 12px; color: var(--muted); font-weight: 650; font-size: .85rem; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; border-bottom: 2px solid transparent; transition: color var(--motion-fast), border-color var(--motion-fast); }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn[aria-selected="true"] { color: var(--text); border-color: var(--text); }
+  .pane-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; position: relative; }
+  .pane-actions .button { min-height: 34px; padding: 0 14px; font-size: .78rem; }
+  .values-body { flex: 1 1 0; min-height: 0; overflow: auto; padding: 16px; }
+  .pane-hint { margin: 0; padding: 8px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: .74rem; flex: none; }
+  .pane-hint kbd { font: inherit; padding: 1px 5px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface-2); }
+
+  .reject-case-bar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--surface); flex: none; }
+  .reject-case-bar select, .reject-case-bar input[type="text"] { height: 32px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--r-control); background: var(--panel); }
+
+  .downloads { position: relative; }
+  .downloads summary { list-style: none; }
+  .downloads summary::-webkit-details-marker { display: none; }
+  .downloads-list { position: absolute; right: 0; top: calc(100% + 6px); z-index: 5; display: flex; flex-direction: column; gap: 6px; padding: 8px; min-width: 170px; border: 1px solid var(--line-strong); border-radius: var(--r-card); background: var(--panel); box-shadow: var(--shadow-pop); }
+  .downloads-list .button { justify-content: flex-start; }
+  .blocked-banner { margin: 0 16px; margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: var(--warning-soft); color: var(--warning); font-size: .82rem; }
+  .blocked-banner ul { margin: 6px 0 0; padding-left: 18px; }
+  .link-button { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; font: inherit; font-weight: 650; }
+  .link-button:hover { text-decoration: underline; }
+
+  /* One merged "N items need you" card: a calm severity marker, a clickable sentence, a Resolve action */
+  .attention-card { margin-bottom: 16px; border: 1px solid var(--accent-line); border-radius: 12px; background: var(--accent-faint); overflow: hidden; }
+  .attention-card.attention-ok { border-color: var(--line); background: var(--positive-soft); }
+  .attention-headline { margin: 0; padding: 12px 14px 6px; font-weight: 700; font-size: .92rem; color: var(--text); }
+  .attention-card.attention-ok .attention-headline { padding-bottom: 12px; color: var(--positive); }
+  .attention-list { display: flex; flex-direction: column; }
+  .attention-item { border-top: 1px solid color-mix(in srgb, var(--accent-line) 70%, transparent); }
+  .attention-row { display: flex; align-items: flex-start; gap: 10px; padding: 9px 14px; }
+  .attention-marker { flex: none; width: 15px; height: 15px; margin-top: 1px; }
+  .attention-marker svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; }
+  .severity-error .attention-marker { color: var(--danger); }
+  .severity-warning .attention-marker { color: var(--warning); }
+  .attention-text { flex: 1 1 auto; min-width: 0; text-align: left; border: 0; background: none; padding: 0; margin: 0; font: inherit; font-size: .86rem; color: var(--text-2); overflow-wrap: anywhere; }
+  button.attention-text { cursor: pointer; }
+  button.attention-text:hover { color: var(--accent); }
+  .attention-resolve-btn { flex: none; font-size: .78rem; }
+  .button.attention-resolve-btn { min-height: 30px; padding: 0 12px; }
+  .attention-resolve-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 0 14px 10px 39px; }
+  .attention-resolve-row input[type="text"] { height: 28px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: var(--r-control); background: var(--panel); width: 170px; }
+  .attention-notes { border-top: 1px solid color-mix(in srgb, var(--accent-line) 70%, transparent); }
+  .attention-notes summary { padding: 8px 14px; font-size: .78rem; color: var(--muted); cursor: pointer; }
+  .attention-note { margin: 0; padding: 0 14px 8px 14px; font-size: .82rem; color: var(--muted); }
+
+  /* Value groups as section cards: label, value, chip, then a muted reason line */
+  .value-group { margin-bottom: 14px; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--panel); }
+  .value-group summary { padding: 9px 14px; font-size: .74rem; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 700; cursor: pointer; background: var(--surface); }
+  .value-group[open] summary { border-bottom: 1px solid var(--line); }
+  .value-row { border-bottom: 1px solid var(--line); }
+  .value-row:last-child { border-bottom: 0; }
+  .value-row.selected { background: var(--accent-faint); }
+  .value-main { display: grid; grid-template-columns: minmax(130px, 170px) minmax(0, 1fr) auto; column-gap: 14px; row-gap: 2px; align-items: center; width: 100%; text-align: left; border: 0; background: transparent; cursor: pointer; padding: 10px 14px; }
+  .value-label-col { min-width: 0; }
+  .value-label { display: block; font-size: .78rem; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .value-role { display: block; font-size: .68rem; color: var(--muted); font-style: italic; }
+  .value-text { min-width: 0; font-size: .92rem; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .value-text.empty { color: var(--muted); font-variant-numeric: normal; }
+  .value-chips { display: flex; align-items: center; gap: 4px; }
+  .value-raw { display: block; font-size: .78rem; color: var(--muted); margin: 0 14px 4px; font-variant-numeric: tabular-nums; }
+  .value-reason { margin: 0 14px 8px; color: var(--muted); font-size: .84rem; }
+  .value-reason-bad { color: var(--danger); }
+  .value-default-note { font-style: italic; }
+  .value-source { margin: 0 14px 8px; color: var(--muted); font-size: .82rem; }
+  .value-edit-diff { margin: 0 14px 4px; font-size: .84rem; color: var(--text-2); }
+  .value-edit-diff s { color: var(--muted); }
+
+  .value-details { margin: 0 14px 10px; }
+  .value-details summary { cursor: pointer; font-size: .78rem; color: var(--accent); font-weight: 650; }
+  .value-details-list { margin: 6px 0 0; padding-left: 18px; font-size: .84rem; color: var(--text-2); }
+  .value-details-list li { margin-bottom: 3px; }
+
+  .value-conflict { margin: 0 14px 10px; padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: var(--surface); }
+  .value-conflict-label { margin: 0 0 8px; font-size: .78rem; font-weight: 650; color: var(--text-2); }
+  .value-conflict-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
+  .value-conflict-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: .84rem; }
+  .value-conflict-row.current { color: var(--text-2); }
+  .value-conflict-doc { flex: 0 0 170px; min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .value-conflict-val { flex: 1 1 auto; min-width: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .value-conflict-row .button { min-height: 28px; padding: 0 11px; font-size: .74rem; }
+
+  .value-actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 14px 10px; }
+  .value-actions .button { min-height: 32px; padding: 0 12px; font-size: .76rem; }
+  .edit-row, .reject-row, .picking-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 0 14px 10px; }
+  .edit-row input[type="text"], .reject-row select, .reject-row input[type="text"] { height: 32px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--r-control); background: var(--panel); }
+  .edit-row input[type="text"] { flex: 1; min-width: 160px; }
+
+  .add-attribute { border: 1px dashed var(--line-strong); border-radius: 10px; padding: 12px; margin-top: 12px; }
+  .add-attribute .fields { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .add-attribute input[type="text"] { height: 32px; padding: 0 9px; border: 1px solid var(--line-strong); border-radius: var(--r-control); flex: 1; min-width: 130px; }
+
+  table.audit-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+  table.audit-table th, table.audit-table td { padding: 7px 9px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+  table.audit-table th { color: var(--muted); font-size: .68rem; text-transform: uppercase; letter-spacing: .05em; }
+
+  /* Automated pipeline steps, tucked away under one summary line so the audit tab
+     reads as a reviewer's history first. */
+  .audit-system-group { margin-top: 14px; }
+  .audit-system-group summary { cursor: pointer; padding: 6px 0; font-size: .78rem; font-weight: 650; color: var(--muted); }
+  .audit-system-group[open] summary { margin-bottom: 6px; }
+
+  .timing-disclosure { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .timing-disclosure summary { cursor: pointer; font-size: .82rem; font-weight: 650; color: var(--text-2); }
+  .timing-disclosure[open] summary { margin-bottom: 12px; }
+  .timing-doc { margin-bottom: 16px; }
+  .timing-doc h4 { margin: 0 0 8px; font-size: .82rem; }
+  .timing-bar-row { display: grid; grid-template-columns: 110px minmax(0,1fr) 54px; gap: 8px; align-items: center; margin-bottom: 6px; }
+  .timing-bar-row span:first-child { font-size: .76rem; color: var(--text-2); }
+  .timing-bar-track { height: 8px; border-radius: 999px; background: var(--surface-2); overflow: hidden; }
+  .timing-bar-fill { height: 100%; background: var(--accent); border-radius: 999px; }
+  .timing-bar-row span:last-child { font-size: .74rem; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* Metrics */
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; margin-bottom: 22px; }
+  .kpi-tile { padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: var(--shadow-1); }
+  .kpi-tile .kpi-label { display: block; font-size: .72rem; color: var(--muted); font-weight: 650; text-transform: uppercase; letter-spacing: .04em; }
+  .kpi-tile .kpi-value { display: block; margin-top: 6px; font-size: 1.5rem; font-weight: 720; }
+  .kpi-tile .kpi-note { display: block; margin-top: 5px; font-size: .74rem; color: var(--muted); font-weight: 500; }
+  .metrics-summary { margin: -8px 0 18px; color: var(--text-2); font-size: .9rem; }
+  .chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; align-items: start; }
+  .chart-card { min-height: 260px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: var(--shadow-1); }
+  .chart-card h3 { margin: 0 0 4px; font-size: .9rem; }
+  .chart-summary { margin: 8px 0 0; color: var(--muted); font-size: .78rem; }
+  .chart-card svg { width: 100%; height: auto; display: block; }
+  .chart-axis-label { font-size: 10px; fill: var(--muted); }
+  .chart-legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 2px 0 10px; }
+  .chart-legend-item { display: inline-flex; align-items: center; gap: 6px; font-size: .76rem; color: var(--text-2); }
+  .chart-legend-swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+  .chart-legend-swatch.dashed { background: none; border: 2px dashed currentColor; }
+  .mini-chart + .mini-chart { margin-top: 8px; }
+  .mini-chart-title { margin: 0 0 2px; color: var(--muted); font-size: .72rem; font-weight: 650; }
+
+  @media (max-width: 1100px) {
+    .intake-grid { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 900px) {
+    .case-split { grid-template-columns: 1fr; grid-template-rows: none; height: auto; }
+    .pane { height: 560px; }
+  }
+  @media (max-width: 800px) {
+    .intake-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 580px) {
+    .case-split { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar" id="topbar"></header>
+    <main id="app" aria-live="polite"></main>
+  </div>
+<script>
+(function () {
+  'use strict';
+
+  /* ---------- constants ---------- */
+  var STATUS_META = {
+    verified: { label: 'Verified', chipClass: 'chip-quiet', icon: 'check' },
+    check: { label: 'Check', chipClass: 'chip-warn', icon: 'alert' },
+    missing: { label: 'Missing', chipClass: 'chip-bad', icon: 'x' },
+    defaulted: { label: 'Default', chipClass: 'chip-neutral', icon: 'dash' },
+  };
+  var CATEGORY_GROUPS = [
+    ['required', 'Required'],
+    ['load_if_provided', 'Loaded if provided'],
+    ['defaulted', 'Defaulted'],
+  ];
+  var REJECT_REASONS = [
+    ['wrong_value', 'Wrong value'],
+    ['wrong_source', 'Wrong source'],
+    ['not_applicable', 'Not applicable'],
+    ['illegible', 'Illegible'],
+    ['other', 'Other'],
+  ];
+  var DOC_STATUS_TEXT = {
+    queued: 'Queued', classifying: 'Classifying', ocr: 'Reading', extracting: 'Extracting',
+    extracted: 'Read', skipped: 'Not read', duplicate: 'Duplicate', failed: 'Failed',
+  };
+  var ENROLLMENT_TYPE_LABEL = { practitioner: 'Practitioner (PCEN)', group: 'Group (PVEN)' };
+  function enrollmentTypeLabel(type) { return ENROLLMENT_TYPE_LABEL[type] || capitalize(type); }
+  // The only processing stages shown to a reviewer: no ocr.* sub-steps, no model or engine names.
+  var STAGE_CHART_KEYS = ['render_first_page', 'classify', 'ocr', 'extract'];
+  var STAGE_CHART_LABELS = { render_first_page: 'Render first page', classify: 'Classify', ocr: 'OCR', extract: 'Extract' };
+  var REVIEWER_KEY = 'enrollment-review-reviewer-name';
+  // Page may be served under a path prefix (e.g. /enrollment/); every API call and
+  // download link is built relative to that base, never to the site root.
+  var BASE = location.pathname.replace(/\/[^/]*$/, '');
+
+  var ICON = {
+    plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>',
+    check: '<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>',
+    edit: '<svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+    x: '<svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+    target: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.2"/></svg>',
+    alert: '<svg viewBox="0 0 24 24"><path d="M10.3 3.9 1.9 18a2 2 0 0 0 1.7 3h16.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
+    dash: '<svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg>',
+    chevronLeft: '<svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>',
+    chevronRight: '<svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>',
+    download: '<svg viewBox="0 0 24 24"><path d="M12 4v11m-5-5 5 5 5-5M5 20h14"/></svg>',
+    upload: '<svg viewBox="0 0 24 24"><path d="M12 15V3m-5 5 5-5 5 5"/><path d="M20 15v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-4"/></svg>',
+  };
+
+  function icon(name) {
+    var span = document.createElement('span');
+    span.className = 'icon-glyph';
+    span.innerHTML = ICON[name] || ''; // trusted static markup only, never document/user data
+    var svg = span.firstElementChild;
+    if (svg) { svg.setAttribute('fill', 'none'); svg.setAttribute('stroke', 'currentColor'); svg.setAttribute('stroke-width', '2'); svg.setAttribute('stroke-linecap', 'round'); svg.setAttribute('stroke-linejoin', 'round'); }
+    return svg || span;
+  }
+
+  /* ---------- tiny DOM helper: every string argument becomes a text node ---------- */
+  function h(tag, attrs) {
+    var el = document.createElement(tag);
+    attrs = attrs || {};
+    Object.keys(attrs).forEach(function (k) {
+      var v = attrs[k];
+      if (v == null || v === false) return;
+      if (k.indexOf('on') === 0 && typeof v === 'function') el[k] = v;
+      else if (k === 'class') el.className = v;
+      else if (v === true) el.setAttribute(k, '');
+      else el.setAttribute(k, v);
+    });
+    for (var i = 2; i < arguments.length; i++) {
+      var c = arguments[i];
+      if (c == null) continue;
+      if (Array.isArray(c)) { c.forEach(function (cc) { if (cc != null) el.appendChild(cc.nodeType ? cc : document.createTextNode(cc)); }); continue; }
+      el.appendChild(c.nodeType ? c : document.createTextNode(c));
+    }
+    return el;
+  }
+
+  function readReviewer() {
+    try { return localStorage.getItem(REVIEWER_KEY) || ''; } catch (e) { return ''; }
+  }
+  function saveReviewer(name) {
+    try { localStorage.setItem(REVIEWER_KEY, name); } catch (e) { /* storage unavailable: keep in memory only */ }
+  }
+
+  /* ---------- state ---------- */
+  var state = {
+    offline: !!window.ENROLLMENT_BUNDLE,
+    reviewer: readReviewer(),
+    cases: [],
+    caseId: null,
+    bundle: null,
+    pollTimer: null,
+    selectedDocumentId: null,
+    selectedPage: {},
+    zoom: 'fit',
+    selectedValueId: null,
+    pickingSourceFor: null,
+    editingValueId: null,
+    rejectingValueId: null,
+    resolvingExceptionId: null,
+    rejectingCase: false,
+    addingAttribute: false,
+    rightTab: 'values',
+    actionError: null,
+    submitBlocked: null,
+    intakeError: null,
+    intakeBusy: false,
+    ocrViewBusyFor: null,
+    groupTicketBusy: false,
+  };
+
+  function actor() { return state.reviewer.trim() || 'reviewer'; }
+
+  /* ---------- networking ---------- */
+  // Only messages the server chose to send are shown verbatim; raw network/JS
+  // errors ("Failed to fetch") fall back to a calm, generic sentence instead.
+  function friendlyMessage(err, fallback) {
+    return err && err.isApiError && err.message ? err.message : fallback;
+  }
+
+  function apiGet(path) {
+    return fetch(BASE + path).then(function (res) {
+      if (!res.ok) return res.json().catch(function () { return {}; }).then(function (body) {
+        var err = new Error(typeof body.detail === 'string' ? body.detail : (res.statusText || 'Request failed'));
+        err.isApiError = true;
+        throw err;
+      });
+      return res.json();
+    });
+  }
+
+  function postAction(payload) {
+    payload = Object.assign({ actor: actor() }, payload);
+    return fetch(BASE + '/api/cases/' + encodeURIComponent(state.caseId) + '/actions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then(function (res) {
+      if (res.status === 409) {
+        return res.json().then(function (body) {
+          state.submitBlocked = body.detail || { blocked: [], message: 'Submit is blocked.' };
+          state.actionError = null;
+          var firstId = (state.submitBlocked.blocked || [])[0];
+          if (firstId) selectValue(firstId, { skipRender: true });
+          renderCase();
+        });
+      }
+      if (!res.ok) {
+        return res.json().catch(function () { return {}; }).then(function (body) {
+          state.actionError = typeof body.detail === 'string' ? body.detail : 'That action could not be completed.';
+          renderCase();
+        });
+      }
+      return res.json().then(function (bundle) {
+        state.actionError = null;
+        state.submitBlocked = null;
+        state.editingValueId = null;
+        state.rejectingValueId = null;
+        state.pickingSourceFor = null;
+        state.resolvingExceptionId = null;
+        state.addingAttribute = false;
+        state.rejectingCase = false;
+        state.bundle = bundle;
+        renderCase();
+      });
+    }).catch(function (err) {
+      state.actionError = friendlyMessage(err, 'That action could not be completed.');
+      renderCase();
+    });
+  }
+
+  function openOcrView(doc) {
+    if (state.ocrViewBusyFor) return;
+    state.ocrViewBusyFor = doc.document_id;
+    state.actionError = null;
+    renderCase();
+    fetch(BASE + '/api/cases/' + encodeURIComponent(state.caseId) + '/documents/' + encodeURIComponent(doc.document_id) + '/ocr-view', { method: 'POST' })
+      .then(function (res) {
+        if (!res.ok) return res.json().catch(function () { return {}; }).then(function (body) {
+          var err = new Error(typeof body.detail === 'string' ? body.detail : 'Could not open the OCR view.');
+          err.isApiError = true;
+          throw err;
+        });
+        return res.json();
+      })
+      .then(function (body) {
+        if (body && body.url) window.location.href = body.url;
+      })
+      .catch(function (err) {
+        state.ocrViewBusyFor = null;
+        state.actionError = friendlyMessage(err, 'Could not open the OCR view.');
+        renderCase();
+      });
+  }
+
+  // The client's group-first rule: a practitioner ticket whose group is not yet enrolled
+  // cannot submit until a group (PVEN) ticket exists for it. This starts that ticket from
+  // the same documents and jumps straight to it.
+  function startGroupEnrollment() {
+    if (state.groupTicketBusy) return;
+    state.groupTicketBusy = true;
+    state.actionError = null;
+    renderCase();
+    fetch(BASE + '/api/cases/' + encodeURIComponent(state.caseId) + '/group-ticket', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ actor: actor() }),
+    }).then(function (res) {
+      if (!res.ok) return res.json().catch(function () { return {}; }).then(function (body) {
+        var err = new Error(typeof body.detail === 'string' ? body.detail : 'Could not start the group enrollment.');
+        err.isApiError = true;
+        throw err;
+      });
+      return res.json();
+    }).then(function (body) {
+      if (body && body.case_id) location.hash = '#/case/' + encodeURIComponent(body.case_id);
+    }).catch(function (err) {
+      state.groupTicketBusy = false;
+      state.actionError = friendlyMessage(err, 'Could not start the group enrollment.');
+      renderCase();
+    });
+  }
+
+  /* ---------- routing ---------- */
+  function parseHash() {
+    var h = (location.hash || '').replace(/^#/, '') || '/';
+    var m = h.match(/^\/case\/([^/]+)/);
+    if (m) return { name: 'case', caseId: decodeURIComponent(m[1]) };
+    if (h === '/metrics') return { name: 'metrics' };
+    return { name: 'queue' };
+  }
+
+  function stopPolling() {
+    if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+  }
+
+  function route() {
+    stopPolling();
+    var r = parseHash();
+    renderHeader(r);
+    if (state.offline) { renderOfflineCase(); return; }
+    if (r.name === 'queue') renderQueue();
+    else if (r.name === 'metrics') renderMetrics();
+    else renderCaseRoute(r.caseId);
+  }
+
+  window.addEventListener('hashchange', route);
+  window.addEventListener('resize', (function () {
+    var pending = false;
+    return function () {
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(function () { pending = false; if (state.zoom === 'fit' && state.bundle) renderImagePane(); });
+    };
+  })());
+
+  /* ---------- header ---------- */
+  function renderHeader(r) {
+    var bar = document.getElementById('topbar');
+    bar.textContent = '';
+    var brand = h('span', { class: 'brand' },
+      h('span', { class: 'brand-mark' }, (function () { var s = document.createElement('span'); s.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>'; return s.firstElementChild; })()),
+      h('span', { class: 'brand-text' }, h('span', { class: 'brand-title' }, 'HiLabs OCR'), h('span', { class: 'brand-sub' }, 'Enrollment review'))
+    );
+    bar.appendChild(brand);
+    if (!state.offline) {
+      var rev = h('span', { class: 'reviewer-tag' }, 'Reviewer: ', h('strong', {}, state.reviewer || 'not set'));
+      bar.appendChild(rev);
+    }
+  }
+
+  // Underline tabs for the panel's two top-level sections, shown above the content
+  // (the case view shows a breadcrumb back to Tickets instead, so it is skipped there).
+  function renderTopTabs(active) {
+    var wrap = h('div', { class: 'top-tabs', role: 'tablist', 'aria-label': 'Enrollment review sections' });
+    [['queue', 'Tickets', '#/'], ['metrics', 'Metrics', '#/metrics']].forEach(function (t) {
+      wrap.appendChild(h('a', { class: 'tab-btn', href: t[2], role: 'tab', 'aria-selected': String(active === t[0]) }, t[1]));
+    });
+    return wrap;
+  }
+
+  /* ================= QUEUE ================= */
+  function renderQueue() {
+    var app = document.getElementById('app');
+    app.textContent = '';
+    app.appendChild(renderTopTabs('queue'));
+
+    var card = h('section', { class: 'card intake-card' }, h('h2', {}, 'New ticket'));
+    var form = h('form', {});
+    var ticketField = h('input', { type: 'text', id: 'f-ticket', required: true, autocomplete: 'off' });
+    var typeField = h('select', { id: 'f-type' }, h('option', { value: 'practitioner' }, 'Practitioner'), h('option', { value: 'group' }, 'Group'));
+    var reviewerField = h('input', { type: 'text', id: 'f-reviewer', autocomplete: 'off', value: state.reviewer });
+    var syntheticField = h('input', { type: 'checkbox', id: 'f-synthetic' });
+    var filesField = h('input', { type: 'file', id: 'f-files', multiple: true, accept: '.pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp' });
+    var filesNameSpan = h('span', { class: 'file-name' }, 'Choose or drop PDF, PNG, JPG, TIFF, WEBP or BMP files');
+    var filesLabel = h('label', { class: 'file-field', for: 'f-files' }, icon('upload'), filesField, filesNameSpan);
+
+    function describeFiles() {
+      var files = filesField.files;
+      if (!files.length) return 'Choose or drop PDF, PNG, JPG, TIFF, WEBP or BMP files';
+      if (files.length === 1) return files[0].name;
+      return files[0].name + ' +' + (files.length - 1) + ' more';
+    }
+    filesField.addEventListener('change', function () {
+      filesNameSpan.textContent = describeFiles();
+      filesLabel.classList.toggle('has-file', filesField.files.length > 0);
+    });
+    ['dragenter', 'dragover'].forEach(function (evtName) {
+      filesLabel.addEventListener(evtName, function (ev) { ev.preventDefault(); filesLabel.classList.add('dragging'); });
+    });
+    ['dragleave', 'drop'].forEach(function (evtName) {
+      filesLabel.addEventListener(evtName, function () { filesLabel.classList.remove('dragging'); });
+    });
+    filesLabel.addEventListener('drop', function (ev) {
+      ev.preventDefault();
+      if (ev.dataTransfer && ev.dataTransfer.files.length) {
+        filesField.files = ev.dataTransfer.files;
+        filesField.dispatchEvent(new Event('change'));
+      }
+    });
+
+    var grid = h('div', { class: 'intake-grid' },
+      h('div', { class: 'field' }, h('label', { for: 'f-ticket' }, 'Ticket ID'), ticketField),
+      h('div', { class: 'field' }, h('label', { for: 'f-type' }, 'Enrollment type'), typeField),
+      h('div', { class: 'field' }, h('label', { for: 'f-reviewer' }, 'Reviewer name'), reviewerField),
+      h('div', { class: 'field' }, h('label', { for: 'f-files' }, 'Documents'), filesLabel)
+    );
+    form.appendChild(grid);
+
+    var startBtn = h('button', { type: 'submit', class: 'button primary' }, icon('upload'), 'Start');
+    var actions = h('div', { class: 'intake-actions' },
+      h('div', { class: 'field checkbox' }, syntheticField, h('label', { for: 'f-synthetic' }, 'Synthetic test packet')),
+      startBtn
+    );
+    form.appendChild(actions);
+    var errorSlot = h('div', {});
+    form.appendChild(errorSlot);
+    card.appendChild(form);
+    app.appendChild(card);
+
+    reviewerField.addEventListener('input', function () { state.reviewer = reviewerField.value; saveReviewer(state.reviewer); renderHeader(parseHash()); });
+
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      errorSlot.textContent = '';
+      if (!ticketField.value.trim()) { ticketField.focus(); return; }
+      if (!filesField.files.length) {
+        var msg = h('p', { class: 'inline-message', role: 'alert' }, 'Add at least one document before starting.');
+        errorSlot.appendChild(msg);
+        return;
+      }
+      state.reviewer = reviewerField.value; saveReviewer(state.reviewer);
+      var data = new FormData();
+      for (var i = 0; i < filesField.files.length; i++) data.append('files', filesField.files[i]);
+      data.append('ticket_id', ticketField.value.trim());
+      data.append('enrollment_type', typeField.value);
+      data.append('actor', actor());
+      data.append('synthetic', syntheticField.checked ? 'true' : 'false');
+      startBtn.disabled = true;
+      fetch(BASE + '/api/cases', { method: 'POST', body: data }).then(function (res) {
+        if (!res.ok) return res.json().catch(function () { return {}; }).then(function (body) {
+          var err = new Error(typeof body.detail === 'string' ? body.detail : 'Could not start the case.');
+          err.isApiError = true;
+          throw err;
+        });
+        return res.json();
+      }).then(function (body) {
+        location.hash = '#/case/' + encodeURIComponent(body.case_id);
+      }).catch(function (err) {
+        startBtn.disabled = false;
+        errorSlot.textContent = '';
+        errorSlot.appendChild(h('p', { class: 'inline-message', role: 'alert' }, friendlyMessage(err, 'Could not start the case.')));
+      });
+    });
+
+    var tableWrap = h('section', { class: 'card' });
+    app.appendChild(tableWrap);
+    apiGet('/api/cases').then(function (cases) {
+      state.cases = cases;
+      renderQueueTable(tableWrap, cases);
+    }).catch(function (err) {
+      tableWrap.textContent = '';
+      tableWrap.appendChild(h('p', { class: 'inline-message', role: 'alert' }, friendlyMessage(err, 'Could not load cases.')));
+    });
+  }
+
+  function renderQueueTable(wrap, cases) {
+    wrap.textContent = '';
+    if (!cases.length) { wrap.appendChild(h('p', { class: 'empty-note' }, 'No cases yet.')); return; }
+    var table = h('table', { class: 'queue-table' });
+    var thead = h('thead', {}, h('tr', {},
+      h('th', {}, 'Ticket'), h('th', {}, 'Type'), h('th', {}, 'Status'), h('th', {}, 'Documents'),
+      h('th', {}, 'Exceptions'), h('th', {}, 'Needs review'), h('th', {}, 'Created'), h('th', { class: 'sr-only' }, 'Open')));
+    table.appendChild(thead);
+    var tbody = h('tbody', {});
+    cases.forEach(function (c) {
+      var tr = h('tr', { class: 'case-row', tabindex: '0', 'aria-label': 'Open ticket ' + c.ticket_id });
+      tr.appendChild(h('td', {}, c.ticket_id));
+      tr.appendChild(h('td', {}, enrollmentTypeLabel(c.enrollment_type)));
+      tr.appendChild(h('td', {}, h('span', { class: 'status-pill status-' + c.status }, c.status)));
+      tr.appendChild(h('td', {}, String(c.documents)));
+      // Once a ticket is submitted its exceptions no longer block anything; show them
+      // as a quiet record ("4 notes") instead of an outstanding count.
+      tr.appendChild(h('td', {}, c.status === 'submitted'
+        ? h('span', { class: 'text-muted' }, c.open_exceptions + (c.open_exceptions === 1 ? ' note' : ' notes'))
+        : String(c.open_exceptions)));
+      tr.appendChild(h('td', {}, c.needs_review ? String(c.needs_review) : h('span', { class: 'text-muted' }, '—')));
+      tr.appendChild(h('td', {}, formatDate(c.created_at)));
+      tr.appendChild(h('td', { class: 'row-chevron' }, icon('chevronRight')));
+      function go() { location.hash = '#/case/' + encodeURIComponent(c.case_id); }
+      tr.addEventListener('click', go);
+      tr.addEventListener('keydown', function (ev) { if (ev.key === 'Enter') go(); });
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    wrap.appendChild(table);
+  }
+
+  var MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  function formatDate(iso) {
+    if (!iso) return '—';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    var hour = d.getHours();
+    var hour12 = hour % 12 || 12;
+    var minutes = ('0' + d.getMinutes()).slice(-2);
+    return d.getDate() + ' ' + MONTHS_SHORT[d.getMonth()] + ' ' + d.getFullYear() + ', ' + hour12 + ':' + minutes + ' ' + (hour >= 12 ? 'PM' : 'AM');
+  }
+
+  /* ================= CASE ================= */
+  function renderCaseRoute(caseId) {
+    state.caseId = caseId;
+    state.bundle = null;
+    var app = document.getElementById('app');
+    app.textContent = '';
+    app.appendChild(h('p', { class: 'empty-note' }, 'Loading case…'));
+    loadCase();
+  }
+
+  function loadCase() {
+    apiGet('/api/cases/' + encodeURIComponent(state.caseId)).then(function (bundle) {
+      var firstLoad = !state.bundle;
+      state.bundle = bundle;
+      if (firstLoad) {
+        state.selectedDocumentId = bundle.documents.length ? bundle.documents[0].document_id : null;
+      }
+      renderCase();
+      if (bundle.case.status === 'processing') {
+        stopPolling();
+        state.pollTimer = setInterval(function () {
+          apiGet('/api/cases/' + encodeURIComponent(state.caseId)).then(function (b) {
+            state.bundle = b;
+            renderCase();
+            if (b.case.status !== 'processing') stopPolling();
+          }).catch(function () { /* transient poll failure: keep trying */ });
+        }, 2000);
+      }
+    }).catch(function (err) {
+      var app = document.getElementById('app');
+      app.textContent = '';
+      app.appendChild(h('p', { class: 'inline-message', role: 'alert' }, friendlyMessage(err, 'Could not load this case.')));
+    });
+  }
+
+  function currentDocument() {
+    if (!state.bundle) return null;
+    var docs = state.bundle.documents;
+    return docs.find(function (d) { return d.document_id === state.selectedDocumentId; }) || docs[0] || null;
+  }
+  function currentPageNumber(doc) {
+    if (!doc) return 1;
+    return state.selectedPage[doc.document_id] || 1;
+  }
+  function currentPage(doc) {
+    if (!doc || !doc.pages || !doc.pages.length) return null;
+    var n = currentPageNumber(doc);
+    return doc.pages.find(function (p) { return p.page === n; }) || doc.pages[0];
+  }
+  function pageImageSrc(doc, page) {
+    if (state.offline) return page.image;
+    return BASE + '/api/cases/' + encodeURIComponent(state.caseId) + '/pages/' + encodeURIComponent(doc.document_id) + '/' + page.page;
+  }
+  function valueById(id) {
+    return (state.bundle.values || []).find(function (v) { return v.id === id; });
+  }
+  function needsAttention(v) {
+    return v.route === 'priority_review' || v.route === 'exception' || !!v.audit_sample;
+  }
+  function pendingAttentionValues() {
+    return (state.bundle.values || []).filter(function (v) { return v.review.state === 'pending' && needsAttention(v); });
+  }
+
+  function selectValue(valueId, opts) {
+    opts = opts || {};
+    var value = valueById(valueId);
+    state.selectedValueId = valueId;
+    if (value && value.evidence && value.evidence.length) {
+      var ev = value.evidence[0];
+      state.selectedDocumentId = ev.document_id;
+      state.selectedPage[ev.document_id] = ev.page;
+    }
+    state.rightTab = 'values';
+    if (!opts.skipRender) {
+      renderCase();
+      var row = document.querySelector('[data-value-id="' + cssEscape(valueId) + '"]');
+      if (row) row.scrollIntoView({ block: 'nearest' });
+      var evBox = document.querySelector('.evidence-box');
+      if (evBox) evBox.scrollIntoView({ block: 'center', inline: 'center' });
+    }
+  }
+  function cssEscape(s) { return String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&'); }
+
+  function renderCase() {
+    if (!state.bundle) return;
+    var app = document.getElementById('app');
+    app.textContent = '';
+    var bundle = state.bundle;
+    var kase = bundle.case;
+    var locked = isLocked();
+
+    var docCount = bundle.documents.length;
+    var head = h('div', { class: 'case-head' },
+      h('div', { class: 'case-head-main' },
+        h('h1', {}, kase.ticket_id),
+        h('span', { class: 'muted' }, capitalize(kase.enrollment_type) + ' · ' + statusLabel(kase.status) + ' · ' + docCount + ' document' + (docCount === 1 ? '' : 's'))
+      )
+    );
+    if (!state.offline) {
+      app.appendChild(h('p', { class: 'breadcrumb' }, h('a', { href: '#/' }, 'Tickets'), ' › ' + kase.ticket_id));
+    }
+    app.appendChild(head);
+
+    if (state.actionError) {
+      app.appendChild(h('p', { class: 'inline-message', role: 'alert' },
+        state.actionError + ' ',
+        (function () { var b = h('button', { type: 'button', class: 'dismiss', 'aria-label': 'Dismiss message' }, '×'); b.addEventListener('click', function () { state.actionError = null; renderCase(); }); return b; })()
+      ));
+    }
+
+    var split = h('div', { class: 'case-split' });
+    split.appendChild(renderDocPane());
+    split.appendChild(renderValuesPane(locked));
+    app.appendChild(split);
+  }
+
+  function statusLabel(s) {
+    return { processing: 'Processing', review: 'In review', submitted: 'Submitted', rejected: 'Rejected', failed: 'Failed' }[s] || s;
+  }
+
+  function isLocked() {
+    if (state.offline) return true;
+    var s = state.bundle.case.status;
+    return s !== 'processing' && s !== 'review';
+  }
+
+  /* ---- left pane: documents + image ---- */
+  function renderDocPane() {
+    var pane = h('section', { class: 'card pane', id: 'doc-pane' });
+    var head = h('div', { class: 'pane-head' }, h('span', { class: 'card-title' }, 'Documents'));
+    pane.appendChild(head);
+
+    var switcher = h('div', { class: 'doc-switcher', role: 'tablist', 'aria-label': 'Documents' });
+    state.bundle.documents.forEach(function (doc) {
+      var selected = doc.document_id === state.selectedDocumentId;
+      var typeLabel = doc.document_type_label || 'Unclassified';
+      var statusText = docStatusLine(doc);
+      var tab = h('button', {
+        type: 'button', class: 'doc-pill', role: 'tab', 'aria-selected': String(selected),
+        title: doc.file_name + ' · ' + typeLabel + ' · ' + statusText,
+      },
+        h('span', { class: 'doc-pill-name' }, doc.file_name),
+        h('span', { class: 'doc-pill-meta' }, typeLabel + ' · ' + statusText)
+      );
+      tab.addEventListener('click', function () {
+        state.selectedDocumentId = doc.document_id;
+        renderCase();
+      });
+      switcher.appendChild(tab);
+    });
+    pane.appendChild(switcher);
+
+    var doc = currentDocument();
+    if (doc) pane.appendChild(renderDocBanner(doc, isLocked()));
+    var hasPageViewer = doc && doc.status !== 'skipped' && doc.status !== 'duplicate';
+    if (hasPageViewer) {
+      pane.appendChild(renderImagePaneHead(doc));
+      var wrap = h('div', { class: 'preview-wrap', id: 'image-wrap' });
+      pane.appendChild(wrap);
+      if (doc.pages && doc.pages.length > 1) pane.appendChild(renderPagerPill(doc));
+      requestAnimationFrame(renderImagePane);
+    }
+    return pane;
+  }
+
+  function renderPagerPill(doc) {
+    var n = currentPageNumber(doc);
+    var controls = h('div', { class: 'page-controls' });
+    var prev = h('button', { type: 'button', class: 'icon-button', 'aria-label': 'Previous page', disabled: n <= 1 }, icon('chevronLeft'));
+    prev.addEventListener('click', function () { state.selectedPage[doc.document_id] = n - 1; renderCase(); });
+    var next = h('button', { type: 'button', class: 'icon-button', 'aria-label': 'Next page', disabled: n >= doc.pages.length }, icon('chevronRight'));
+    next.addEventListener('click', function () { state.selectedPage[doc.document_id] = n + 1; renderCase(); });
+    controls.appendChild(prev);
+    controls.appendChild(h('span', { class: 'page-count' }, n + ' / ' + doc.pages.length));
+    controls.appendChild(next);
+    return controls;
+  }
+
+  function docStatusLine(doc) {
+    if (doc.status === 'duplicate') {
+      var original = state.bundle.documents.find(function (d) { return d.document_id === doc.duplicate_of; });
+      return 'Identical to ' + (original ? original.file_name : 'another document');
+    }
+    return DOC_STATUS_TEXT[doc.status] || doc.status;
+  }
+
+  function renderDocBanner(doc, locked) {
+    if (doc.status === 'skipped') {
+      var text = 'Not read: classified as ' + (doc.document_type_label || doc.document_type || 'unknown') + '.';
+      if (locked) return h('div', { class: 'doc-banner' }, text);
+      var btn = h('button', { type: 'button', class: 'button' }, 'Read anyway');
+      btn.addEventListener('click', function () { postAction({ action: 'reclassify', document_id: doc.document_id }); });
+      return h('div', { class: 'doc-banner' }, text, btn);
+    }
+    if (doc.status === 'duplicate') {
+      return h('div', { class: 'doc-banner' }, docStatusLine(doc) + '.');
+    }
+    if (doc.status === 'failed') {
+      return h('div', { class: 'doc-banner error-banner' }, doc.error || 'This document could not be processed.');
+    }
+    if (doc.status !== 'extracted') {
+      return h('div', { class: 'doc-banner' }, (DOC_STATUS_TEXT[doc.status] || doc.status) + '…');
+    }
+    return h('div', { hidden: true });
+  }
+
+  function renderImagePaneHead(doc) {
+    var head = h('div', { class: 'pane-head sub' });
+    var page = doc ? currentPage(doc) : null;
+    if (!doc || !page) {
+      head.appendChild(h('span', { class: 'muted small' }, doc ? 'No page image yet' : 'No document selected'));
+    } else {
+      head.appendChild(h('span', { class: 'muted small' }, doc.document_type_label || 'Unclassified'));
+    }
+    var zoomWrap = h('div', { class: 'zoom-select' });
+    var zoomSelect = h('select', { 'aria-label': 'Zoom' },
+      h('option', { value: 'fit', selected: state.zoom === 'fit' }, 'Fit page'),
+      h('option', { value: '100', selected: state.zoom === '100' }, '100%')
+    );
+    zoomSelect.addEventListener('change', function () { state.zoom = zoomSelect.value; renderImagePane(); });
+    zoomWrap.appendChild(zoomSelect);
+    head.appendChild(zoomWrap);
+    if (doc) {
+      var ocrView = renderOcrViewButton(doc);
+      if (ocrView) head.appendChild(ocrView);
+    }
+    return head;
+  }
+
+  function renderOcrViewButton(doc) {
+    if (state.offline || doc.status !== 'extracted') return null;
+    if (state.ocrViewBusyFor === doc.document_id) return h('button', { type: 'button', class: 'button ocr-view-btn', disabled: true }, 'Opening…');
+    var btn = h('button', { type: 'button', class: 'button ocr-view-btn' }, 'Open in OCR view');
+    btn.addEventListener('click', function () { openOcrView(doc); });
+    return btn;
+  }
+
+  function renderImagePane() {
+    var wrap = document.getElementById('image-wrap');
+    if (!wrap) return;
+    wrap.textContent = '';
+    var doc = currentDocument();
+    var page = doc ? currentPage(doc) : null;
+    if (!doc || !page) {
+      wrap.appendChild(h('p', { class: 'empty-note' }, 'No page image available yet.'));
+      return;
+    }
+    if (state.pickingSourceFor) {
+      var note = h('div', { class: 'picking-note' }, 'Click a region on the image to set the source. Press Esc to cancel.');
+      var cancel = h('button', { type: 'button' }, 'Cancel');
+      cancel.addEventListener('click', function () { state.pickingSourceFor = null; renderCase(); });
+      note.appendChild(cancel);
+      wrap.appendChild(note);
+    }
+
+    var availableWidth = wrap.clientWidth - 2;
+    var scale = state.zoom === 'fit' ? Math.min(1, availableWidth / page.width) : 1;
+    var dispW = Math.max(1, Math.round(page.width * scale));
+    var dispH = Math.max(1, Math.round(page.height * scale));
+
+    var stage = h('div', { class: 'page-stage', style: 'width:' + dispW + 'px;height:' + dispH + 'px' });
+    var img = h('img', { src: pageImageSrc(doc, page), alt: 'Page ' + page.page + ' of ' + doc.file_name, width: String(dispW), height: String(dispH) });
+    stage.appendChild(img);
+
+    var suppressed = {};
+    if (page.arrangement && page.arrangement.suppressed) {
+      page.arrangement.suppressed.forEach(function (s) { suppressed[s.region_id] = s; });
+    }
+    var selectedValue = state.selectedValueId ? valueById(state.selectedValueId) : null;
+    var evidenceHere = selectedValue ? (selectedValue.evidence || []).filter(function (e) { return e.document_id === doc.document_id && e.page === page.page; }) : [];
+
+    (page.regions || []).forEach(function (region) {
+      var sup = suppressed[region.id];
+      // Layout containers and other non-content suppressions are noise; only the
+      // reasons a reviewer might want to double-check are drawn, faint and dashed.
+      if (sup && sup.reason !== 'repeated_text' && sup.reason !== 'junk_speck') return;
+      var box = regionBoxStyle(region.box_px, page.width, page.height);
+      if (!box) return;
+      var div = h('div', { class: 'region-box' + (sup ? ' suppressed' : '') + (state.pickingSourceFor ? ' pickable' : ''), style: box,
+        title: regionTitle(region, sup) });
+      if (state.pickingSourceFor) {
+        div.setAttribute('tabindex', '0');
+        div.setAttribute('role', 'button');
+        div.setAttribute('aria-label', 'Set source to ' + (region.text ? region.text.slice(0, 60) : region.kind));
+        var pick = function () {
+          var value = valueById(state.pickingSourceFor);
+          postAction({ action: 'change_source', value_id: value.id, source: { document_id: doc.document_id, page: page.page, region_ids: [region.id] } });
+        };
+        div.addEventListener('click', pick);
+        div.addEventListener('keydown', function (ev) { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pick(); } });
+      }
+      stage.appendChild(div);
+    });
+
+    evidenceHere.forEach(function (e) {
+      var box = regionBoxStyle([e.box.left, e.box.top, e.box.right, e.box.bottom], page.width, page.height);
+      if (box) stage.appendChild(h('div', { class: 'region-box evidence-box', style: box }));
+    });
+
+    wrap.appendChild(stage);
+  }
+
+  function regionTitle(region, sup) {
+    var parts = [region.kind];
+    if (region.confidence != null) parts.push(Math.round(region.confidence * 100) + '%');
+    if (region.text) parts.push(region.text.slice(0, 80));
+    if (sup) parts.push('suppressed: ' + sup.reason + (sup.covered_by ? ' (merged into ' + sup.covered_by + ')' : ''));
+    return parts.join(' · ');
+  }
+
+  function regionBoxStyle(boxPx, width, height) {
+    if (!boxPx || !width || !height) return null;
+    var l = boxPx[0] / width * 100, t = boxPx[1] / height * 100;
+    var w = (boxPx[2] - boxPx[0]) / width * 100, hgt = (boxPx[3] - boxPx[1]) / height * 100;
+    return 'left:' + l + '%;top:' + t + '%;width:' + w + '%;height:' + hgt + '%';
+  }
+
+  /* ---- right pane: values / audit (audit also holds the processing-time disclosure) ---- */
+  function renderValuesPane(locked) {
+    var pane = h('section', { class: 'card pane values-pane' });
+    var head = h('div', { class: 'pane-head' });
+    var tabs = h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Case detail' });
+    [['values', 'Values'], ['audit', 'Audit']].forEach(function (t) {
+      var btn = h('button', { type: 'button', class: 'tab-btn', role: 'tab', 'aria-selected': String(state.rightTab === t[0]) }, t[1]);
+      btn.addEventListener('click', function () { state.rightTab = t[0]; renderCase(); });
+      tabs.appendChild(btn);
+    });
+    head.appendChild(tabs);
+    if (!state.offline) head.appendChild(renderPaneActions(locked));
+    pane.appendChild(head);
+
+    if (!state.offline && state.rejectingCase) pane.appendChild(renderRejectCaseBar());
+    if (!state.offline && state.submitBlocked) pane.appendChild(renderBlockedBanner());
+
+    var body = h('div', { class: 'values-body' });
+    if (state.rightTab === 'audit') body.appendChild(renderAuditTab());
+    else body.appendChild(renderValuesTab(locked));
+    pane.appendChild(body);
+
+    if (!state.offline && !locked) pane.appendChild(renderKeysHint());
+    return pane;
+  }
+
+  function renderPaneActions(locked) {
+    var wrap = h('div', { class: 'pane-actions' });
+    if (!state.rejectingCase) {
+      var submit = h('button', { type: 'button', class: 'button primary', disabled: locked }, 'Submit');
+      submit.addEventListener('click', function () { postAction({ action: 'submit' }); });
+      var rejectCase = h('button', { type: 'button', class: 'button danger', disabled: locked }, 'Reject case');
+      rejectCase.addEventListener('click', function () { state.rejectingCase = true; renderCase(); });
+      wrap.appendChild(submit);
+      wrap.appendChild(rejectCase);
+    }
+    var caseBase = BASE + '/api/cases/' + encodeURIComponent(state.caseId);
+    var downloads = h('details', { class: 'downloads' },
+      h('summary', { class: 'button' }, icon('download'), 'Download'),
+      h('div', { class: 'downloads-list' },
+        h('a', { class: 'button', href: caseBase + '/payload.json', download: true }, 'Payload JSON'),
+        h('a', { class: 'button', href: caseBase + '/audit.jsonl', download: true }, 'Audit log'),
+        h('a', { class: 'button', href: caseBase + '/bundle.zip', download: true }, 'Bundle')
+      )
+    );
+    wrap.appendChild(downloads);
+    return wrap;
+  }
+
+  function renderRejectCaseBar() {
+    var bar = h('div', { class: 'reject-case-bar' });
+    var select = h('select', { 'aria-label': 'Reject reason' });
+    REJECT_REASONS.forEach(function (r) { select.appendChild(h('option', { value: r[0] }, r[1])); });
+    var note = h('input', { type: 'text', placeholder: 'Details', 'aria-label': 'Reject case details' });
+    var confirm = h('button', { type: 'button', class: 'button danger' }, 'Confirm reject');
+    var cancel = h('button', { type: 'button', class: 'button' }, 'Cancel');
+    confirm.addEventListener('click', function () {
+      if (!note.value.trim()) { note.focus(); return; }
+      postAction({ action: 'reject_case', reason_code: select.value, reason: note.value.trim() });
+    });
+    cancel.addEventListener('click', function () { state.rejectingCase = false; renderCase(); });
+    bar.appendChild(select); bar.appendChild(note); bar.appendChild(confirm); bar.appendChild(cancel);
+    return bar;
+  }
+
+  function renderBlockedBanner() {
+    var banner = h('div', { class: 'blocked-banner' }, state.submitBlocked.message || 'Submit is blocked until these are resolved.');
+    var list = h('ul', {});
+    (state.submitBlocked.blocked || []).forEach(function (id) {
+      var value = valueById(id);
+      var btn = h('button', { type: 'button', class: 'link-button' }, value ? value.label : id);
+      btn.addEventListener('click', function () { selectValue(id); });
+      list.appendChild(h('li', {}, btn));
+    });
+    banner.appendChild(list);
+    return banner;
+  }
+
+  function renderKeysHint() {
+    return h('p', { class: 'pane-hint' },
+      'Keys: ', h('kbd', {}, 'J'), '/', h('kbd', {}, 'K'), ' move · ', h('kbd', {}, 'Enter'), ' approve · ',
+      h('kbd', {}, 'E'), ' edit · ', h('kbd', {}, 'S'), ' source · ', h('kbd', {}, 'R'), ' reject · ', h('kbd', {}, 'Esc'), ' cancel'
+    );
+  }
+
+  function ticketReasonText(v) {
+    if (v.review.state === 'rejected') return v.label + ': rejected' + (v.review.reason ? ' (' + v.review.reason + ')' : '');
+    if (v.problems && v.problems[0]) return v.problems[0];
+    if (v.audit_sample) return v.label + ': picked for a random spot-check';
+    return v.label + ' needs a second look';
+  }
+
+  // One merged list of everything needing attention: backend exceptions (which can be
+  // resolved) and values routed for review (which can be selected and edited). An
+  // exception and a value that name the same field (exception.value_id == value.id)
+  // describe one problem, so only the value's more specific sentence is shown for it.
+  function attentionItems() {
+    var docNames = {};
+    (state.bundle.documents || []).forEach(function (d) { docNames[d.document_id] = d.file_name; });
+    function cleanMessage(message) {
+      var expanded = message.replace(/\bIdentical to ([A-Za-z0-9_-]+)/, function (full, id) {
+        return docNames[id] ? 'Identical to ' + docNames[id] : full;
+      });
+      // "License expiration expires within 90 days" reads oddly when the label
+      // already says "expiration"; collapse the repeated word for display only.
+      return expanded.replace(/\bexpiration expires\b/i, 'expires');
+    }
+    var usedValueIds = {};
+    var items = [];
+    (state.bundle.exceptions || []).filter(function (e) { return e.state === 'open' && e.severity !== 'info'; })
+      .sort(function (a, b) { return severityRank(a.severity) - severityRank(b.severity); })
+      .forEach(function (exc) {
+        var value = exc.value_id ? valueById(exc.value_id) : null;
+        var excMessage = cleanMessage(exc.message);
+        // The exception's own sentence is usually the clearer one (it names the
+        // field); only prefer the value's problems[0] when it is strictly more
+        // detailed (e.g. it quotes the conflicting readings), so a plain value
+        // fallback like "needs a second look" never replaces a specific exception.
+        var message = excMessage;
+        if (value) {
+          if (value.review.state === 'rejected') message = ticketReasonText(value);
+          else if (value.problems && value.problems[0] && value.problems[0].length > excMessage.length) message = value.problems[0];
+        }
+        items.push({ severity: exc.severity, message: message, exception: exc, value: value });
+        if (value) usedValueIds[value.id] = true;
+      });
+    pendingAttentionValues().forEach(function (v) {
+      if (usedValueIds[v.id]) return;
+      items.push({ severity: v.route === 'exception' ? 'error' : 'warning', message: ticketReasonText(v), exception: null, value: v });
+    });
+    var notes = (state.bundle.exceptions || []).filter(function (e) { return e.state === 'open' && e.severity === 'info'; });
+    return { items: items, notes: notes };
+  }
+
+  function renderAttentionCard(locked) {
+    var data = attentionItems();
+    if (!data.items.length) {
+      return h('div', { class: 'attention-card attention-ok' }, h('p', { class: 'attention-headline' }, 'Nothing needs you. Submit when ready.'));
+    }
+    var wrap = h('div', { class: 'attention-card' });
+    wrap.appendChild(h('p', { class: 'attention-headline' }, data.items.length + (data.items.length === 1 ? ' item needs' : ' items need') + ' you'));
+    var list = h('div', { class: 'attention-list' });
+    data.items.forEach(function (item) { list.appendChild(renderAttentionItem(item, locked)); });
+    wrap.appendChild(list);
+    if (data.notes.length) {
+      var details = h('details', { class: 'attention-notes' }, h('summary', {}, data.notes.length + ' note' + (data.notes.length === 1 ? '' : 's')));
+      data.notes.forEach(function (exc) { details.appendChild(h('p', { class: 'attention-note' }, exc.message)); });
+      wrap.appendChild(details);
+    }
+    return wrap;
+  }
+
+  function renderAttentionItem(item, locked) {
+    var wrap = h('div', { class: 'attention-item severity-' + item.severity });
+    var row = h('div', { class: 'attention-row' });
+    row.appendChild(h('span', { class: 'attention-marker' }, icon('alert')));
+    if (item.value) {
+      var btn = h('button', { type: 'button', class: 'attention-text' }, item.message);
+      btn.addEventListener('click', function () { selectValue(item.value.id); });
+      row.appendChild(btn);
+    } else {
+      row.appendChild(h('span', { class: 'attention-text' }, item.message));
+    }
+    var exc = item.exception;
+    var blocksSubmit = exc && exc.kind === 'missing_document' && exc.severity === 'error';
+    if (!locked && blocksSubmit && state.resolvingExceptionId !== exc.id) {
+      var resolveBtn = h('button', { type: 'button', class: 'link-button attention-resolve-btn' }, 'Resolve');
+      resolveBtn.addEventListener('click', function () { state.resolvingExceptionId = exc.id; renderCase(); });
+      row.appendChild(resolveBtn);
+    }
+    if (!locked && exc && exc.kind === 'group_not_enrolled') {
+      var startGroupBtn = h('button', { type: 'button', class: 'button primary attention-resolve-btn', disabled: state.groupTicketBusy },
+        state.groupTicketBusy ? 'Starting…' : 'Start group enrollment');
+      startGroupBtn.addEventListener('click', startGroupEnrollment);
+      row.appendChild(startGroupBtn);
+    }
+    wrap.appendChild(row);
+    if (!locked && blocksSubmit && state.resolvingExceptionId === exc.id) {
+      var reasonInput = h('input', { type: 'text', placeholder: 'Reason', 'aria-label': 'Resolution reason' });
+      var confirm = h('button', { type: 'button', class: 'button primary' }, 'Confirm');
+      var cancel = h('button', { type: 'button', class: 'button' }, 'Cancel');
+      confirm.addEventListener('click', function () {
+        if (!reasonInput.value.trim()) { reasonInput.focus(); return; }
+        postAction({ action: 'resolve_exception', value_id: exc.id, reason: reasonInput.value.trim() });
+      });
+      cancel.addEventListener('click', function () { state.resolvingExceptionId = null; renderCase(); });
+      wrap.appendChild(h('div', { class: 'attention-resolve-row' }, reasonInput, confirm, cancel));
+    }
+    return wrap;
+  }
+
+  function renderValuesTab(locked) {
+    var frag = document.createDocumentFragment();
+    frag.appendChild(renderAttentionCard(locked));
+
+    var attention = pendingAttentionValues();
+    if (attention.length) {
+      var needsReview = h('details', { class: 'value-group', open: true }, h('summary', {}, 'Needs review'));
+      attention.forEach(function (v) { needsReview.appendChild(renderValueRow(v, locked)); });
+      frag.appendChild(needsReview);
+    }
+
+    var values = state.bundle.values || [];
+    var groups = { required: [], load_if_provided: [], defaulted: [], other: [] };
+    values.forEach(function (v) {
+      if (v.category === 'required') groups.required.push(v);
+      else if (v.category === 'load_if_provided') groups.load_if_provided.push(v);
+      else if (v.category === 'defaulted') groups.defaulted.push(v);
+      else groups.other.push(v);
+    });
+    function byAttentionFirst(items) {
+      return items.slice().sort(function (a, b) { return (needsAttention(b) ? 1 : 0) - (needsAttention(a) ? 1 : 0); });
+    }
+    CATEGORY_GROUPS.forEach(function (g) {
+      var items = groups[g[0]];
+      if (!items.length) return;
+      var open = g[0] === 'required' || items.some(needsAttention);
+      var section = h('details', { class: 'value-group', open: open }, h('summary', {}, g[1]));
+      byAttentionFirst(items).forEach(function (v) { section.appendChild(renderValueRow(v, locked)); });
+      frag.appendChild(section);
+    });
+    if (groups.other.length) {
+      var otherSection = h('details', { class: 'value-group', open: groups.other.some(needsAttention) }, h('summary', {}, 'Other details'));
+      byAttentionFirst(groups.other).forEach(function (v) { otherSection.appendChild(renderValueRow(v, locked)); });
+      frag.appendChild(otherSection);
+    }
+
+    frag.appendChild(renderAddAttribute(locked));
+    return frag;
+  }
+
+  function severityRank(s) { return { error: 0, warning: 1, info: 2 }[s]; }
+
+  // Three states only, never a percentage on the row: the calibrated router decides the
+  // chip, a reviewer's own decision always wins, and a defaulted value never reads as verified.
+  function valueStatus(value) {
+    if (value.source === 'default') return 'defaulted';
+    if (value.review.state === 'approved' || value.review.state === 'edited') return 'verified';
+    if (value.review.state === 'rejected') return 'missing';
+    if (value.route === 'exception') return 'missing';
+    if (value.route === 'priority_review' || value.audit_sample) return 'check';
+    return 'verified';
+  }
+
+  function statusChip(value) {
+    var meta = STATUS_META[valueStatus(value)];
+    return h('span', { class: 'chip ' + meta.chipClass }, icon(meta.icon), meta.label);
+  }
+
+  // Confidence and its components, in plain words, for the Details disclosure only.
+  function componentSentences(value) {
+    var c = value.components || {};
+    var lines = [];
+    if (value.confidence != null) lines.push('Overall confidence ' + Math.round(value.confidence * 100) + '%');
+    if (c.ocr != null) lines.push('Read by OCR at ' + c.ocr.toFixed(2));
+    if (c.grounding != null) lines.push(c.grounding >= 0.99 ? 'Found in the cited text' : ('Not clearly found in the cited text (' + Math.round(c.grounding * 100) + '%)'));
+    if (c.validator === 'pass') lines.push('Check digit passes');
+    else if (c.validator === 'fail') lines.push('Check digit fails');
+    if (c.llm != null) lines.push('LLM certainty ' + c.llm.toFixed(2));
+    if (c.verifier != null) lines.push('Verifier confidence ' + c.verifier.toFixed(2));
+    if (c.agreement != null && c.agreement > 1) lines.push('Seen on ' + c.agreement + ' documents');
+    return lines;
+  }
+
+  function renderDetailsDisclosure(value) {
+    var lines = componentSentences(value);
+    if (!lines.length) return null;
+    var list = h('ul', { class: 'value-details-list' });
+    lines.forEach(function (line) { list.appendChild(h('li', {}, line)); });
+    return h('details', { class: 'value-details' }, h('summary', {}, 'Details'), list);
+  }
+
+  function documentLabel(documentId) {
+    var doc = (state.bundle.documents || []).find(function (d) { return d.document_id === documentId; });
+    if (!doc) return 'Document';
+    return doc.document_type_label || doc.file_name || 'Document';
+  }
+
+  // Unique document+page sources, in evidence order, as "Label · pN" (+N more).
+  function sourceLabels(evidence) {
+    var seen = [], labels = [];
+    (evidence || []).forEach(function (e) {
+      var key = e.document_id + '#' + e.page;
+      if (seen.indexOf(key) !== -1) return;
+      seen.push(key);
+      labels.push(documentLabel(e.document_id) + ' · p' + e.page);
+    });
+    return labels;
+  }
+
+  function renderSourceLine(value) {
+    var labels = sourceLabels(value.evidence);
+    if (!labels.length) return null;
+    var text = labels[0] + (labels.length > 1 ? ' +' + (labels.length - 1) : '');
+    return h('p', { class: 'value-source' }, text);
+  }
+
+  function findLastEdit(valueId) {
+    var events = (state.bundle.audit || []).filter(function (e) { return e.value_id === valueId && e.action === 'edit'; });
+    return events.length ? events[events.length - 1] : null;
+  }
+
+  // What a reviewer needs to read on the row: a defaulted note, an edit/reject
+  // explanation, the backend's one-sentence problem, or (when nothing is wrong) the source.
+  function renderStatusLine(value, status) {
+    if (status === 'defaulted') {
+      return h('p', { class: 'value-reason value-default-note' }, 'Defaulted: not found in any document');
+    }
+    if (value.review.state === 'edited') {
+      var editedBy = value.review.by || 'reviewer';
+      return h('p', { class: 'value-reason' }, 'Edited by ' + editedBy + (value.review.reason ? ': ' + value.review.reason : '.'));
+    }
+    if (value.review.state === 'rejected') {
+      var rejectedBy = value.review.by || 'reviewer';
+      return h('p', { class: 'value-reason value-reason-bad' }, 'Rejected by ' + rejectedBy + (value.review.reason ? ': ' + value.review.reason : '.'));
+    }
+    if (status === 'check' || status === 'missing') {
+      var reason = (value.problems && value.problems[0]) ||
+        (value.audit_sample ? 'Picked for a random spot-check.' : 'Needs a second look.');
+      return h('p', { class: 'value-reason' }, reason);
+    }
+    return renderSourceLine(value) || h('p', { class: 'value-reason' }, 'No source recorded.');
+  }
+
+  // Conflicting readings across documents: current source first, then each alternative
+  // with a one-click "Use this" that re-points the value at that document's evidence.
+  function renderConflictComparison(value, locked) {
+    if (!value.alternatives || !value.alternatives.length) return null;
+    var wrap = h('div', { class: 'value-conflict' });
+    wrap.appendChild(h('p', { class: 'value-conflict-label' }, 'Documents disagree:'));
+    var list = h('ul', { class: 'value-conflict-list' });
+    if (value.evidence && value.evidence.length) {
+      var currentEv = value.evidence[0];
+      list.appendChild(h('li', { class: 'value-conflict-row current' },
+        h('span', { class: 'value-conflict-doc' }, documentLabel(currentEv.document_id) + ' · p' + currentEv.page),
+        h('span', { class: 'value-conflict-val' }, value.raw_value || value.value || '—'),
+        h('span', { class: 'tag' }, 'Current')
+      ));
+    }
+    value.alternatives.forEach(function (alt) {
+      var ev = alt.evidence && alt.evidence[0];
+      var row = h('li', { class: 'value-conflict-row' },
+        h('span', { class: 'value-conflict-doc' }, ev ? (documentLabel(ev.document_id) + ' · p' + ev.page) : 'Unknown source'),
+        h('span', { class: 'value-conflict-val' }, alt.value)
+      );
+      if (ev && !locked) {
+        var useBtn = h('button', { type: 'button', class: 'button' }, 'Use this');
+        useBtn.addEventListener('click', function () {
+          postAction({ action: 'change_source', value_id: value.id, source: { document_id: ev.document_id, page: ev.page, region_ids: ev.region_ids || [] } });
+        });
+        row.appendChild(useBtn);
+      }
+      list.appendChild(row);
+    });
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  function displayValueText(value) {
+    if (value.parts) {
+      var order = ['line1', 'line2', 'city', 'state', 'zip'];
+      var line = order.map(function (k) { return value.parts[k]; }).filter(Boolean).join(', ');
+      return line || value.value || '';
+    }
+    return value.value;
+  }
+
+  function renderValueRow(value, locked) {
+    var selected = state.selectedValueId === value.id;
+    var status = valueStatus(value);
+    var row = h('div', { class: 'value-row' + (selected ? ' selected' : ''), 'data-value-id': value.id });
+    var main = h('button', { type: 'button', class: 'value-main' });
+    main.addEventListener('click', function () { selectValue(value.id); });
+    main.appendChild(h('span', { class: 'value-label-col' }, h('span', { class: 'value-label' }, value.label), value.role ? h('span', { class: 'value-role' }, value.role) : null));
+    var text = displayValueText(value);
+    main.appendChild(h('span', { class: 'value-text' + (text ? '' : ' empty') }, text || 'Not captured'));
+    var chips = h('span', { class: 'value-chips' }, statusChip(value));
+    if (value.audit_sample) chips.appendChild(h('span', { class: 'tag' }, 'Audit'));
+    main.appendChild(chips);
+    row.appendChild(main);
+
+    if (value.parts && value.parts.phone) row.appendChild(h('span', { class: 'value-raw' }, 'Phone: ' + value.parts.phone));
+    if (value.raw_value && value.raw_value !== value.value && !value.parts) row.appendChild(h('span', { class: 'value-raw' }, 'Printed: ' + value.raw_value));
+
+    if (value.review.state === 'edited') {
+      var lastEdit = findLastEdit(value.id);
+      var original = lastEdit && lastEdit.before ? lastEdit.before.value : null;
+      if (original != null && original !== value.value) {
+        row.appendChild(h('p', { class: 'value-edit-diff' }, h('s', {}, original), ' → ', value.value || ''));
+      }
+    }
+
+    row.appendChild(renderStatusLine(value, status));
+
+    if (selected) {
+      var details = renderDetailsDisclosure(value);
+      if (details) row.appendChild(details);
+      var conflict = renderConflictComparison(value, locked);
+      if (conflict) row.appendChild(conflict);
+    }
+
+    if (!locked && selected) {
+      if (state.editingValueId === value.id) {
+        row.appendChild(renderEditRow(value));
+      } else if (state.rejectingValueId === value.id) {
+        row.appendChild(renderRejectRow(value));
+      } else if (state.pickingSourceFor === value.id) {
+        row.appendChild(h('div', { class: 'picking-row' }, h('span', { class: 'muted' }, 'Pick a region on the image, or press Esc.')));
+      } else {
+        var actions = h('div', { class: 'value-actions' });
+        var approve = h('button', { type: 'button', class: 'button' }, icon('check'), 'Approve');
+        approve.addEventListener('click', function () { postAction({ action: 'approve', value_id: value.id }); });
+        var edit = h('button', { type: 'button', class: 'button' }, icon('edit'), 'Edit');
+        edit.addEventListener('click', function () { state.editingValueId = value.id; renderCase(); });
+        var changeSrc = h('button', { type: 'button', class: 'button' }, icon('target'), 'Change source');
+        changeSrc.addEventListener('click', function () { state.pickingSourceFor = value.id; selectValue(value.id); });
+        var reject = h('button', { type: 'button', class: 'button' }, icon('x'), 'Reject');
+        reject.addEventListener('click', function () { state.rejectingValueId = value.id; renderCase(); });
+        actions.appendChild(approve); actions.appendChild(edit); actions.appendChild(changeSrc); actions.appendChild(reject);
+        row.appendChild(actions);
+      }
+    }
+    return row;
+  }
+  function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+  function renderEditRow(value) {
+    var row = h('div', { class: 'edit-row' });
+    var input = h('input', { type: 'text', value: value.value || '', 'aria-label': 'New value for ' + value.label });
+    var save = h('button', { type: 'button', class: 'button primary' }, 'Save');
+    var cancel = h('button', { type: 'button', class: 'button' }, 'Cancel');
+    save.addEventListener('click', function () { postAction({ action: 'edit', value_id: value.id, value: input.value }); });
+    cancel.addEventListener('click', function () { state.editingValueId = null; renderCase(); });
+    row.appendChild(input); row.appendChild(save); row.appendChild(cancel);
+    return row;
+  }
+
+  function renderRejectRow(value) {
+    var row = h('div', { class: 'reject-row' });
+    var select = h('select', { 'aria-label': 'Reject reason' });
+    REJECT_REASONS.forEach(function (r) { select.appendChild(h('option', { value: r[0] }, r[1])); });
+    var note = h('input', { type: 'text', placeholder: 'Details', 'aria-label': 'Reject details' });
+    var confirm = h('button', { type: 'button', class: 'button danger' }, 'Confirm');
+    var cancel = h('button', { type: 'button', class: 'button' }, 'Cancel');
+    confirm.addEventListener('click', function () {
+      if (!note.value.trim()) { note.focus(); return; }
+      postAction({ action: 'reject', value_id: value.id, reason_code: select.value, reason: note.value.trim() });
+    });
+    cancel.addEventListener('click', function () { state.rejectingValueId = null; renderCase(); });
+    row.appendChild(select); row.appendChild(note); row.appendChild(confirm); row.appendChild(cancel);
+    return row;
+  }
+
+  function renderAddAttribute(locked) {
+    if (locked) return document.createDocumentFragment();
+    if (!state.addingAttribute) {
+      var open = h('button', { type: 'button', class: 'button' }, icon('plus'), 'Add attribute');
+      open.addEventListener('click', function () { state.addingAttribute = true; renderCase(); });
+      return h('div', {}, open);
+    }
+    var wrap = h('div', { class: 'add-attribute' });
+    var labelInput = h('input', { type: 'text', placeholder: 'Label', 'aria-label': 'New attribute label' });
+    var valueInput = h('input', { type: 'text', placeholder: 'Value', 'aria-label': 'New attribute value' });
+    var roleInput = h('input', { type: 'text', placeholder: 'Role (optional)', 'aria-label': 'New attribute role' });
+    var add = h('button', { type: 'button', class: 'button primary' }, 'Add');
+    var cancel = h('button', { type: 'button', class: 'button' }, 'Cancel');
+    add.addEventListener('click', function () {
+      if (!labelInput.value.trim() || !valueInput.value.trim()) return;
+      postAction({ action: 'add', label: labelInput.value.trim(), value: valueInput.value.trim(), role: roleInput.value.trim() || undefined });
+    });
+    cancel.addEventListener('click', function () { state.addingAttribute = false; renderCase(); });
+    wrap.appendChild(h('div', { class: 'fields' }, labelInput, valueInput, roleInput, add, cancel));
+    return wrap;
+  }
+
+  // Automated pipeline steps, as opposed to something a reviewer did; collapsed by
+  // default so the audit tab reads as a reviewer's history, not a processing log.
+  var SYSTEM_AUDIT_ACTIONS = { intake: true, classify: true, ocr: true, extract: true, processed: true };
+  var AUDIT_ACTION_LABELS = {
+    approve: 'Approved', edit: 'Edited', reject: 'Rejected', add: 'Added attribute',
+    resolve_exception: 'Resolved exception', submit: 'Submitted', reject_case: 'Rejected case',
+    change_source: 'Changed source', reclassify: 'Reclassified document',
+    intake: 'Intake', classify: 'Classified', ocr: 'OCR', extract: 'Extracted', processed: 'Processed',
+  };
+  function auditActionLabel(action) { return AUDIT_ACTION_LABELS[action] || action; }
+
+  // Only what a person needs from an event: the field's value (or the review decision),
+  // never the stored record behind it. The full record stays in the audit download.
+  function auditDisplay(ev, side) {
+    if (side == null) return '';
+    if (typeof side !== 'object') return String(side);
+    if (ev.action === 'bulk_approve') return side.value_ids ? side.value_ids.length + ' routine values approved' : '';
+    if (ev.action === 'submit') return 'Sent downstream';
+    if ('value' in side) {
+      var shown = side.value == null || side.value === '' ? 'empty' : String(side.value);
+      if (ev.action === 'approve' || ev.action === 'reject') {
+        return side.review && side.review.state !== 'pending' ? shown + ' (' + side.review.state + ')' : shown;
+      }
+      return shown;
+    }
+    if ('state' in side && 'message' in side) return side.message + ' (' + side.state + ')';
+    if ('status' in side) return side.status;
+    if ('reason' in side) return side.reason;
+    return '';
+  }
+
+  function auditTable(events) {
+    var table = h('table', { class: 'audit-table' });
+    table.appendChild(h('thead', {}, h('tr', {},
+      h('th', {}, 'Time'), h('th', {}, 'Who'), h('th', {}, 'What'), h('th', {}, 'Field'), h('th', {}, 'Before → after'), h('th', {}, 'Reason'))));
+    var tbody = h('tbody', {});
+    events.forEach(function (ev) {
+      var value = ev.value_id ? valueById(ev.value_id) : null;
+      var before = auditDisplay(ev, ev.before);
+      var after = auditDisplay(ev, ev.after);
+      tbody.appendChild(h('tr', {},
+        h('td', {}, formatDate(ev.ts)),
+        h('td', {}, ev.actor),
+        h('td', {}, auditActionLabel(ev.action)),
+        h('td', {}, value ? value.label : (ev.value_id || '—')),
+        h('td', {}, before + (before || after ? ' → ' : '') + after),
+        h('td', {}, ev.reason || '—')
+      ));
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
+  function renderAuditTab() {
+    var frag = document.createDocumentFragment();
+    var events = state.bundle.audit || [];
+    var humanEvents = events.filter(function (ev) { return !SYSTEM_AUDIT_ACTIONS[ev.action]; });
+    var systemEvents = events.filter(function (ev) { return SYSTEM_AUDIT_ACTIONS[ev.action]; });
+
+    if (humanEvents.length) frag.appendChild(auditTable(humanEvents));
+    else frag.appendChild(h('p', { class: 'empty-note' }, 'No reviewer actions yet.'));
+
+    if (systemEvents.length) {
+      frag.appendChild(h('details', { class: 'audit-system-group' },
+        h('summary', {}, 'System steps (' + systemEvents.length + ')'),
+        auditTable(systemEvents)
+      ));
+    }
+
+    var processingTime = renderProcessingTimeDisclosure();
+    if (processingTime) frag.appendChild(processingTime);
+    return frag;
+  }
+
+  // Render, classify, OCR and extract seconds per document only: no ocr.* sub-steps
+  // and no model or engine names, collapsed since it is a debugging detail, not a review task.
+  function renderProcessingTimeDisclosure() {
+    var docs = (state.bundle.documents || []).filter(function (doc) {
+      return doc.timings && STAGE_CHART_KEYS.some(function (key) { return doc.timings[key] != null; });
+    });
+    if (!docs.length) return null;
+    var details = h('details', { class: 'timing-disclosure' }, h('summary', {}, 'Processing time'));
+    docs.forEach(function (doc) {
+      var stages = STAGE_CHART_KEYS.filter(function (key) { return doc.timings[key] != null; });
+      var max = Math.max.apply(null, stages.map(function (s) { return doc.timings[s]; }));
+      var block = h('div', { class: 'timing-doc' }, h('h4', {}, doc.file_name));
+      stages.forEach(function (s) {
+        var seconds = doc.timings[s];
+        var pct = max > 0 ? (seconds / max * 100) : 0;
+        block.appendChild(h('div', { class: 'timing-bar-row' },
+          h('span', {}, STAGE_CHART_LABELS[s]),
+          h('div', { class: 'timing-bar-track' }, h('div', { class: 'timing-bar-fill', style: 'width:' + pct + '%' })),
+          h('span', {}, seconds.toFixed(2) + 's')
+        ));
+      });
+      details.appendChild(block);
+    });
+    return details;
+  }
+
+  /* ---- footer ---- */
+  /* ---------- keyboard: J/K move, Enter approve, E edit, S source, R reject, Esc cancel ---------- */
+  function moveSelection(list, dir) {
+    var ids = list.map(function (v) { return v.id; });
+    var idx = ids.indexOf(state.selectedValueId);
+    var nextIdx = idx === -1 ? (dir > 0 ? 0 : ids.length - 1) : (idx + dir + ids.length) % ids.length;
+    selectValue(ids[nextIdx]);
+  }
+
+  document.addEventListener('keydown', function (ev) {
+    var tag = (ev.target && ev.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+    if (!state.bundle) return;
+    if (ev.key === 'Escape') {
+      if (state.pickingSourceFor || state.editingValueId || state.rejectingValueId) {
+        state.pickingSourceFor = null; state.editingValueId = null; state.rejectingValueId = null;
+        renderCase();
+      }
+      return;
+    }
+    if (state.offline || isLocked()) return;
+    var attention = pendingAttentionValues();
+    if (!attention.length) return;
+    if (ev.key === 'j' || ev.key === 'J') { ev.preventDefault(); moveSelection(attention, 1); return; }
+    if (ev.key === 'k' || ev.key === 'K') { ev.preventDefault(); moveSelection(attention, -1); return; }
+    var value = state.selectedValueId ? valueById(state.selectedValueId) : null;
+    if (!value || !attention.some(function (v) { return v.id === value.id; })) return;
+    if (state.editingValueId || state.rejectingValueId || state.pickingSourceFor) return;
+    if (ev.key === 'Enter') { ev.preventDefault(); postAction({ action: 'approve', value_id: value.id }); }
+    else if (ev.key === 'e' || ev.key === 'E') { ev.preventDefault(); state.editingValueId = value.id; renderCase(); }
+    else if (ev.key === 's' || ev.key === 'S') { ev.preventDefault(); state.pickingSourceFor = value.id; selectValue(value.id); }
+    else if (ev.key === 'r' || ev.key === 'R') { ev.preventDefault(); state.rejectingValueId = value.id; renderCase(); }
+  });
+
+  /* ================= OFFLINE BUNDLE ================= */
+  function renderOfflineCase() {
+    state.caseId = (window.ENROLLMENT_BUNDLE.case || {}).case_id || null;
+    state.bundle = window.ENROLLMENT_BUNDLE;
+    state.selectedDocumentId = state.bundle.documents.length ? state.bundle.documents[0].document_id : null;
+    renderCase();
+  }
+
+  /* ================= METRICS ================= */
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  function svg(tag, attrs) {
+    var el = document.createElementNS(SVG_NS, tag);
+    Object.keys(attrs || {}).forEach(function (k) { el.setAttribute(k, attrs[k]); });
+    return el;
+  }
+
+  function renderMetrics() {
+    var app = document.getElementById('app');
+    app.textContent = '';
+    app.appendChild(renderTopTabs('metrics'));
+    app.appendChild(h('p', { class: 'empty-note' }, 'Loading metrics…'));
+    apiGet('/api/metrics').then(function (m) {
+      app.textContent = '';
+      app.appendChild(renderTopTabs('metrics'));
+      var kpis = h('div', { class: 'kpi-grid' },
+        kpiTile('Cases', m.cases),
+        kpiTile('Documents', m.documents),
+        kpiTile('Pages', m.pages),
+        kpiTile('Exception rate', pct(m.exception_rate), exceptionRateNote(m)),
+        kpiTile('Manual-touch rate', pct(m.manual_touch_rate), manualTouchNote(m)),
+        kpiTile('Field accuracy', pct(m.field_accuracy)),
+        kpiTile('Audit accuracy', pct(m.audit_accuracy))
+      );
+      app.appendChild(kpis);
+      var routesNote = routesSummarySentence(m.routes || {});
+      if (routesNote) app.appendChild(h('p', { class: 'metrics-summary' }, routesNote));
+      var grid = h('div', { class: 'chart-grid' });
+      grid.appendChild(confidenceHistogramChart(m.confidence_histogram || []));
+      grid.appendChild(perCaseLineChart(m.by_case || []));
+      grid.appendChild(routesChart(m.routes || {}));
+      grid.appendChild(stageChart(m.stage_seconds || {}));
+      app.appendChild(grid);
+    }).catch(function (err) {
+      app.textContent = '';
+      app.appendChild(renderTopTabs('metrics'));
+      app.appendChild(h('p', { class: 'inline-message', role: 'alert' }, friendlyMessage(err, 'Could not load metrics.')));
+    });
+  }
+
+  function kpiTile(label, value, note) {
+    var tile = h('div', { class: 'kpi-tile' }, h('span', { class: 'kpi-label' }, label), h('span', { class: 'kpi-value' }, String(value == null ? '—' : value)));
+    if (note) tile.appendChild(h('span', { class: 'kpi-note' }, note));
+    return tile;
+  }
+  function pct(x) { return x == null ? '—' : (Math.round(x * 1000) / 10) + '%'; }
+
+  // Natural-frequency framing (counts, not just percentages) from the exact totals the API gives us.
+  function exceptionRateNote(m) {
+    if (m.exception_rate == null || !m.cases) return null;
+    return Math.round(m.exception_rate * m.cases) + ' of ' + m.cases + ' tickets have an open exception.';
+  }
+  function manualTouchNote(m) {
+    var cases = m.by_case || [];
+    var totalValues = cases.reduce(function (sum, c) { return sum + (c.values || 0); }, 0);
+    var totalTouches = cases.reduce(function (sum, c) { return sum + (c.touches || 0); }, 0);
+    if (!totalValues) return null;
+    return totalTouches + ' of ' + totalValues + ' values needed a manual edit.';
+  }
+  function routesSummarySentence(routes) {
+    var quick = routes.quick_verify || 0, priority = routes.priority_review || 0, exception = routes.exception || 0;
+    var total = quick + priority + exception;
+    if (!total) return null;
+    return quick + ' of ' + total + ' values were verified automatically; ' + priority + ' needed a quick check and ' + exception + ' could not be found.';
+  }
+
+  function chartCard(title) {
+    var card = h('div', { class: 'chart-card' });
+    card.appendChild(h('h3', {}, title));
+    return card;
+  }
+
+  function confidenceHistogramChart(counts) {
+    var card = chartCard('Confidence distribution');
+    var w = 380, h2 = 180, pad = 26;
+    var max = Math.max(1, Math.max.apply(null, counts.length ? counts : [0]));
+    var barW = (w - pad * 2) / Math.max(counts.length, 1);
+    // Label every other bucket once there are more than a handful, so adjacent
+    // axis labels never collide regardless of the card's rendered width.
+    var labelEvery = counts.length > 6 ? 2 : 1;
+    var s = svg('svg', { viewBox: '0 0 ' + w + ' ' + h2, role: 'img', 'aria-hidden': 'true' });
+    counts.forEach(function (c, i) {
+      var bh = (h2 - pad * 2) * (c / max);
+      var x = pad + i * barW;
+      var y = h2 - pad - bh;
+      s.appendChild(svg('rect', { x: x + 1, y: y, width: Math.max(barW - 2, 1), height: Math.max(bh, 0), fill: 'var(--accent)' }));
+      if (c > 0) {
+        var countLabel = svg('text', { x: x + barW / 2, y: Math.max(y - 4, 10), 'text-anchor': 'middle', class: 'chart-axis-label' });
+        countLabel.textContent = String(c);
+        s.appendChild(countLabel);
+      }
+      if (i % labelEvery !== 0) return;
+      var label = svg('text', { x: x + barW / 2, y: h2 - pad + 12, 'text-anchor': 'middle', class: 'chart-axis-label' });
+      label.textContent = (i * 10) + '–' + ((i + 1) * 10);
+      s.appendChild(label);
+    });
+    card.appendChild(s);
+    var total = counts.reduce(function (a, b) { return a + b; }, 0);
+    var best = counts.indexOf(Math.max.apply(null, counts.length ? counts : [0]));
+    card.appendChild(h('p', { class: 'chart-summary' }, total ? ('10 buckets across ' + total + ' values; most fall in the ' + (best * 10) + '–' + ((best + 1) * 10) + '% range (' + counts[best] + ' values).') : 'No confidence data yet.'));
+    return card;
+  }
+
+  // A legend row of colour swatches + text: colour is never the only signal (the
+  // dashed-line swatch doubles the touches series' own stroke pattern).
+  function chartLegend(entries) {
+    var row = h('div', { class: 'chart-legend' });
+    entries.forEach(function (e) {
+      var swatch = h('span', { class: 'chart-legend-swatch' + (e.dashed ? ' dashed' : '') });
+      swatch.style.background = e.dashed ? 'none' : e.color;
+      swatch.style.color = e.color;
+      row.appendChild(h('span', { class: 'chart-legend-item' }, swatch, e.label));
+    });
+    return row;
+  }
+
+  // A small chart with its own y-axis (min/max labelled) and point markers: used twice,
+  // once per series, so two differently-scaled series never collapse onto one line.
+  function miniLineChart(title, series, color) {
+    var w = 380, h2 = 72, pad = 10, leftPad = 30;
+    var max = Math.max.apply(null, series), min = Math.min.apply(null, series);
+    var n = series.length;
+    var stepX = n > 1 ? (w - leftPad - pad) / (n - 1) : 0;
+    function yFor(v) { return max === min ? h2 / 2 : (h2 - pad - (v - min) / (max - min) * (h2 - pad * 2)); }
+    var s = svg('svg', { class: 'mini-line-svg', viewBox: '0 0 ' + w + ' ' + h2, role: 'img', 'aria-hidden': 'true' });
+    var d = series.map(function (v, i) { return (i === 0 ? 'M' : 'L') + (leftPad + i * stepX) + ',' + yFor(v); }).join(' ');
+    s.appendChild(svg('path', { d: d, fill: 'none', stroke: color, 'stroke-width': '2.5' }));
+    series.forEach(function (v, i) { s.appendChild(svg('circle', { cx: leftPad + i * stepX, cy: yFor(v), r: 2.6, fill: color })); });
+    var maxLabel = svg('text', { x: 0, y: pad + 3, class: 'chart-axis-label' }); maxLabel.textContent = max.toFixed(1);
+    s.appendChild(maxLabel);
+    if (max !== min) {
+      var minLabel = svg('text', { x: 0, y: h2 - pad + 3, class: 'chart-axis-label' }); minLabel.textContent = min.toFixed(1);
+      s.appendChild(minLabel);
+    }
+    var wrap = h('div', { class: 'mini-chart' }, h('p', { class: 'mini-chart-title' }, title), s);
+    return wrap;
+  }
+
+  function perCaseLineChart(byCase) {
+    var card = chartCard('Minutes and touches per case');
+    if (!byCase.some(function (c) { return c.minutes != null; })) {
+      card.appendChild(h('p', { class: 'chart-summary' }, 'No submitted tickets yet.'));
+      return card;
+    }
+    // Only submitted tickets have a measured time; an open ticket is not a 0-minute ticket.
+    var submitted = byCase.filter(function (c) { return c.minutes != null; });
+    var minutes = submitted.map(function (c) { return c.minutes; });
+    var touches = submitted.map(function (c) { return c.touches || 0; });
+    var n = submitted.length;
+    card.appendChild(miniLineChart('Minutes per case, in order', minutes, 'var(--accent)'));
+    card.appendChild(miniLineChart('Touches per case, in order', touches, 'var(--danger)'));
+    var avgM = (minutes.reduce(function (a, b) { return a + b; }, 0) / n).toFixed(1);
+    var avgT = (touches.reduce(function (a, b) { return a + b; }, 0) / n).toFixed(1);
+    card.appendChild(h('p', { class: 'chart-summary' }, n + ' submitted ' + (n === 1 ? 'ticket' : 'tickets') + ' in order; average ' + avgM + ' minutes and ' + avgT + ' touches per ticket.'));
+    return card;
+  }
+
+  function routesChart(routes) {
+    var card = chartCard('Routes split');
+    var entries = [['quick_verify', 'Quick verify', 'var(--positive)'], ['priority_review', 'Priority review', 'var(--warning)'], ['exception', 'Exception', 'var(--danger)']];
+    var total = entries.reduce(function (sum, e) { return sum + (routes[e[0]] || 0); }, 0);
+    card.appendChild(chartLegend(entries.map(function (e) { return { label: e[1], color: e[2] }; })));
+    var w = 380, h2 = 60, pad = 10;
+    var s = svg('svg', { viewBox: '0 0 ' + w + ' ' + h2, role: 'img', 'aria-hidden': 'true' });
+    var x = pad;
+    var barW = w - pad * 2;
+    entries.forEach(function (e) {
+      var count = routes[e[0]] || 0;
+      var seg = total > 0 ? (count / total) * barW : 0;
+      s.appendChild(svg('rect', { x: x, y: 15, width: seg, height: 30, fill: e[2] }));
+      x += seg;
+    });
+    card.appendChild(s);
+    var summary = entries.map(function (e) { return e[1] + ': ' + (routes[e[0]] || 0); }).join(', ');
+    card.appendChild(h('p', { class: 'chart-summary' }, total ? (summary + ' (of ' + total + ' values).') : 'No values yet.'));
+    return card;
+  }
+
+  function stageChart(stageSeconds) {
+    var card = chartCard('Median seconds per stage');
+    var stages = STAGE_CHART_KEYS.filter(function (key) { return stageSeconds[key] != null; });
+    if (!stages.length) { card.appendChild(h('p', { class: 'chart-summary' }, 'No timing data yet.')); return card; }
+    var w = 380, h2 = 180, pad = 30;
+    var max = Math.max.apply(null, stages.map(function (s) { return stageSeconds[s]; }));
+    var barW = (w - pad * 2) / stages.length;
+    var s = svg('svg', { viewBox: '0 0 ' + w + ' ' + h2, role: 'img', 'aria-hidden': 'true' });
+    stages.forEach(function (stage, i) {
+      var v = stageSeconds[stage];
+      var bh = max > 0 ? (h2 - pad * 2) * (v / max) : 0;
+      var x = pad + i * barW;
+      var y = h2 - pad - bh;
+      s.appendChild(svg('rect', { x: x + 2, y: y, width: Math.max(barW - 4, 1), height: Math.max(bh, 0), fill: 'var(--accent)' }));
+      var valueLabel = svg('text', { x: x + barW / 2, y: Math.max(y - 4, 10), 'text-anchor': 'middle', class: 'chart-axis-label' });
+      valueLabel.textContent = v.toFixed(1) + 's';
+      s.appendChild(valueLabel);
+      var label = svg('text', { x: x + barW / 2, y: h2 - pad + 12, 'text-anchor': 'middle', class: 'chart-axis-label' });
+      label.textContent = STAGE_CHART_LABELS[stage];
+      s.appendChild(label);
+    });
+    card.appendChild(s);
+    card.appendChild(h('p', { class: 'chart-summary' }, stages.map(function (s) { return STAGE_CHART_LABELS[s] + ': ' + stageSeconds[s].toFixed(1) + 's'; }).join(', ') + '.'));
+    return card;
+  }
+
+  /* ---------- boot ---------- */
+  if (state.offline) document.body.classList.add('offline');
+  document.addEventListener('DOMContentLoaded', route);
+})();
+</script>
+</body>
+</html>

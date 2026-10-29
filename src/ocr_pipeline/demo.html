@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Not So Smart OCR</title>
+  <title>HiLabs OCR</title>
   <link rel="icon" type="image/png" href="/assets/logo.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -132,19 +132,6 @@
     .has-document .brand-logo { width: 36px; height: 36px; }
     h1 { margin: 3px 0 1px; font-size: clamp(1.65rem, 3vw, 2.2rem); letter-spacing: -.04em; }
     .subtitle { margin: 0; color: var(--muted); }
-    .credit {
-      padding: 7px 16px;
-      border-bottom: 1px solid var(--line);
-      background: var(--panel);
-      text-align: center;
-      color: var(--muted);
-      font-size: .84rem;
-      line-height: 1.5;
-    }
-    .credit strong { color: var(--text); font-weight: 600; }
-    .credit .separator { margin: 0 .5em; opacity: .6; }
-    .credit a { color: var(--accent); font-weight: 500; text-decoration: none; }
-    .credit a:hover { text-decoration: underline; text-underline-offset: 3px; }
     .has-document .examples { display: none; }
     /* Landing: a slow particle field in perspective behind the hero, as on jina.ai. */
     .backdrop { display: block; position: fixed; inset: 0; z-index: -1; width: 100%; height: 100%; pointer-events: none; opacity: 1; transition: opacity 400ms var(--motion); }
@@ -571,8 +558,6 @@
     .metric[hidden] { display: none; }
     #metric-time { --metric-tint: #8b5cf6; --metric-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='13' r='8'/%3E%3Cpath d='M12 9v4l2 2M9 2h6'/%3E%3C/svg%3E"); }
     #metric-pages { --metric-tint: #3b82f6; --metric-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z'/%3E%3Cpath d='M14 3v5h5M9 13h6M9 17h4'/%3E%3C/svg%3E"); }
-    #metric-chars { --metric-tint: #ea580c; --metric-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 7V5h10v2M9 5v14M7 19h4M14 12v-1h6v1M17 11v8M15.5 19h3'/%3E%3C/svg%3E"); }
-    #metric-size { --metric-tint: #16a34a; --metric-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cellipse cx='12' cy='5' rx='8' ry='3'/%3E%3Cpath d='M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3'/%3E%3C/svg%3E"); }
 
     .feedback { display: inline-flex; gap: 2px; padding: 2px; border: 1px solid var(--line-strong); border-radius: 999px; }
     .feedback-button {
@@ -605,7 +590,12 @@
     }
 
     .action-popover.feedback-form { width: 340px; grid-template-columns: 1fr 1fr; gap: 6px; padding: 14px; }
-    .feedback-form-title, .feedback-note, #feedback-send { grid-column: 1 / -1; }
+    .feedback-form-title, .feedback-target, .feedback-correction, .feedback-note, #feedback-send { grid-column: 1 / -1; }
+    .feedback-target { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; margin-bottom: 4px; color: var(--muted); font-size: .76rem; }
+    #feedback-target-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .feedback-link { flex: none; padding: 0; border: 0; background: none; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; }
+    .feedback-correction { display: grid; gap: 4px; margin-top: 4px; color: var(--muted); font-size: .76rem; }
+    .feedback-correction[hidden] { display: none; }
     .feedback-form-title { margin-bottom: 4px; color: var(--text); font-size: .8125rem; font-weight: 650; }
     .feedback-reason {
       position: relative;
@@ -627,9 +617,10 @@
     .feedback-reason:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
     .feedback-note {
       width: 100%;
-      height: 36px;
+      min-height: 36px;
       margin-top: 4px;
-      padding: 0 12px;
+      padding: 8px 12px;
+      resize: vertical;
       border: 1px solid var(--line-strong);
       border-radius: 10px;
       background: var(--panel);
@@ -734,7 +725,6 @@
     .datum { min-width: 0; }
     .label { display: block; color: var(--muted); font-size: .72rem; font-weight: 500; }
     .value { display: block; margin-top: 4px; overflow-wrap: anywhere; font-size: .86rem; font-weight: 550; }
-    #region-resolution { text-transform: capitalize; }
     #region-confidence[data-level] { justify-self: start; width: fit-content; padding: 1px 9px; border-radius: 999px; background: var(--surface-2); font-weight: 600; }
     #region-confidence[data-level="high"] { background: var(--confidence-high-soft); color: var(--confidence-high); }
     #region-confidence[data-level="medium"] { background: var(--confidence-medium-soft); color: var(--confidence-medium); }
@@ -946,6 +936,10 @@
     .visual-panel { padding: 0; }
     .visual-panel .inspector { min-height: 560px; border-top: 0; }
     .markdown-source { min-height: 520px; }
+    .fields-view { min-height: 520px; padding: 4px 0; }
+    .fields-view:has(> .empty-state) { display: grid; place-items: center; }
+    .fields-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; color: var(--muted); font-size: .86rem; }
+    .fields-json { margin: 0; padding: 14px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); font: .82rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 72vh; overflow: auto; }
     /* An editor-like source view: gutter numbers, line hover, light syntax colour. */
     .markdown-lines {
       margin: 0;
@@ -1177,8 +1171,6 @@
   </style>
 </head>
 <body>
-  <p class="credit">Built by <strong>Aman Behera</strong><span class="separator" aria-hidden="true">·</span>For any issues, reach out at
-    <a href="mailto:aman.behera@hilabs.com">aman.behera@hilabs.com</a></p>
   <canvas class="backdrop" id="backdrop" aria-hidden="true"></canvas>
   <div class="drop-overlay" aria-hidden="true">
     <div class="drop-card">
@@ -1201,7 +1193,7 @@
       <div class="brand">
         <img class="brand-logo" src="/assets/logo.png" alt="" width="44" height="44">
         <div>
-          <h1>Not So Smart OCR</h1>
+          <h1>HiLabs OCR</h1>
           <p class="subtitle">Extract text from your documents, with the evidence behind every word.</p>
         </div>
       </div>
@@ -1266,10 +1258,8 @@
           <span class="card-title">Page evidence</span>
           <span class="metric elapsed-chip" id="elapsed-chip" data-icon="&#9201;" hidden></span>
           <div class="doc-metrics" id="doc-metrics" hidden>
-            <span class="metric" id="metric-time" title="Backend processing time"></span>
+            <span class="metric" id="metric-time" title="OCR time"></span>
             <span class="metric" id="metric-pages" title="Pages"></span>
-            <span class="metric" id="metric-chars" title="Extracted characters"></span>
-            <span class="metric" id="metric-size" title="Source file size"></span>
           </div>
         <div class="categories" id="region-categories" hidden>
           <label class="source-zoom" for="source-zoom">Zoom
@@ -1312,6 +1302,7 @@
             <button class="tab" role="tab" type="button" aria-selected="true" aria-controls="panel-rendered" id="tab-rendered">Text output</button>
             <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-visual" id="tab-visual" tabindex="-1">Visual</button>
             <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-markdown" id="tab-markdown" tabindex="-1">Markdown</button>
+            <button class="tab" role="tab" type="button" aria-selected="false" aria-controls="panel-fields" id="tab-fields" tabindex="-1">Fields</button>
           </div>
           <div class="downloads">
             <button class="download icon-only" id="copy-icon" type="button"
@@ -1358,26 +1349,40 @@
                 </summary>
                 <div class="action-popover feedback-form">
                   <span class="feedback-form-title">What went wrong?</span>
+                  <div class="feedback-target">
+                    <span id="feedback-target-text">The whole page</span>
+                    <button class="feedback-link" id="feedback-pick" type="button">Point to a region</button>
+                  </div>
                   <label class="feedback-reason">
-                    <input type="radio" name="feedback-reason" value="missing_text">Text is missing
+                    <input type="checkbox" name="feedback-reason" value="wrong_text">Text is wrong
                   </label>
                   <label class="feedback-reason">
-                    <input type="radio" name="feedback-reason" value="wrong_text">Text is wrong
+                    <input type="checkbox" name="feedback-reason" value="missing_text">Text is missing
                   </label>
                   <label class="feedback-reason">
-                    <input type="radio" name="feedback-reason" value="reading_order">Wrong reading order
+                    <input type="checkbox" name="feedback-reason" value="handwriting">Handwriting is wrong
                   </label>
                   <label class="feedback-reason">
-                    <input type="radio" name="feedback-reason" value="table">Table is wrong
+                    <input type="checkbox" name="feedback-reason" value="table">Table is wrong
                   </label>
                   <label class="feedback-reason">
-                    <input type="radio" name="feedback-reason" value="handwriting">Handwriting is wrong
+                    <input type="checkbox" name="feedback-reason" value="reading_order">Wrong reading order
                   </label>
                   <label class="feedback-reason">
-                    <input type="radio" name="feedback-reason" value="other">Something else
+                    <input type="checkbox" name="feedback-reason" value="duplicate">Duplicated text
                   </label>
-                  <input class="feedback-note" id="feedback-note" type="text" maxlength="500"
-                    aria-label="Optional detail" placeholder="Optional detail">
+                  <label class="feedback-reason">
+                    <input type="checkbox" name="feedback-reason" value="not_text">Not real text
+                  </label>
+                  <label class="feedback-reason">
+                    <input type="checkbox" name="feedback-reason" value="other">Something else
+                  </label>
+                  <label class="feedback-correction" id="feedback-correction" hidden>
+                    <span>What it should read</span>
+                    <textarea class="feedback-note" id="feedback-expected" rows="2" maxlength="2000"></textarea>
+                  </label>
+                  <textarea class="feedback-note" id="feedback-note" rows="2" maxlength="500"
+                    aria-label="What is wrong" placeholder="What is wrong? (optional)"></textarea>
                   <button class="download" id="feedback-send" type="button" disabled>Send report</button>
                 </div>
               </details>
@@ -1399,6 +1404,7 @@
             <div class="inspector-empty">Select a region on the page to inspect its evidence.</div>
             <div class="inspector-head">
               <button class="download inspector-action" id="download-crop" type="button" disabled>Download crop</button>
+              <button class="download inspector-action" id="report-region" type="button">Report a problem</button>
               <button class="download inspector-action" id="reread-handwriting" type="button" hidden disabled>Reread handwriting</button>
             </div>
             <div class="inspector-primary">
@@ -1426,22 +1432,21 @@
             </div>
             <div class="inspector-grid">
               <div class="datum"><span class="label">Kind</span><span class="value" id="region-kind">None selected</span></div>
-              <div class="datum" id="region-category-row" hidden><span class="label">Layout category</span><span class="value" id="region-category">-</span></div>
               <div class="datum"><span class="label" id="region-confidence-label">Recognition score</span><span class="value" id="region-confidence">Not available</span></div>
-              <div class="datum"><span class="label">Provider</span><span class="value" id="region-provider">-</span></div>
+              <div class="datum"><span class="label">Read by</span><span class="value" id="region-provider">-</span></div>
               <div class="datum"><span class="label" id="region-order-label">Reading order</span><span class="value" id="region-order">-</span></div>
-              <div class="datum"><span class="label">Bounding box</span><span class="value" id="region-box">-</span></div>
-              <div class="datum"><span class="label">Resolution</span><span class="value" id="region-resolution">-</span></div>
+              <div class="datum"><span class="label">Position</span><span class="value" id="region-box">-</span></div>
               <details class="technical-details">
-                <summary>Technical details</summary>
-                <div class="technical-grid">
-                  <div class="datum"><span class="label">Provenance</span><span class="value" id="region-provenance">-</span></div>
-                  <div class="datum"><span class="label">Raw alternatives</span><span class="value" id="region-raw-alternatives">-</span></div>
-                  <div class="datum"><span class="label">Structure</span><span class="value" id="region-structure">-</span></div>
-                </div>
+                <summary>How it was read</summary>
+                <div class="technical-grid" id="region-provenance"></div>
               </details>
             </div>
             <div class="region-list" id="region-list" aria-label="Regions on this page"></div>
+          </div>
+        </div>
+        <div class="tab-panel" role="tabpanel" id="panel-fields" aria-labelledby="tab-fields" hidden>
+          <div class="fields-view" id="fields-view">
+            <div class="empty-state"><strong>Enrollment fields</strong>The document's values in the client's enrollment format (group, practitioner: required, loaded if provided, defaulted) appear here.</div>
           </div>
         </div>
         <div class="tab-panel" role="tabpanel" id="panel-markdown" aria-labelledby="tab-markdown" hidden>
@@ -1678,6 +1683,7 @@
         renderResult({ skipPresentation: payload.refinement?.status === "pending" });
         timerOutcome = "complete";
         showResultStatus(payload.result);
+        void loadFields();
         byId("clear-button").disabled = false;
       } catch (error) {
         if (resultRequest === state.resultRequest) {
@@ -1749,12 +1755,30 @@
     });
 
     byId("feedback-up").addEventListener("click", () => sendFeedback("good"));
-    byId("feedback-down").addEventListener("click", () => sendFeedback("problem", "other", "", true));
+    byId("feedback-down").addEventListener("click", () => sendFeedback("problem", ["other"], "", true));
     byId("feedback-send").addEventListener("click", () =>
-      sendFeedback("problem", selectedReason(), byId("feedback-note").value)
+      sendFeedback("problem", selectedReasons(), byId("feedback-note").value)
     );
     byId("feedback-problem").addEventListener("change", () => {
-      byId("feedback-send").disabled = !selectedReason();
+      byId("feedback-send").disabled = !selectedReasons().length;
+    });
+    byId("feedback-problem").addEventListener("toggle", () => {
+      if (byId("feedback-problem").open) renderFeedbackTarget();
+    });
+    byId("feedback-pick").addEventListener("click", () => {
+      if (feedbackRegion()) {
+        state.feedbackWholePage = true;
+        renderFeedbackTarget();
+        return;
+      }
+      // The next region clicked on the page or in the text reopens the form about it.
+      state.pickingFeedbackRegion = true;
+      byId("feedback-problem").open = false;
+      setCopyStatus("Click the region on the page or in the text.");
+    });
+    byId("report-region").addEventListener("click", () => {
+      state.feedbackWholePage = false;
+      byId("feedback-problem").open = true;
     });
     byId("accept-alternative").addEventListener("click", () => handleCorrection("accept"));
     byId("edit-region").addEventListener("click", handleEditRegion);
@@ -2552,22 +2576,39 @@
 
     function renderMetrics(payload) {
       const pages = payload.result?.pages || [];
-      const characters = pages.reduce(
-        (total, page) => total + (page.text?.value?.length || 0),
-        0
-      );
-      const seconds = Number(payload.timing?.total_seconds);
+      // The OCR read alone; LLM refinement finishes in the background and is not counted.
+      const seconds = Number(payload.timing?.ocr_seconds ?? payload.timing?.total_seconds);
       // Compact values: each chip's glyph says what it counts, its title says it in words.
       setMetric("metric-time", "", Number.isFinite(seconds) ? `${seconds.toFixed(1)}s` : "");
       setMetric("metric-pages", "", pages.length ? String(pages.length) : "");
-      setMetric("metric-chars", "", characters ? formatCount(characters) : "");
-      setMetric("metric-size", "", formatBytes(payload.source_bytes || 0).replace(" ", ""));
       const metrics = byId("doc-metrics");
       metrics.hidden = !Array.from(metrics.children).some((item) => !item.hidden);
     }
 
-    function selectedReason() {
-      return byId("feedback-problem").querySelector("input:checked")?.value || null;
+    function selectedReasons() {
+      return [...byId("feedback-problem").querySelectorAll("input[name=feedback-reason]:checked")].map((input) => input.value);
+    }
+
+    // A report is about the selected region when there is one, else the whole page.
+    function feedbackRegion() {
+      return state.feedbackWholePage ? null : selectedRegion();
+    }
+
+    function renderFeedbackTarget() {
+      const region = feedbackRegion();
+      const snippet = (region?.text || "").replace(/\s+/g, " ").trim();
+      byId("feedback-target-text").textContent = region
+        ? `About: “${snippet.length > 48 ? `${snippet.slice(0, 48)}…` : snippet || readableKind(region.kind)}”`
+        : "About: the whole page";
+      byId("feedback-pick").textContent = region ? "Whole page instead" : "Point to a region";
+      // A table's cells are corrected in the table, not as one text.
+      const correctable = Boolean(region && !region.structure?.cells);
+      const expected = byId("feedback-expected");
+      byId("feedback-correction").hidden = !correctable;
+      if (correctable && expected.dataset.regionKey !== regionKey(region)) {
+        expected.value = region.text || "";
+        expected.dataset.regionKey = regionKey(region);
+      }
     }
 
     function resetFeedback() {
@@ -2584,7 +2625,11 @@
           input.checked = false;
         });
       byId("feedback-note").value = "";
+      byId("feedback-expected").value = "";
+      delete byId("feedback-expected").dataset.regionKey;
       byId("feedback-send").disabled = true;
+      state.feedbackWholePage = false;
+      state.pickingFeedbackRegion = false;
     }
 
     function renderFeedback() {
@@ -2596,13 +2641,17 @@
 
     const pendingFeedback = new Set();
 
-    async function sendFeedback(verdict, reason = null, note = "", keepOpen = false) {
+    async function sendFeedback(verdict, reasons = [], note = "", keepOpen = false) {
       if (!state.response || state.refinementPending) return;
       const sessionId = state.response.session_id;
       const page = state.response.result?.pages?.[state.pageIndex];
       const key = `${state.response.revision}:${page?.page_number}`;
       if (state.feedbackSent[key] === verdict && (verdict === "good" || keepOpen)) return;
-      const pendingKey = `${sessionId}:${key}:${verdict}:${reason}:${note}`;
+      // The full report names its region and, when the reviewer typed it, the right text.
+      const region = verdict === "problem" && !keepOpen ? feedbackRegion() : null;
+      const expected = region && !byId("feedback-correction").hidden ? byId("feedback-expected").value.trim() : "";
+      const correction = expected && expected !== (region.text || "").trim() ? expected : null;
+      const pendingKey = `${sessionId}:${key}:${verdict}:${reasons}:${note}:${region?.id}`;
       if (pendingFeedback.has(pendingKey)) return;
       pendingFeedback.add(pendingKey);
       try {
@@ -2613,8 +2662,10 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               verdict,
-              reason,
+              reasons,
               note,
+              region_id: region?.id ?? null,
+              expected_text: correction,
               revision: state.response.revision,
               page_number: page?.page_number ?? null,
               filename: state.response.filename ?? null,
@@ -2622,14 +2673,28 @@
             }),
           }
         );
-        if (!response.ok) throw new Error(`Feedback failed (${response.status})`);
+        if (!response.ok) throw new Error("Your report could not be saved. Please try again.");
         const saved = await response.json();
         if (state.response?.session_id !== sessionId) return;
         state.feedbackSent[key] = verdict;
-        state.feedbackIds = { ...state.feedbackIds, [key]: verdict === "problem" ? saved.id : null };
+        // The thumbs-down click is amended by its report; a later report is a new one.
+        state.feedbackIds = { ...state.feedbackIds, [key]: keepOpen ? saved.id : null };
         renderFeedback();
-        if (!keepOpen) byId("feedback-problem").open = false;
-        setCopyStatus(keepOpen ? "Thanks. Tell us what went wrong, or close this." : "Thanks, your feedback was saved.");
+        if (keepOpen) {
+          setCopyStatus("Thanks. Tell us what went wrong, or close this.");
+          return;
+        }
+        byId("feedback-problem").open = false;
+        byId("feedback-problem").querySelectorAll("input:checked").forEach((input) => { input.checked = false; });
+        byId("feedback-note").value = "";
+        byId("feedback-send").disabled = true;
+        if (!correction) return setCopyStatus("Thanks. Your report is saved for review.");
+        const revision = state.response.revision;
+        await submitRegionRequest("corrections", { action: "edit", text: correction },
+          "Fixing the text...", "Text fixed from your report.");
+        setCopyStatus(state.response?.revision > revision
+          ? "Thanks. Your report is saved and the text is fixed."
+          : "Your report is saved, but the text could not be fixed here.", state.response?.revision === revision);
       } catch (error) {
         setCopyStatus(userMessage(error), true);
       } finally {
@@ -2642,17 +2707,6 @@
       node.hidden = !value;
       node.dataset.icon = icon;
       node.textContent = value || "";
-    }
-
-    function formatCount(value) {
-      return value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 0 : 1)}k` : String(value);
-    }
-
-    function formatBytes(bytes) {
-      if (!Number.isFinite(bytes) || bytes <= 0) return "";
-      if (bytes < 1024) return `${bytes} B`;
-      if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
-      return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
     }
 
     function renderRendered(pages, presentations) {
@@ -2689,7 +2743,7 @@
             sampled_retry_read: "The initial read needed a retry"
           }[reason] || reason.replaceAll("_", " "))).join(". ");
           const refined = source.text_provenance?.method === "qwen_crop_refinement";
-          notes.set(source.id, { text: `${reasons}. ${refined ? "Routed to LLM." : "Compare this region with the source."}`, refined });
+          notes.set(source.id, { text: refined ? `${reasons}; it was re-read.` : `${reasons}. Compare this region with the source.`, refined });
         }));
         content.querySelectorAll("[data-evidence-id]").forEach((marker) => {
           const id = marker.dataset.evidenceId;
@@ -2717,13 +2771,18 @@
             source.type = "button";
             source.className = "section-source";
             const note = notes.get(target.dataset.evidenceId);
-            const confidence = displayConfidence(region);
-            source.textContent = note ? (note.refined ? "Refined" : "Check source")
-              : validConfidence(confidence.value) ? formatConfidence(confidence.value) : "Source";
-            source.dataset.level = note ? (note.refined ? "refined" : "medium")
-              : validConfidence(confidence.value) ? confidenceLevel(confidence.value) : "unknown";
-            source.title = note?.text || (validConfidence(confidence.value)
-              ? `Confidence: ${formatConfidence(confidence.value)}. Locate source.` : "Locate source");
+            // A section scores by its least sure reading, as its words are coloured (an
+            // LLM-read region by the LLM's own token probability); "Check source" only
+            // when there is no score at all.
+            const sectionIds = new Set([...ids.split(" "), ...[...block.querySelectorAll("[data-evidence-id]")]
+              .map((marker) => marker.dataset.evidenceId.replace(/-word-\d+$/, ""))]);
+            const scores = page.regions.filter((item) => sectionIds.has(item.id))
+              .map(regionScore).filter(validConfidence);
+            const score = scores.length ? Math.min(...scores) : null;
+            source.textContent = score != null ? formatConfidence(score) : note ? "Check source" : "Source";
+            source.dataset.level = score != null ? confidenceLevel(score) : note ? "medium" : "unknown";
+            source.title = note?.text || (score != null
+              ? `Least sure reading: ${formatConfidence(score)}. Locate source.` : "Locate source");
             source.addEventListener("click", (event) => {
               event.stopPropagation();
               selectEvidenceTarget(target);
@@ -2853,6 +2912,16 @@
       return `${Number((confidence * 100).toFixed(2))}%`;
     }
 
+    // An LLM-corrected region has no calibrated OCR score; its LLM's weakest-token
+    // probability (from logprobs) stands in, so every reading shows a confidence.
+    function regionScore(region) {
+      if (validConfidence(region?.confidence)) return region.confidence;
+      if (region?.text_provenance?.human_review) return 1;  // a reviewer typed it
+      const provenance = region?.text_provenance || {};
+      return provenance.method === "qwen_crop_refinement" && validConfidence(provenance.llm_confidence)
+        ? provenance.llm_confidence : region?.confidence;
+    }
+
     function decorateConfidence(element, confidence, inline = false, evidence = {}) {
       element.classList.add("confidence-evidence");
       if (inline) element.classList.add("confidence-inline");
@@ -2881,7 +2950,7 @@
         if (index) parent.append(document.createTextNode(separator));
         const math = renderInlineMath(region.text);
         if (math) {
-          decorateConfidence(math, region.confidence, true, {
+          decorateConfidence(math, regionScore(region), true, {
             id: region.id,
             provider: region.provider,
             textLayer: textLayerSource(region),
@@ -2902,21 +2971,28 @@
         const generation = region.text_provenance?.generation;
         const nativeScores = region.text_provenance?.raw_text === region.text
           && Array.isArray(generation?.tokens) ? generation.tokens : null;
+        // An LLM-corrected region carries the LLM's probability for each word it wrote.
+        const llmWords = region.text_provenance?.llm_word_confidences;
+        const wordScores = Array.isArray(llmWords)
+          && llmWords.length === tokens.filter((text) => /\S/u.test(text)).length ? llmWords : null;
+        const split = aligned || nativeScores || wordScores;
         let tokenIndex = 0;
+        let wordIndex = 0;
         let characterOffset = 0;
-        (aligned || nativeScores ? tokens : [region.text]).forEach((text) => {
+        (split ? tokens : [region.text]).forEach((text) => {
           const start = characterOffset;
           characterOffset += Array.from(text).length;
-          if ((aligned || nativeScores) && !/\S/u.test(text)) {
+          if (split && !/\S/u.test(text)) {
             parent.append(document.createTextNode(text));
             return;
           }
           const entry = aligned ? evidenceTokens[tokenIndex++] : null;
+          const wordScore = wordScores ? wordScores[wordIndex++] : null;
           const scores = nativeScores?.filter((token) => token.start < characterOffset && token.end > start)
             .map((token) => token.score) || [];
           const score = scores.length
             ? Math.exp(scores.reduce((sum, value) => sum + Math.log(Math.max(value, 1e-30)), 0) / scores.length)
-            : entry ? entry.word.confidence : region.confidence;
+            : entry ? entry.word.confidence : validConfidence(wordScore) ? wordScore : regionScore(region);
           const marker = document.createElement("span");
           marker.textContent = text;
           decorateConfidence(marker, score, true, {
@@ -3179,16 +3255,15 @@
       byId("confidence-inspector-score").textContent = percent === "Text layer"
         ? TEXT_LAYER_NOTE
         : percent === "Unknown"
-        ? target.dataset.confidenceProvider.startsWith("qwen/")
-          ? "Routed to LLM"
-          : "Confidence: Not available"
+        ? "Confidence: Not available"
         : `Confidence: ${percent}`;
       byId("confidence-inspector-source").textContent = "";
       renderedView.querySelector(".confidence-active")?.classList.remove("confidence-active");
       target.classList.add("confidence-active");
-      inspector.hidden = false;
+      // No floating popup: the section chip already shows the score; the selection only
+      // highlights the source box on the page.
+      inspector.hidden = true;
       state.inspectorAnchor = target;
-      positionConfidenceInspector();
       state.activeEvidenceId = target.dataset.evidenceId || null;
       drawPage();
     }
@@ -3293,7 +3368,9 @@
         return { label: "Text source", value: null, note: TEXT_LAYER_NOTE, scope: "text layer" };
       }
       if (region?.text_provenance?.method === "qwen_crop_refinement") {
-        return { label: "Confidence", value: null, note: "Routed to LLM", scope: "region" };
+        // The LLM's own probability for the weakest token it wrote (from its logprobs).
+        const llm = region.text_provenance.llm_confidence;
+        return { label: "Confidence", value: validConfidence(llm) ? llm : null, scope: "region" };
       }
       if (semanticKind(region) === "control") {
         return {
@@ -3578,7 +3655,7 @@
       element.className = `semantic-block ${kind}`;
       const marker = renderInlineMath(rawText) || document.createElement("span");
       if (!marker.childNodes.length) marker.textContent = rawText;
-      decorateConfidence(marker, source.confidence, true, {
+      decorateConfidence(marker, regionScore(source), true, {
         id: source.id,
         provider: source.provider,
         scope: confidenceScope(source),
@@ -4120,7 +4197,7 @@
         const rendered = renderPresentationFormula(group.text);
         if (!rendered.failure) {
           block.append(rendered.formula);
-          decorateConfidence(block, source.confidence, false, {
+          decorateConfidence(block, regionScore(source), false, {
             id: source.id,
             provider: source.provider,
             textLayer: textLayerSource(source),
@@ -4878,15 +4955,16 @@
     }
 
     function updateInspector(region) {
+      if (region && state.pickingFeedbackRegion) {
+        state.pickingFeedbackRegion = false;
+        state.feedbackWholePage = false;
+        byId("feedback-problem").open = true;
+      }
       if (!state.rereadBusy) setRereadStatus("");
       updateRereadAction(region);
       updateReviewActions(region);
       byId("inspector").classList.toggle("empty", !region);
       byId("region-kind").textContent = region ? readableKind(region.kind) : "None selected";
-      // The layout reader names what it thinks a region is; show it when it says.
-      const category = region?.text_provenance?.layout_category;
-      byId("region-category-row").hidden = !category;
-      byId("region-category").textContent = category ? readableKind(category) : "-";
       const confidence = displayConfidence(region);
       byId("region-confidence-label").textContent = "Confidence";
       byId("region-confidence").textContent = validConfidence(confidence.value)
@@ -4897,25 +4975,58 @@
         byId("inspector").animate([{ opacity: 0.4, transform: "translateY(4px)" }, { opacity: 1, transform: "none" }],
           { duration: 180, easing: "cubic-bezier(0.2, 0, 0, 1)" });
       }
-      byId("region-provider").textContent = String(region?.provider || "").startsWith("qwen/") ? "Routed to LLM" : region?.provider || "-";
+      byId("region-provider").textContent = region ? readBy(region) : "-";
       const detectorSequence = region?.text_provenance?.reading_order_method === "detector_sequence";
       const spatialOrder = region?.structure?.presentation_order_method === "spatial_sort";
-      byId("region-order-label").textContent = detectorSequence ? "Detector sequence"
-        : spatialOrder ? "Spatial presentation order" : "Reading order";
+      byId("region-order-label").textContent = "Reading order";
       byId("region-order").textContent = spatialOrder && !detectorSequence
         ? region.structure.presentation_rank : region?.reading_order ?? "-";
       const box = region?.bounding_box;
-      byId("region-box").textContent = box ? `${box.left}, ${box.top}, ${box.right}, ${box.bottom} px` : "-";
-      byId("region-resolution").textContent = region?.resolution || "-";
-      renderDetails(byId("region-provenance"), region?.text_provenance);
+      byId("region-box").textContent = box ? `x ${box.left}–${box.right}, y ${box.top}–${box.bottom} px` : "-";
+      renderReadingFacts(byId("region-provenance"), region);
       byId("region-alternatives").textContent = alignedAlternatives(region);
-      renderDetails(byId("region-raw-alternatives"), region?.alternatives);
-      renderDetails(byId("region-structure"), region?.structure);
       byId("region-text").textContent = region?.text || "Click an overlay to inspect its evidence.";
       byId("download-crop").disabled = !region || !state.image;
       cropCanvas.style.borderColor = region ? regionColor(region) : "";
       byId("inspector").querySelector(".technical-details").open = false;
       drawRegionCrop(region);
+    }
+
+    // Plain words for how a region was read; model names, revisions, licences and dtypes
+    // stay in the JSON download, not on the panel.
+    const READ_BY = {
+      falcon_perception_layout_ocr: "OCR",
+      qwen_crop_refinement: "OCR, corrected by LLM",
+      qwen_form_option_extraction: "LLM read the form options",
+      pdf_text_layer: "PDF text (no OCR needed)",
+      learned_checkbox_detection: "Checkbox detector",
+      decoded_ballot_glyph_promotion: "Checkbox glyph",
+      evidence_owned_spatial_grouping: "Layout grouping",
+      source_image_crop: "Image (not text)",
+    };
+
+    function readBy(region) {
+      return READ_BY[region?.text_provenance?.method] || "OCR";
+    }
+
+    function renderReadingFacts(target, region) {
+      const provenance = region?.text_provenance || {};
+      const percent = (value) => typeof value === "number" && Number.isFinite(value) ? `${Math.round(value * 100)}%` : null;
+      const facts = [
+        ["Read by", region ? readBy(region) : null],
+        ["Layout score", percent(provenance.layout_detection_score)],
+        ["Weakest word", percent(provenance.generation?.token_score_min)],
+        ["Checked by a second reader", provenance.second_reader ? (provenance.second_reader.agrees === false ? "Disagreed" : "Yes") : null],
+        ["Printed text before correction", provenance.method === "qwen_crop_refinement" ? (region.alternatives?.[0]?.text || null) : null],
+        ["Unreadable", region?.resolution && region.resolution !== "resolved" ? "Yes, kept for review" : null],
+      ].filter(([, value]) => value);
+      target.replaceChildren(...facts.map(([label, value]) => {
+        const row = document.createElement("div");
+        row.className = "datum";
+        row.append(Object.assign(document.createElement("span"), { className: "label", textContent: label }),
+          Object.assign(document.createElement("span"), { className: "value", textContent: value }));
+        return row;
+      }));
     }
 
     function alignedAlternatives(region) {
@@ -5021,6 +5132,56 @@
       if (tab.id === "tab-visual") renderRegionList(currentOverlays());
       else renderRegionList([]);
       if (tab.id === "tab-markdown") void loadRenderedMarkdown();
+      if (tab.id === "tab-fields") void loadFields();
+    }
+
+    // The client-format fields for this document. Extraction starts as soon as the read is
+    // final, so the tab usually opens on a finished answer; one request per session.
+    // A reviewer's correction changes the values, so its fields are extracted again; the
+    // LLM's re-read of doubtful regions does not, so the first request serves both readings.
+    const fieldsRequests = new Map();
+    function fetchFields(sessionId, edits) {
+      const key = `${sessionId}:${edits}`;
+      if (!fieldsRequests.has(key)) {
+        const request = fetch(`/enrollment/api/sessions/${encodeURIComponent(sessionId)}/fields`, { method: "POST" })
+          .then((response) => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response.json();
+          });
+        request.catch(() => fieldsRequests.delete(key));  // a failed try can be retried
+        fieldsRequests.set(key, request);
+      }
+      return fieldsRequests.get(key);
+    }
+
+    async function loadFields() {
+      const view = byId("fields-view");
+      const sessionId = state.response?.session_id;
+      if (!sessionId) return;
+      view.replaceChildren(Object.assign(document.createElement("div"), { className: "empty-state", textContent: "Extracting fields…" }));
+      try {
+        const edits = state.response.result.pages.flatMap((page) => page.regions)
+          .filter((region) => region.text_provenance?.human_review).length;
+        const fields = await fetchFields(sessionId, edits);
+        if (state.response?.session_id !== sessionId) return;
+        const pre = document.createElement("pre");
+        pre.className = "fields-json";
+        pre.textContent = JSON.stringify(fields, null, 2);
+        const download = document.createElement("a");
+        download.className = "download";
+        download.textContent = "Download JSON";
+        download.href = URL.createObjectURL(new Blob([pre.textContent], { type: "application/json" }));
+        download.download = `${(state.response?.filename || "document").replace(/\.[^.]+$/, "")}-fields.json`;
+        const bar = document.createElement("div");
+        bar.className = "fields-bar";
+        bar.append(Object.assign(document.createElement("span"), { textContent: "Client enrollment format" }), download);
+        view.replaceChildren(bar, pre);
+      } catch (error) {
+        console.warn("Field extraction failed", error);
+        if (state.response?.session_id !== sessionId) return;
+        view.replaceChildren(Object.assign(document.createElement("div"), { className: "empty-state",
+          textContent: "Fields could not be extracted for this document. Read it again and retry." }));
+      }
     }
 
     function visualTabActive() {
@@ -5120,14 +5281,14 @@
           byId("activity-line").hidden = true;
         } else if (!response.ok) {
           throw new Error("Session check failed");
-        } else if (unverifiedSession === session) {
-          setStatus("Document session is available again.", false);
         }
         unverifiedSession = null;
-      } catch {
+      } catch (error) {
+        // The displayed work survives a lost session (e.g. a service restart), so this stays
+        // quiet; only actions that need the session report a problem.
         if (state.response?.session_id === session && !busy()) {
           unverifiedSession = session;
-          setStatus("Cannot verify the document session. Check the connection; your displayed work has been kept.", true);
+          console.warn("Document session could not be verified", error);
         }
       } finally {
         checkingSession = false;
@@ -5155,7 +5316,8 @@
         renderResult();
         byId("file-name").textContent = state.response.filename;
         byId("clear-button").disabled = false;
-        setStatus(state.response.result.status === "success" ? "Document restored." : "Incomplete extraction. Some content could not be read.", state.response.result.status !== "success");
+        showResultStatus(state.response.result);
+        void loadFields();
       } catch (error) {
         setStatus(userMessage(error), true);
       } finally {

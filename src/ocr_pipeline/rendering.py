@@ -235,6 +235,19 @@ def _renderable(region: dict[str, Any], evidence_ids: set[str]) -> bool:
     )
 
 
+def _fenced_code(code: str) -> str:
+    """Code as written when it already carries its own fence, else in a fence it cannot close."""
+    fence = re.match(r"^ {0,3}(`{3,}|~{3,})[^\n]*\n", code)
+    closing = code.rstrip().rsplit("\n", 1)[-1].strip()
+    if not code or (
+        fence and len(closing) >= len(fence[1]) and set(closing) == {fence[1][0]}
+    ):
+        return code
+    delimiter = "`" * max(3, 1 + max(map(len, re.findall(r"`+", code)), default=0))
+    ending = "" if code.endswith("\n") else "\n"
+    return f"{delimiter}\n{code}{ending}{delimiter}"
+
+
 def _markdown_block(
     region: dict[str, Any],
     source_index: dict[str, dict[str, Any]],
@@ -257,19 +270,7 @@ def _markdown_block(
     elif kind in HEADING_MARKS:
         block = f"{HEADING_MARKS[kind]} {text}" if text else ""
     elif kind == "code":
-        code = _canonical_layout_text(region, source_index)
-        fence = re.match(r"^ {0,3}(`{3,}|~{3,})[^\n]*\n", code)
-        closing = code.rstrip().rsplit("\n", 1)[-1].strip()
-        if not code or (
-            fence and len(closing) >= len(fence[1]) and set(closing) == {fence[1][0]}
-        ):
-            block = code
-        else:
-            delimiter = "`" * max(
-                3, 1 + max(map(len, re.findall(r"`+", code)), default=0)
-            )
-            ending = "" if code.endswith("\n") else "\n"
-            block = f"{delimiter}\n{code}{ending}{delimiter}"
+        block = _fenced_code(_canonical_layout_text(region, source_index))
     elif kind == "formula":
         if resolution != "resolved":
             block = "[unreadable formula]"
@@ -310,7 +311,10 @@ def _markdown_block(
     return RAW_HTML_START.sub("&lt;", block)
 
 
-def _markdown_table(region: dict[str, Any]) -> str:
+def _markdown_table(
+    region: dict[str, Any], *, always_html: bool = False, cell_text: Any = None
+) -> str:
+    """`always_html` renders every table as HTML; `cell_text` rewrites each cell's display text."""
     structure = _structure(region)
     try:
         topology = validate_table_topology(structure)
@@ -320,8 +324,8 @@ def _markdown_table(region: dict[str, Any]) -> str:
     # A Markdown pipe table has exactly one header row; any other count needs HTML.
     header_row_count = structure.get("header_row_count")
     block = (
-        _html_table(topology)
-        if topology.has_spans or header_row_count not in (None, 1)
+        _html_table(topology, cell_text)
+        if always_html or topology.has_spans or header_row_count not in (None, 1)
         else _simple_markdown_table(topology)
     )
     return "\n\n".join(
@@ -353,7 +357,7 @@ def _simple_markdown_table(topology: TableTopology) -> str:
     return "\n".join(lines)
 
 
-def _html_table(topology: TableTopology) -> str:
+def _html_table(topology: TableTopology, cell_text: Any = None) -> str:
     anchors = {(cell.row, cell.column): cell for cell in topology.cells}
     lines = ["<table>", "<tbody>"]
     for row in range(topology.row_count):
@@ -368,7 +372,10 @@ def _html_table(topology: TableTopology) -> str:
                 attributes.append(f' rowspan="{len(cell.rows)}"')
             if len(cell.columns) > 1:
                 attributes.append(f' colspan="{len(cell.columns)}"')
-            text = escape(_display_cell_text(cell.value), quote=True)
+            shown = _display_cell_text(cell.value)
+            if cell_text is not None:
+                shown = cell_text(shown)
+            text = escape(shown, quote=True).replace("\n", "<br>") if cell_text else escape(shown, quote=True)
             lines.append(f"<{tag}{''.join(attributes)}>{text}</{tag}>")
         lines.append("</tr>")
     lines.extend(["</tbody>", "</table>"])
