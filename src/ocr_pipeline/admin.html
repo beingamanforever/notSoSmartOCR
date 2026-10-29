@@ -160,6 +160,10 @@
     @keyframes fresh { from { background: var(--accent-soft); } }
     td.num, th.num { text-align: right; }
     .doc { display: flex; align-items: center; gap: 12px; }
+    .feedback-region { display: grid; gap: 4px; max-width: 320px; font-size: .78rem; }
+    .feedback-region .region-crop { max-width: 100%; max-height: 72px; object-fit: contain; object-position: left; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+    .feedback-region .fixed { color: var(--text); font-weight: 600; }
+    td .muted { color: var(--muted); }
     .thumb { width: 38px; height: 48px; flex: none; object-fit: cover; object-position: top; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); }
     .doc b { display: block; max-width: 280px; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
     .doc span, .date span { color: var(--muted); font-size: .76rem; }
@@ -261,7 +265,7 @@
 <body>
   <section class="login" id="login" hidden>
     <form class="card" id="login-form">
-      <a class="brand" href="/"><img src="/assets/logo.png" alt=""><div><b>Not So Smart OCR</b><span>Admin</span></div></a>
+      <a class="brand" href="/"><img src="/assets/logo.png" alt=""><div><b>HiLabs OCR</b><span>Admin</span></div></a>
       <h2>Sign in to the dashboard</h2>
       <p>The dashboard shows the documents people send, so it needs the admin token set on the server.</p>
       <input id="token" type="password" autocomplete="current-password" placeholder="Admin token" aria-label="Admin token" required>
@@ -272,7 +276,7 @@
 
   <div class="app" id="app" hidden>
     <aside class="sidebar">
-      <a class="brand" href="#overview"><img src="/assets/logo.png" alt=""><div><b>Not So Smart OCR</b><span>Admin</span></div></a>
+      <a class="brand" href="#overview"><img src="/assets/logo.png" alt=""><div><b>HiLabs OCR</b><span>Admin</span></div></a>
       <nav class="nav" aria-label="Dashboard">
         <a href="#overview" data-view="overview"><svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Overview</a>
         <a href="#activity" data-view="activity"><svg class="icon" viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Activity</a>
@@ -377,7 +381,7 @@
         <article class="card">
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Date</th><th>Document</th><th>Verdict</th><th>Reason</th><th>Note</th><th class="num">Page</th></tr></thead>
+              <thead><tr><th>Date</th><th>Document</th><th>Verdict</th><th>What went wrong</th><th>Region</th><th>Note</th><th class="num">Page</th></tr></thead>
               <tbody id="feedback-rows"></tbody>
             </table>
           </div>
@@ -456,7 +460,7 @@
     const reasonLabel = (reason) => REASONS[reason] || (reason.charAt(0).toUpperCase() + reason.slice(1)).replaceAll("_", " ");
     const state = { entries: [], feedback: [], seen: new Set(), view: "overview", metric: "requests", filter: "all", query: "", shown: 100, detail: null, regionFilter: "routed", activeRegion: null };
     const VIEWS = {
-      overview: ["Overview", "How Not So Smart OCR is being used, live."],
+      overview: ["Overview", "How HiLabs OCR is being used, live."],
       activity: ["Activity", "When people use the service."],
       logs: ["Logs", "Every request, with its page, routing and cost."],
       feedback: ["Feedback", "What reviewers said about their results."],
@@ -778,6 +782,15 @@
       byId("rows").replaceChildren(...rows.map(logRow));
     }
 
+    // The region a reviewer pointed at: its crop, what the reader read and what it should read.
+    function feedbackRegion(item) {
+      if (!item.region) return element("span", { className: "muted", textContent: "Whole page" });
+      const crop = element("img", { className: "region-crop", alt: "Reported region", src: `/api/feedback/${item.id}/region.png` });
+      const read = element("span", { textContent: `Read: ${item.region.text || "(nothing)"}` });
+      const fixed = item.expected_text ? element("span", { className: "fixed", textContent: `Should read: ${item.expected_text}` }) : "";
+      return element("div", { className: "feedback-region" }, [crop, read, fixed]);
+    }
+
     function renderFeedback() {
       const items = state.feedback.filter((item) => new Date(item.created_at).getTime() > Date.now() - rangeDays() * DAY)
         .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
@@ -789,7 +802,8 @@
         const entry = state.entries.find((candidate) => candidate.session_id === item.session_id);
         const row = element("tr", { className: entry ? "clickable" : "" }, [
           element("td", {}, [dateCell(item.created_at)]), element("td", { textContent: item.filename || "-" }), element("td", {}, [verdictBadge(item.verdict)]),
-          element("td", { textContent: String(item.reason || "-").replaceAll("_", " ") }), element("td", { textContent: item.note || "-" }), element("td", { className: "num", textContent: item.page_number ?? "-" }),
+          element("td", { textContent: (item.reasons || [item.reason]).filter(Boolean).map((reason) => reason.replaceAll("_", " ")).join(", ") || "-" }),
+          element("td", {}, [feedbackRegion(item)]), element("td", { textContent: item.note || "-" }), element("td", { className: "num", textContent: item.page_number ?? "-" }),
         ]);
         if (entry) row.addEventListener("click", () => openDrawer(entry));
         return row;

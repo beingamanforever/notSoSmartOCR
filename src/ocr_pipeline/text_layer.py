@@ -17,6 +17,8 @@ from typing import Any, NamedTuple
 
 # Docling's OcrOptions default: OCR a page only if bitmaps cover more than this share.
 BITMAP_AREA_THRESHOLD = 0.05
+# Fewer visible characters than this is no usable text layer; the page is read as a scan.
+MIN_TEXT_LAYER_CHARS = 50
 # Wingdings draws checkboxes with Latin-1 code points; these are its box glyphs.
 WINGDINGS = {
     "¨": "☐",
@@ -153,6 +155,10 @@ def _page_cells(page, size, scale, chars, direction) -> list[dict[str, Any]] | N
             for text, (left, top, right, bottom) in pieces
             if text.strip()
         ]
+    # A scan can carry a few stray text objects ("et seq" on a one-page letter); trusting them
+    # makes every picture region take its text from the layer and drops the page body.
+    if sum(len(cell["text"].strip()) for cell in cells) < MIN_TEXT_LAYER_CHARS:
+        return None
     return cells or None
 
 

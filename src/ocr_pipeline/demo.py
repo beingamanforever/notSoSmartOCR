@@ -8,6 +8,7 @@ import inspect
 import io
 import json
 import logging
+import queue
 import secrets
 import re
 import shutil
@@ -40,6 +41,7 @@ from .contracts import (
 )
 from .cross_page_tables import CrossPageTableStage
 from .evidence_layout import refresh_layout_owners
+from .page_arrangement import arrange_page, arranged_markdown
 from .falcon import is_verified_falcon_model_provenance
 from .pipeline import (
     DEFAULT_PDF_DPI,
@@ -92,7 +94,89 @@ def _display_response(response: dict[str, Any]) -> dict[str, Any]:
                 asset["url"] = (
                     f"/api/sessions/{response['session_id']}/regions/{region['id']}.png"
                 )
+        _hide_suppressed_sections(page)
     return display
+
+
+# Arrangement drops these from the reading; containers, sources and empty figures are
+# never sections in the first place.
+HIDDEN_REASONS = {"junk_speck", "repeated_text", "empty_graphic"}
+
+
+def _hide_suppressed_sections(page: dict[str, Any]) -> None:
+    """Keep the reader's sections in step with result.md: the same reading order, and a
+    layout block whose every region the arrangement dropped as a speck or a repeat is
+    listed, not shown."""
+    if not _learned_order_page(page):
+        return
+    arrangement = _arrangement(
+        {**page, "regions": _clean_render_regions(_presentation_canonical_regions(page))}
+    )
+    if "error" in arrangement:
+        return
+    hidden = [item for item in arrangement["suppressed"] if item["reason"] in HIDDEN_REASONS]
+    hidden_ids = {item["region_id"] for item in hidden}
+    owners = {
+        region["id"]: set((region.get("structure") or {}).get("child_evidence_ids") or [])
+        for region in page["regions"]
+        if (region.get("structure") or {}).get("role") == "layout_block"
+    }
+    shown = [
+        evidence_id
+        for evidence_id in page["text"].get("evidence_ids", [])
+        if not (evidence_id in hidden_ids or (owners.get(evidence_id) and owners[evidence_id] <= hidden_ids))
+    ]
+    # Sections follow the arrangement's reading order, the order result.md uses.
+    position: dict[str, int] = {}
+    for rank, block in enumerate(arrangement["blocks"]):
+        for region_id in (*block["label_ids"], *block["region_ids"]):
+            position.setdefault(region_id, rank)
+
+    def rank_of(evidence_id: str) -> int:
+        if evidence_id in position:
+            return position[evidence_id]
+        return min(
+            (position[child] for child in owners.get(evidence_id, ()) if child in position),
+            default=len(arrangement["blocks"]),
+        )
+
+    page["text"] = {**page["text"], "evidence_ids": sorted(shown, key=rank_of)}
+    page["arrangement"] = arrangement
+    page["hidden_regions"] = hidden
+
+
+def _with_arrangements(result: dict[str, Any]) -> dict[str, Any]:
+    """The result with each page's reading order, pairings and suppressed duplicates, so a
+    downloaded result renders the same way the Markdown export reads."""
+    return {**result, "pages": [{**page, "arrangement": _arrangement(page)} for page in result["pages"]]}
+
+
+def _learned_order_page(page: dict[str, Any]) -> bool:
+    methods = {
+        (region.get("structure") or {}).get("presentation_order_method")
+        for region in page.get("regions") or []
+        if (region.get("structure") or {}).get("role") == "layout_block"
+    }
+    return methods == {"xy_cut"}
+
+
+def _arrangement(page: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return arrange_page(page)
+    except Exception as error:  # the export falls back to the canonical order, visibly
+        LOGGER.exception("Page arrangement failed on page %s", page.get("page_number"))
+        return {"error": f"{type(error).__name__}: {error}"}
+
+
+def _compact_result(result: dict[str, Any]) -> dict[str, Any]:
+    """The downloaded result without each crop's embedded base64 image bytes."""
+    compact = copy.deepcopy(result)
+    for page in compact["pages"]:
+        for region in page["regions"]:
+            asset = (region.get("structure") or {}).get("image")
+            if asset:
+                asset.pop("data", None)
+    return compact
 
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
@@ -102,12 +186,22 @@ PROGRESS_KEY = re.compile(r"[A-Za-z0-9_-]{8,64}")
 PROGRESS_RETENTION = 64
 # Finished sessions kept in memory; the oldest is dropped with its files beyond this.
 SESSION_RETENTION = 96
-# Bounds the background pool that runs deferred LLM refinement jobs.
-REFINEMENT_WORKERS = 4
+# Documents whose LLM refinement runs at once (each runs its pages in parallel too).
+# Requests are independent, so this changes waiting only, never a reply; at 4, the 5th to
+# 8th of 8 uploads waited for a slot while the GPU sat idle.
+REFINEMENT_WORKERS = 8
+# Uploads whose pages render at the same time.
+PREVIEW_WORKERS = 2
 # Long-poll ceiling for GET .../refinement; the hosted call itself is far shorter.
 REFINEMENT_WAIT_SECONDS = 300
+# Sentinels on a per-request page feed queue: every page is read, or reading failed.
+_PAGE_FEED_DONE = object()
+_PAGE_FEED_ABORTED = object()
 FEEDBACK_REASONS = frozenset(
-    {"missing_text", "wrong_text", "reading_order", "table", "handwriting", "other"}
+    {
+        "missing_text", "wrong_text", "reading_order", "table", "handwriting",
+        "not_text", "duplicate", "other",
+    }
 )
 MAX_DOCUMENT_PAGES = 32
 MAX_PAGE_PIXELS = 32_000_000
@@ -795,7 +889,11 @@ def create_app(
     session_root = Path(temporary_root.name)
     sessions = SessionStore(session_root)
     backend_version = _backend_version(active_reader)
-    prepare_lock = threading.Lock()
+    # Rendering is per-request CPU work into the request's own folder, so uploads render
+    # side by side instead of queueing behind one another before the GPU.
+    # ponytail: two at a time bounds peak memory on the 30 GB no-swap host (a 300 dpi
+    # letter page is about 25 MB decoded); raise it on a bigger host after measuring.
+    prepare_lock = threading.BoundedSemaphore(PREVIEW_WORKERS)
     process_lock = threading.Lock()
     parse_queue = FairQueue()
     # Refinements of different documents overlap: one dense form's 100 s reply must not
@@ -824,7 +922,7 @@ def create_app(
             sessions.cleanup()
             temporary_root.cleanup()
 
-    app = FastAPI(title="Not So Smart OCR", lifespan=handle_lifespan)
+    app = FastAPI(title="HiLabs OCR", lifespan=handle_lifespan)
     app.state.session_root = session_root
     app.state.sessions = sessions
     app.state.prepare_lock = prepare_lock
@@ -955,6 +1053,11 @@ def create_app(
 
         session_id, session_dir = sessions.create()
         source = session_dir / f"source{suffix}"
+        # Set before anything below can fail, so an early exception's handler can
+        # safely check whether a page feed is live without raising a second error.
+        streams_pages = False
+        page_feed_queue: queue.SimpleQueue | None = None
+        early_refinement: dict[str, Any] = {}
         try:
             total_started = getattr(
                 request.state,
@@ -991,7 +1094,28 @@ def create_app(
                         page_progress.pop(next(iter(page_progress)))
                     page_progress[progress_key] = {"total": len(preview_paths), "pages": [], "images": preview_paths}
 
+            # Only a refiner that accepts page_feed gets pages before the document is
+            # fully read; an older or fake refiner keeps the legacy, post-read call.
+            streams_pages = crop_refiner is not None and (
+                "page_feed" in inspect.signature(crop_refiner).parameters
+            )
+            deferring_refinement = defer_refinement and crop_refiner is not None
+            page_feed_queue = queue.SimpleQueue() if streams_pages else None
+
+            def feed_pages():
+                while True:
+                    item = page_feed_queue.get()
+                    if item is _PAGE_FEED_DONE:
+                        return
+                    if item is _PAGE_FEED_ABORTED:
+                        raise RuntimeError(
+                            "OCR processing failed before every page reached refinement"
+                        )
+                    yield item
+
             def publish_page(page: PageResult) -> None:
+                if streams_pages:
+                    page_feed_queue.put(page)
                 if not progress_key:
                     return
                 shown = asdict(page)
@@ -1029,40 +1153,14 @@ def create_app(
                     if progress_key in page_progress:
                         page_progress[progress_key]["ticket"] = ticket
 
-            with parse_queue.turn(hold_ticket), process_lock:
-                queue_seconds = time.perf_counter() - queued
-                started = time.perf_counter()
-                pages_before = cache_stats("pages")
-                document = process_document(
-                    source,
-                    active_reader,
-                    stages=active_stages,
-                    cross_page_table_stage=(
-                        None if crop_refiner is not None else cross_page_table_stage
-                    ),
-                    timings=pipeline_timings,
-                    stage_execution=stage_execution,
-                    page_execution=page_execution,
-                    prepared_pages=prepared_pages,
-                    max_pages=max_pages,
-                    max_page_pixels=max_page_pixels,
-                    max_pixels=max_decoded_pixels,
-                    on_page=publish_page,
-                )
-                count_cache("pages", "page_cache", pages_before)
-                coverage = _coverage_assessment(active_reader, len(document.pages))
-                reader_review = getattr(active_reader, "page_needs_review", None)
-                reader_review_pages = [
-                    page.page_number
-                    for page in document.pages
-                    if callable(reader_review) and reader_review(page.page_number)
-                ]
             refinement_applied = False
 
-            def run_refinement_stage() -> None:
+            def run_refinement_stage(document: DocumentResult, *, page_feed=None) -> None:
                 nonlocal refinement_applied
                 with refine_lock:
-                    if crop_refiner is not None and document.pages:
+                    # A page feed is empty exactly when it still is at this check: pages
+                    # not yet read arrive later, refine_document blocks for them.
+                    if crop_refiner is not None and (page_feed is not None or document.pages):
                         refinement_started = time.perf_counter()
                         # Crops answered so far, shown while the reply is still streaming.
                         previews = refinement_previews.setdefault(session_id, {})
@@ -1078,6 +1176,7 @@ def create_app(
                                 document,
                                 preview_paths,
                                 **({"on_partial": preview} if streams else {}),
+                                **({"page_feed": page_feed} if page_feed is not None else {}),
                             )
                         finally:
                             count_cache("llm_replies", "llm_cache", replies_before)
@@ -1114,6 +1213,43 @@ def create_app(
                                 }
                             )
                 refinement_applied = True
+
+            def on_start(starting_document: DocumentResult) -> None:
+                # Submitted before the first page is even read, so page 1's hosted
+                # call can start while later pages are still being read and staged.
+                early_refinement["future"] = app.state.refinement_executor.submit(
+                    run_refinement_stage, starting_document, page_feed=feed_pages()
+                )
+
+            with parse_queue.turn(hold_ticket), process_lock:
+                queue_seconds = time.perf_counter() - queued
+                started = time.perf_counter()
+                pages_before = cache_stats("pages")
+                document = process_document(
+                    source,
+                    active_reader,
+                    stages=active_stages,
+                    cross_page_table_stage=(
+                        None if crop_refiner is not None else cross_page_table_stage
+                    ),
+                    timings=pipeline_timings,
+                    stage_execution=stage_execution,
+                    page_execution=page_execution,
+                    prepared_pages=prepared_pages,
+                    max_pages=max_pages,
+                    max_page_pixels=max_page_pixels,
+                    max_pixels=max_decoded_pixels,
+                    on_page=publish_page,
+                    on_start=on_start if streams_pages else None,
+                )
+                count_cache("pages", "page_cache", pages_before)
+                coverage = _coverage_assessment(active_reader, len(document.pages))
+                reader_review = getattr(active_reader, "page_needs_review", None)
+                reader_review_pages = [
+                    page.page_number
+                    for page in document.pages
+                    if callable(reader_review) and reader_review(page.page_number)
+                ]
 
             presentations: dict[int, dict[str, Any]] = {}
 
@@ -1239,6 +1375,7 @@ def create_app(
                         "preview_queue_seconds": round(preview_queue_seconds, 3),
                         "queue_seconds": round(queue_seconds, 3),
                         "pipeline_seconds": round(elapsed_seconds, 3),
+                        "ocr_seconds": round(ocr_seconds, 3),
                         "preview_seconds": round(preview_seconds, 3),
                         "total_seconds": round(total_seconds, 3),
                         "pipeline_steps": {
@@ -1262,12 +1399,17 @@ def create_app(
                     response["refinement"] = refinement_payload
                 return response
 
+            # The reader's own time, before any LLM refinement; every revision reports it.
+            ocr_seconds = time.perf_counter() - started
             # A deferring client gets the OCR-only result immediately and the refined
             # one from GET .../refinement once the hosted call finishes in the
             # background; this keeps a slow hosted call off the request path entirely.
-            deferring_refinement = defer_refinement and crop_refiner is not None
             if not deferring_refinement:
-                run_refinement_stage()
+                if streams_pages and early_refinement.get("future") is not None:
+                    page_feed_queue.put(_PAGE_FEED_DONE)
+                    early_refinement["future"].result()
+                else:
+                    run_refinement_stage(document)
             run_cross_page_and_presentation()
             response = build_response(
                 1, {"status": "pending"} if deferring_refinement else None
@@ -1305,9 +1447,14 @@ def create_app(
             if deferring_refinement:
                 refinement_event = session_state["refinement_event"]
 
-                def finish_deferred_refinement() -> None:
+                def finish_deferred_refinement(
+                    *, already_refined: bool = False, early_error: BaseException | None = None
+                ) -> None:
                     try:
-                        run_refinement_stage()
+                        if early_error is not None:
+                            raise early_error
+                        if not already_refined:
+                            run_refinement_stage(document)
                         run_cross_page_and_presentation()
                         # A partial page keeps its accepted crops (its unresolved ones are
                         # in document.failures, as on the synchronous path); only a
@@ -1346,11 +1493,15 @@ def create_app(
                             current["revision"] = 2
                     refinement_event.set()
 
-                def finish_safely() -> None:
+                def finish_safely(
+                    *, already_refined: bool = False, early_error: BaseException | None = None
+                ) -> None:
                     # An executor keeps a job's exception to itself; log it, and never
                     # leave the browser's long poll waiting on an event nobody sets.
                     try:
-                        finish_deferred_refinement()
+                        finish_deferred_refinement(
+                            already_refined=already_refined, early_error=early_error
+                        )
                     except Exception:
                         LOGGER.exception("Deferred refinement job failed")
                     finally:
@@ -1360,13 +1511,28 @@ def create_app(
                         if discard:
                             shutil.rmtree(session_dir, ignore_errors=True)
 
-                app.state.refinement_executor.submit(finish_safely)
+                if streams_pages and early_refinement.get("future") is not None:
+                    # The hosted call for every page is already running on this future
+                    # (started from on_start); chaining onto it, instead of submitting a
+                    # second job, can never need a worker slot the running job is holding.
+                    page_feed_queue.put(_PAGE_FEED_DONE)
+                    early_refinement["future"].add_done_callback(
+                        lambda future: finish_safely(
+                            already_refined=True, early_error=future.exception()
+                        )
+                    )
+                else:
+                    app.state.refinement_executor.submit(finish_safely)
 
             return JSONResponse(_display_response(response) if compact else response)
         except HTTPException:
+            if streams_pages and early_refinement.get("future") is not None:
+                page_feed_queue.put(_PAGE_FEED_ABORTED)
             shutil.rmtree(session_dir, ignore_errors=True)
             raise
         except Exception as error:
+            if streams_pages and early_refinement.get("future") is not None:
+                page_feed_queue.put(_PAGE_FEED_ABORTED)
             shutil.rmtree(session_dir, ignore_errors=True)
             LOGGER.exception("OCR processing failed")
             raise HTTPException(
@@ -1589,13 +1755,23 @@ def create_app(
             return JSONResponse(_display_response(response) if compact else response)
 
     @app.get("/api/sessions/{session_id}/result.json")
-    def handle_json_download(session_id: str, revision: int | None = None) -> Any:
+    def handle_json_download(
+        session_id: str,
+        revision: int | None = None,
+        compact: bool = False,
+        arrangement: bool = False,
+    ) -> Any:
         with state_lock:
             session = _get_session(sessions, session_id)
             if revision is not None and revision != session["revision"]:
                 raise HTTPException(409, "The requested revision is no longer current")
+            result = session["response"]["result"]
+            if arrangement:
+                result = _with_arrangements(result)
             content = json.dumps(
-                session["response"]["result"], indent=2, ensure_ascii=False
+                _compact_result(result) if compact else result,
+                indent=2,
+                ensure_ascii=False,
             )
         return Response(
             content,
@@ -1801,11 +1977,16 @@ def create_app(
         verdict = payload.get("verdict")
         if verdict not in {"good", "problem"}:
             raise HTTPException(400, "verdict must be good or problem")
-        reason = payload.get("reason") if verdict == "problem" else None
-        if verdict == "problem" and reason not in FEEDBACK_REASONS:
+        reasons = payload.get("reasons") or [payload.get("reason")]
+        if verdict == "good":
+            reasons = []
+        elif not isinstance(reasons, list) or not reasons or not set(reasons) <= FEEDBACK_REASONS:
             raise HTTPException(
-                400, f"reason must be one of: {', '.join(sorted(FEEDBACK_REASONS))}"
+                400, f"reasons must be from: {', '.join(sorted(FEEDBACK_REASONS))}"
             )
+        region_id = payload.get("region_id")
+        if region_id is not None and not isinstance(region_id, str):
+            raise HTTPException(400, "region_id must be a region id")
         page_number = payload.get("page_number")
         # Thumbs-down is recorded on the click; the reason sent after it amends that
         # record rather than counting the same verdict twice.
@@ -1819,10 +2000,13 @@ def create_app(
             "id": amended.parent.name if amends else secrets.token_urlsafe(8),
             "session_id": session_id,
             "verdict": verdict,
-            "reason": reason,
+            "reason": reasons[0] if reasons else None,
+            "reasons": reasons,
             "page_number": page_number,
             "filename": payload.get("filename"),
             "note": str(payload.get("note") or "")[:500] or None,
+            # What the reviewer says the region should read; the reader applies it as an edit.
+            "expected_text": str(payload.get("expected_text") or "")[:2000] or None,
         }
         with state_lock:
             session = _get_session(sessions, session_id)
@@ -1836,6 +2020,17 @@ def create_app(
             if type(page_number) is not int or not 1 <= page_number <= len(pages):
                 raise HTTPException(400, "page_number must identify the reviewed page")
             record["page_number"] = page_number
+            if region_id:
+                page, index = _session_page_region(session, page_number, region_id)
+                region = page.regions[index]
+                box = region.bounding_box
+                record["region"] = {
+                    "id": region.id,
+                    "kind": region.kind,
+                    "text": region.text,
+                    "box": [box.left, box.top, box.right, box.bottom],
+                    "read_by": (region.text_provenance or {}).get("method"),
+                }
             record["created_at"] = datetime.now(UTC).isoformat()
             record["revision"] = session["revision"]
             record["filename"] = session["response"]["filename"]
@@ -1847,10 +2042,11 @@ def create_app(
                 ) from error
         # The note can hold patient details, so only its length is logged.
         LOGGER.info(
-            "feedback %s verdict=%s reason=%s session=%s page=%s revision=%s note_chars=%d",
+            "feedback %s verdict=%s reasons=%s region=%s session=%s page=%s revision=%s note_chars=%d",
             record["id"],
             record["verdict"],
-            record["reason"],
+            ",".join(record["reasons"]),
+            (record.get("region") or {}).get("id"),
             session_id,
             record["page_number"],
             record["revision"],
@@ -1889,6 +2085,14 @@ def create_app(
         if not _safe_child(feedback_dir, page_path) or not page_path.is_file():
             raise HTTPException(404, "Feedback page image was not found")
         return FileResponse(page_path, media_type="image/png")
+
+    @app.get("/api/feedback/{feedback_id}/region.png")
+    def feedback_region(feedback_id: str) -> Any:
+        """Return the region the reviewer pointed at, cut from the judged page."""
+        region_path = feedback_dir / feedback_id / "region.png"
+        if not _safe_child(feedback_dir, region_path) or not region_path.is_file():
+            raise HTTPException(404, "Feedback region image was not found")
+        return FileResponse(region_path, media_type="image/png")
 
     @app.get("/api/feedback/{feedback_id}/result")
     def feedback_result(feedback_id: str) -> Any:
@@ -2296,6 +2500,13 @@ def _store_feedback(
         shutil.copyfile(
             session["pages"][record["page_number"] - 1], pending / "page.png"
         )
+        if record.get("region"):
+            left, top, right, bottom = record["region"]["box"]
+            with Image.open(pending / "page.png") as page:
+                page.crop(
+                    (max(left - 12, 0), max(top - 12, 0), min(right + 12, page.width), min(bottom + 12, page.height))
+                ).save(pending / "region.png")
+            stored["region_image"] = True
         (pending / "record.json").write_text(
             json.dumps({**record, "stored": stored}, indent=2, sort_keys=True),
             encoding="utf-8",
@@ -4097,35 +4308,32 @@ def _pages_with_table_continuations(
 
 def _result_markdown(response: dict[str, Any]) -> str:
     result = response["result"]
-    lines = [
-        "# OCR result",
-        "",
-        f"- File: {response['filename']}",
-        f"- Revision: {result['revision']}",
-        f"- Status: {result['status']}",
-        f"- Backend: {response['backend']}",
-        f"- Backend version: {response['backend_version']}",
-        f"- Elapsed: {response['elapsed_seconds']:.3f} seconds",
-        f"- Geometry: {response['geometry']}",
-        f"- Coverage: {response['coverage_assessment']['status']}",
-        f"- Coverage note: {response['coverage_assessment']['message']}",
-    ]
+    # Run details (backend, timing, coverage) stay in result.json; the Markdown is the document.
+    lines = ["# OCR result", "", f"- File: {response['filename']}"]
     pages = _pages_with_table_continuations(
         result["pages"],
         result.get("table_continuations", []),
     )
     for page in pages:
-        canonical_source_regions = _presentation_canonical_regions(page)
-        canonical_regions = _clean_render_regions(canonical_source_regions)
-        canonical_markdown = render_page_markdown(
-            canonical_regions,
-            [
-                str(region["id"])
-                for region in canonical_source_regions
-                if region.get("id")
-            ],
-            fallback=_visible_literal(page["text"]["value"], "resolved"),
-        )
+        # Arrange the canonical regions the old renderer used: superseded formula fragments
+        # and unsafe table spans are already cleaned out of them.
+        canonical_page = {**page, "regions": _clean_render_regions(_presentation_canonical_regions(page))}
+        # The arrangement re-orders pages the learned layout path ordered (it reads a form
+        # container row by row and interleaves its columns); spatially ordered pages keep the
+        # renderer built for their form rows.
+        arrangement = _arrangement(canonical_page) if _learned_order_page(page) else {"error": "not arranged"}
+        if "error" not in arrangement:
+            # Duplicates and specks removed, labels kept with their values, columns in order.
+            canonical_markdown = arranged_markdown(canonical_page, arrangement) or _visible_literal(
+                page["text"]["value"], "resolved"
+            )
+        else:
+            canonical_source_regions = _presentation_canonical_regions(page)
+            canonical_markdown = render_page_markdown(
+                _clean_render_regions(canonical_source_regions),
+                [str(region["id"]) for region in canonical_source_regions if region.get("id")],
+                fallback=_visible_literal(page["text"]["value"], "resolved"),
+            )
         presentation = next(
             (
                 item

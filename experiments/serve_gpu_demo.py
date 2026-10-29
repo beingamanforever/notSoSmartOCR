@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
+import shutil
+import tempfile
 from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
@@ -25,7 +28,15 @@ from ocr_pipeline.orientation import (
     OFFICIAL_UPRIGHT_PRIOR,
     DocTROrientationDetector,
 )
-from ocr_pipeline.pipeline import DEFAULT_PDF_DPI, falcon_pipeline, process_document
+from ocr_pipeline.pipeline import (
+    DEFAULT_PDF_DPI,
+    _prepare_pages,
+    _source_kind,
+    falcon_pipeline,
+    process_document,
+)
+
+LOGGER = logging.getLogger(__name__)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -39,6 +50,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+def _warm_pdf_text_layer_import() -> None:
+    """Pay the text-layer backend's one-time import cost at startup, not on the
+    first born-digital PDF: on the A10G host it took a page-rendering request from
+    ~1s to ~8s (torch and transformers come in transitively), measured with
+    experiments/profile_ocr_stages.py. Output is unaffected either way, since
+    nothing here touches a real upload; a host without pdftoppm just skips it.
+    """
+    if shutil.which("pdftoppm") is None:
+        return
+    try:
+        import fitz
+
+        with tempfile.TemporaryDirectory(prefix="ocr-warmup-") as directory:
+            source = Path(directory) / "warmup.pdf"
+            with fitz.open() as pdf:
+                pdf.new_page(width=72, height=72)
+                pdf.save(source)
+            _prepare_pages(
+                source, _source_kind(source), Path(directory), DEFAULT_PDF_DPI, "pdftoppm"
+            )
+    except Exception:
+        LOGGER.exception("PDF text-layer warmup failed; the first real PDF pays the cost")
+
+
 def create_verified_app(
     args: argparse.Namespace,
     *,
@@ -47,6 +82,7 @@ def create_verified_app(
     app_factory: Callable[..., Any] = create_app,
     warmup_runner: Callable[..., object] = process_document,
 ) -> Any:
+    _warm_pdf_text_layer_import()
     # Opt-in, in-memory caches keyed by content; both are off unless sized.
     ttl = args.cache_ttl_hours * 3600
     caches = {
@@ -136,7 +172,17 @@ def create_verified_app(
             ):
                 raise RuntimeError("OCR warmup did not produce a successful document")
         app_options["warmup_completed"] = True
-    return app_factory(reader, **app_options)
+    app = app_factory(reader, **app_options)
+    if args.enrollment_root is not None:
+        from ocr_pipeline.enrollment.app import build_app
+
+        # One interface: enrollment review lives under /enrollment of the OCR service and
+        # reads documents through this same service.
+        app.mount("/enrollment", build_app(
+            args.enrollment_root, f"http://127.0.0.1:{args.port}",
+            llm_budget_usd=args.enrollment_llm_budget_usd, allow_jev=args.enrollment_allow_jev,
+        ))
+    return app
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -279,6 +325,17 @@ def _parser() -> argparse.ArgumentParser:
         "--katex-asset-root",
         type=Path,
         help="Serve local KaTeX assets for formula presentation",
+    )
+    parser.add_argument(
+        "--enrollment-root",
+        type=Path,
+        help="Serve enrollment review at /enrollment, storing cases here (outside the repo)",
+    )
+    parser.add_argument("--enrollment-llm-budget-usd", type=float, default=5.0)
+    parser.add_argument(
+        "--enrollment-allow-jev",
+        action="store_true",
+        help="Let synthetic enrollment cases use the verifier service",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8081)
