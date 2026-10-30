@@ -131,16 +131,14 @@ every supplied ID. Copy only the text visible inside that physical cell. Keep an
 empty cell as an empty string. Do not invent IDs or recreate the table as HTML.
 Set markdown to "[table cells extracted]" for those crops.
 """
-FORM_ROW_PROMPT = """Read every selectable option in each labeled form crop: a whole
-form (form_source) or one form row (owned_form_row).
+FORM_ROW_PROMPT = """Read every selectable option in each labeled form row.
 The first image is low-resolution page context only. Use it to understand the
-page, but do not add options outside a labeled crop. Blank bands in a form_source
-crop are masked because their pixels belong to separate owned_form_row crops; do
-not return options from a masked band. Return every crop ID exactly once. For every
-visible option, copy its complete label, group label, state, and a tight bbox_2d in
-the crop's 0-to-1000 coordinate grid. State is selected, unselected, or ambiguous
-based only on visible ink. Do not summarize, guess missing options, or omit visible
-unselected options. Set markdown to "[form options extracted]" for every crop.
+page, but do not add options outside a labeled row crop. Return every row ID
+exactly once. For every visible option, copy its complete label, group label,
+state, and a tight bbox_2d in the row crop's 0-to-1000 coordinate grid. State is
+selected, unselected, or ambiguous based only on visible ink. Do not summarize,
+guess missing options, or omit visible unselected options. Set markdown to
+"[form options extracted]" for every row.
 """
 
 
@@ -546,7 +544,7 @@ def refine_page(
         metadata["source_image_size"] = {"width": image.width, "height": image.height}
         source_image = image.convert("RGB")
         sheet = _contact_sheet(source_image, crops, width, height, rotation_degrees)
-        if any(_is_form_control_crop(crop, source_index[crop["source_ids"][0]]) for crop in crops):
+        if any("owned_form_row" in crop["routing_reasons"] for crop in crops):
             page_context = source_image.rotate(rotation_degrees, expand=True)
             page_context.thumbnail((800, 800))
             metadata["input_mode"] = "separate_crop_images_with_page_context"
@@ -597,11 +595,7 @@ def refine_page(
     owned_row_crops = [
         crop for crop in crops if "owned_form_row" in crop["routing_reasons"]
     ]
-    # A form crop is read for its options only. Asked to transcribe as well, Qwen wrote out
-    # the W-9's whole form (5,400 characters, most of the page's LLM time) for a text the
-    # pipeline then discards.
-    form_crops = [crop for crop in crops if _is_form_control_crop(crop, source_index[crop["source_ids"][0]])]
-    primary_crops = [crop for crop in crops if crop not in form_crops]
+    primary_crops = [crop for crop in crops if crop not in owned_row_crops]
 
     def primary_messages_for(chunk):
         chunk_ids = {crop["region_id"] for crop in chunk}
@@ -714,7 +708,7 @@ def refine_page(
         requests = []
         for chunk in _chunks(primary_crops):
             requests.append((chunk, primary_messages_for(chunk), "page_crops"))
-        for chunk in _chunks(form_crops):
+        for chunk in _chunks(owned_row_crops):
             row_messages = [
                 {
                     "role": "system",
@@ -750,15 +744,14 @@ def refine_page(
                         {
                             "type": "text",
                             "text": (
-                                f"{crop['region_id']} "
-                                f"{'owned_form_row' if crop in owned_row_crops else 'form_source'}: "
+                                f"{crop['region_id']} owned_form_row: "
                                 f"{panel.width} x {panel.height} pixels"
                             ),
                         },
                         _image_content(panel),
                     ]
                 )
-            requests.append((chunk, row_messages, "form_controls"))
+            requests.append((chunk, row_messages, "owned_form_rows"))
 
         def read_crops(request):
             requested_crops, messages, schema_name = request

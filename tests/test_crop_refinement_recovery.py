@@ -273,19 +273,7 @@ def test_owned_form_row_uses_single_row_evidence_for_nonoverlapping_controls(
         if schema_name == "page_crops":
             assert "page_context" not in prompt
             assert "owned_form_row" not in prompt
-            assert "form_source" not in prompt  # form crops are read only for their options
-            crops = [{"region_id": "crop-2", "markdown": "[signature]"}]
-        else:
-            assert schema_name == "form_controls"
-            assert "page_context" in prompt
-            assert "owned_form_row" in prompt and "form_source" in prompt
-            assert (
-                sum(
-                    item.get("type") == "image_url"
-                    for item in payload["messages"][1]["content"]
-                )
-                == 3
-            )
+            assert "form_source" in prompt
             crops = [
                 {
                     "region_id": "crop-1",
@@ -299,6 +287,20 @@ def test_owned_form_row_uses_single_row_evidence_for_nonoverlapping_controls(
                         }
                     ],
                 },
+                {"region_id": "crop-2", "markdown": "[signature]"},
+            ]
+        else:
+            assert schema_name == "owned_form_rows"
+            assert "page_context" in prompt
+            assert "owned_form_row" in prompt
+            assert (
+                sum(
+                    item.get("type") == "image_url"
+                    for item in payload["messages"][1]["content"]
+                )
+                == 2
+            )
+            crops = [
                 {
                     "region_id": "crop-3",
                     "markdown": "[form options extracted]",
@@ -316,7 +318,7 @@ def test_owned_form_row_uses_single_row_evidence_for_nonoverlapping_controls(
                             "bbox_2d": [500, 125, 950, 500],
                         },
                     ],
-                },
+                }
             ]
         answer = {"crops": crops}
         return (
@@ -413,9 +415,25 @@ def test_owned_form_row_failure_keeps_completed_primary_request(tmp_path, monkey
 
     def transport(request, timeout):
         payload = json.loads(request.data)
-        if payload["response_format"]["json_schema"]["name"] == "form_controls":
-            return 500, {}, b'{"error":{"message":"form reader unavailable"}}'
-        answer = {"crops": [{"region_id": "crop-2", "markdown": "[signature]"}]}
+        if payload["response_format"]["json_schema"]["name"] == "owned_form_rows":
+            return 500, {}, b'{"error":{"message":"row reader unavailable"}}'
+        answer = {
+            "crops": [
+                {
+                    "region_id": "crop-1",
+                    "markdown": "[form options extracted]",
+                    "controls": [
+                        {
+                            "label": "Uncovered option",
+                            "group_label": "Other",
+                            "state": "unselected",
+                            "bbox_2d": [100, 700, 600, 900],
+                        }
+                    ],
+                },
+                {"region_id": "crop-2", "markdown": "[signature]"},
+            ]
+        }
         return (
             200,
             {},
@@ -445,8 +463,8 @@ def test_owned_form_row_failure_keeps_completed_primary_request(tmp_path, monkey
     assert result["attempts"] == 1 + refinement.QWEN_ATTEMPTS
     assert result["accepted_crop_ids"] == ["crop-2"]
     assert result["rejected_crop_ids"] == ["crop-1", "crop-3"]
-    assert result["accepted_control_crop_ids"] == []  # the form and its row share the failed request
-    assert result["request_errors"][0]["request"] == "form_controls"
+    assert result["accepted_control_crop_ids"] == ["crop-1"]
+    assert result["request_errors"][0]["request"] == "owned_form_rows"
     assert "[signature]" in result["content"]["markdown"]
 
 
@@ -1535,9 +1553,9 @@ def test_thin_form_control_maps_sent_pixels_back_to_source(
             for part in body["messages"][1]["content"]
             if part["type"] == "image_url"
         ]
-        assert len(images) == 2  # the page overview, then the form crop
+        assert len(images) == 1
         with Image.open(
-            io.BytesIO(base64.b64decode(images[-1].split(",", 1)[1]))
+            io.BytesIO(base64.b64decode(images[0].split(",", 1)[1]))
         ) as sent:
             # Locate the actual synthetic mark in the submitted image, as the reader does.
             box = ImageOps.invert(sent.convert("RGB")).getbbox()
