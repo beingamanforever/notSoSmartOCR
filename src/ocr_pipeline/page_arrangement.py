@@ -787,8 +787,9 @@ def _is_grid_label(leaf: dict[str, Any]) -> bool:
         # A label caption rarely ends a sentence; this also keeps wrapped prose
         # lines (which do) from being mistaken for form field captions.
         return False
-    # "Federal Tax ID Number 123456789" already holds its value, as for inline captions.
-    return len(text.split()) <= GRID_LABEL_MAX_WORDS and not any(c.isdigit() for c in text)
+    # A caption ending in a number already holds its value ("Federal Tax ID Number 123456789");
+    # "SSN (last 4)" does not.
+    return len(text.split()) <= GRID_LABEL_MAX_WORDS and not text[-1].isdigit()
 
 
 def _looks_self_contained(region: dict[str, Any]) -> bool:
