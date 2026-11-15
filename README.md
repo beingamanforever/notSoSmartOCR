@@ -12,9 +12,9 @@ Text · Tables · Handwriting · Formulas · Checkboxes · Source-linked review
 
 </div>
 
-<a href="https://github.com/beingamanforever/notSoSmartOCR/raw/main/artifacts/readme/notsosmartocr-film.mp4"><img src="artifacts/readme/film-hook.gif" alt="A sideways page header that the reader first got wrong is scored 0.001, flagged, and fixed to SYSTEM ERROR" width="100%"></a>
+<a href="artifacts/readme/notsosmartocr-film.mp4"><img src="artifacts/readme/film-hook.gif" alt="A sideways page header that the reader first got wrong is scored 0.001, flagged, and fixed to SYSTEM ERROR" width="100%"></a>
 
-<p align="center"><a href="https://github.com/beingamanforever/notSoSmartOCR/raw/main/artifacts/readme/notsosmartocr-film.mp4"><b>▶ Watch the 87-second film, with sound</b></a></p>
+<p align="center"><a href="artifacts/readme/notsosmartocr-film.mp4"><b>▶ The full 87-second film, with sound (MP4)</b></a></p>
 
 ![One public page through the pipeline: the input page, every region typed and scored, calibrated confidence, the doubtful crops routed to an LLM, and human review](artifacts/readme/journey.png)
 
